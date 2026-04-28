@@ -1,0 +1,15 @@
+BEGIN;
+DROP INDEX IF EXISTS idx_recording_artifacts_storage_path;
+DROP INDEX IF EXISTS idx_recording_artifacts_workspace;
+DROP INDEX IF EXISTS idx_recording_artifacts_recording;
+DROP TABLE IF EXISTS recording_artifacts;
+DROP INDEX IF EXISTS idx_recordings_retry;
+ALTER TABLE recordings DROP COLUMN IF EXISTS next_retry_at;
+ALTER TABLE recordings DROP COLUMN IF EXISTS metadata;
+ALTER TABLE recordings DROP COLUMN IF EXISTS last_error;
+ALTER TABLE recordings DROP COLUMN IF EXISTS max_processing_attempts;
+ALTER TABLE recordings DROP COLUMN IF EXISTS processing_attempts;
+ALTER TABLE recordings DROP COLUMN IF EXISTS downloadable;
+ALTER TABLE recordings DROP COLUMN IF EXISTS integrity_sha256;
+ALTER TABLE recordings DROP COLUMN IF EXISTS strategy;
+COMMIT;

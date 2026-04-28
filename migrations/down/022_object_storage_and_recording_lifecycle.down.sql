@@ -1,0 +1,10 @@
+BEGIN;
+DROP INDEX IF EXISTS idx_recording_artifacts_lifecycle;
+DROP INDEX IF EXISTS idx_recordings_lifecycle;
+ALTER TABLE recording_artifacts DROP COLUMN IF EXISTS tier_updated_at;
+ALTER TABLE recording_artifacts DROP COLUMN IF EXISTS storage_class;
+ALTER TABLE recording_artifacts DROP COLUMN IF EXISTS storage_tier;
+ALTER TABLE recordings DROP COLUMN IF EXISTS tier_updated_at;
+ALTER TABLE recordings DROP COLUMN IF EXISTS storage_class;
+ALTER TABLE recordings DROP COLUMN IF EXISTS storage_tier;
+COMMIT;

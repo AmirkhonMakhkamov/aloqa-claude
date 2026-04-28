@@ -1,0 +1,121 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Aloqa design tokens. The rail and sidebar are always dark; the main
+ * content area is light. We expose tokens as CSS variables so the Tweaks
+ * panel (Phase 13) can swap accent / sidebar tone / density at runtime
+ * without a Tailwind rebuild.
+ */
+:root {
+  color-scheme: light;
+
+  /* Brand */
+  --accent:       #2454D8;
+  --accent-hover: #1B42B8;
+  --accent-dim:   rgba(36, 84, 216, 0.12);
+
+  /* Rail + sidebar (dark) */
+  --rail-bg: #111317;
+  --rail-w:  64px;
+  --sb-bg:   #1A1D24;
+  --sb-w:    248px;
+
+  /* Light main-surface hierarchy */
+  --bg:  #FFFFFF;
+  --bg2: #F5F7FA;
+  --bg3: #EEF1F6;
+
+  /* Lines */
+  --border: #E3E8F0;
+
+  /* Text */
+  --text:  #0D1117;
+  --text2: #4A5568;
+  --text3: #8A95A3;
+
+  /* Status */
+  --green:  #2ECC71;
+  --yellow: #F59E0B;
+  --red:    #EF4444;
+
+  /* Elevation */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.12);
+
+  /* Radii */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  /* Chat density (Tweaks-panel-controlled) */
+  --msg-pad: 4px;
+}
+
+html,
+body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+}
+
+body {
+  font-feature-settings: "ss01", "cv11";
+}
+
+/* Main-surface scrollbars (light) */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background-color: rgba(13, 17, 23, 0.14);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(13, 17, 23, 0.28);
+}
+
+/* Rail + sidebar use light-on-dark scrollbars so they don't vanish. */
+.dark-surface ::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.14);
+}
+.dark-surface ::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(255, 255, 255, 0.28);
+}
+
+button {
+  cursor: pointer;
+}
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+::selection {
+  background: var(--accent-dim);
+  color: var(--text);
+}
+
+/* contenteditable composer placeholder */
+[contenteditable][data-placeholder]:empty::before {
+  content: attr(data-placeholder);
+  color: var(--text3);
+  pointer-events: none;
+}
+
+/* A small utility for speaking-detection borders during calls. */
+@keyframes aloqa-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(46, 204, 113, 0.55); }
+  50%      { box-shadow: 0 0 0 6px rgba(46, 204, 113, 0); }
+}
+.aloqa-speaking {
+  animation: aloqa-pulse 1.3s ease-out infinite;
+}

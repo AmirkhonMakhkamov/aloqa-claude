@@ -7,6 +7,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"aloqa/internal/domain/entity"
 	"aloqa/internal/middleware"
 	"aloqa/internal/pkg/id"
 	"aloqa/internal/pkg/pagination"
@@ -77,6 +78,28 @@ func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeOK(w, page)
+}
+
+func (h *MessageHandler) ListPinned(w http.ResponseWriter, r *http.Request) {
+	channelID, err := id.Parse(chi.URLParam(r, "channelID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+
+	messages, err := h.svc.GetPinnedMessages(r.Context(), channelID, userID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	if messages == nil {
+		messages = []entity.Message{}
+	}
+
+	writeOK(w, messages)
 }
 
 func (h *MessageHandler) ListThread(w http.ResponseWriter, r *http.Request) {

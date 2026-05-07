@@ -243,6 +243,7 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 			r.Route("/messages", func(r chi.Router) {
 				r.Post("/", deps.Messages.Send)
 				r.Get("/", deps.Messages.List)
+				r.Get("/pinned", deps.Messages.ListPinned)
 
 				r.Route("/{messageID}", func(r chi.Router) {
 					r.Put("/", deps.Messages.Edit)

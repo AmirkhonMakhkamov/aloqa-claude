@@ -646,6 +646,22 @@ func (s *Service) GetMessages(ctx context.Context, channelID, userID uuid.UUID, 
 	return buildMessagePage(items, p.Limit), nil
 }
 
+// GetPinnedMessages returns all pinned messages in a channel after verifying
+// membership. Unpaginated by design — pin sets are expected to stay small.
+func (s *Service) GetPinnedMessages(ctx context.Context, channelID, userID uuid.UUID) ([]entity.Message, error) {
+	if _, err := s.GetAccessibleChannel(ctx, channelID, userID); err != nil {
+		return nil, err
+	}
+
+	items, err := s.messages.ListPinned(ctx, channelID)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to list pinned messages", "channel_id", channelID, "error", err)
+		return nil, cerrors.Internal("failed to list pinned messages", err)
+	}
+
+	return items, nil
+}
+
 // GetThreadReplies returns paginated replies to a parent message.
 func (s *Service) GetThreadReplies(ctx context.Context, parentID, userID uuid.UUID, p pagination.Params) (pagination.Page[entity.Message], error) {
 	p.Normalize()

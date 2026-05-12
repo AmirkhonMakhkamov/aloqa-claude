@@ -61,6 +61,24 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 	writeCreated(w, msg)
 }
 
+func (h *MessageHandler) Get(w http.ResponseWriter, r *http.Request) {
+	messageID, err := id.Parse(chi.URLParam(r, "messageID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+
+	msg, err := h.svc.GetMessage(r.Context(), messageID, userID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, msg)
+}
+
 func (h *MessageHandler) List(w http.ResponseWriter, r *http.Request) {
 	channelID, err := id.Parse(chi.URLParam(r, "channelID"))
 	if err != nil {

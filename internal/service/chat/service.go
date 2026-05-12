@@ -627,6 +627,15 @@ func (s *Service) SendMessage(
 	return msg, nil
 }
 
+// GetMessage returns a single message by ID after verifying the caller can view its channel.
+func (s *Service) GetMessage(ctx context.Context, messageID, userID uuid.UUID) (*entity.Message, error) {
+	msg, _, err := s.requireMessageAccess(ctx, messageID, userID)
+	if err != nil {
+		return nil, err
+	}
+	return msg, nil
+}
+
 // GetMessages returns paginated messages for a channel after verifying membership.
 func (s *Service) GetMessages(ctx context.Context, channelID, userID uuid.UUID, p pagination.Params) (pagination.Page[entity.Message], error) {
 	p.Normalize()

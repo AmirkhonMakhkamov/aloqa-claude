@@ -246,6 +246,7 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 				r.Get("/pinned", deps.Messages.ListPinned)
 
 				r.Route("/{messageID}", func(r chi.Router) {
+					r.Get("/", deps.Messages.Get)
 					r.Put("/", deps.Messages.Edit)
 					r.Delete("/", deps.Messages.Delete)
 					r.Get("/thread", deps.Messages.ListThread)

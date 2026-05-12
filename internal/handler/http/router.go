@@ -150,6 +150,10 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 func mountWorkspaceScopedRoutes(r chi.Router, deps RouterDeps) {
 	mountSharedScopedRoutes(r, deps)
 
+	// Non-admin workspace member list — used by the client to render DM
+	// counterparts and the "New DM" picker without admin permissions.
+	r.Get("/members", deps.Account.ListWorkspaceMembers)
+
 	// Admin (workspace management).
 	r.Route("/admin", func(r chi.Router) {
 		r.Get("/members", deps.Admin.ListMembers)

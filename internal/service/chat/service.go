@@ -386,7 +386,41 @@ func (s *Service) UpdateChannel(ctx context.Context, channelID, userID uuid.UUID
 // GetChannel retrieves a channel by ID. Public channels are visible to all
 // workspace members; private/DM channels require membership.
 func (s *Service) GetChannel(ctx context.Context, channelID, userID uuid.UUID) (*entity.Channel, error) {
-	return s.GetAccessibleChannel(ctx, channelID, userID)
+	ch, err := s.GetAccessibleChannel(ctx, channelID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.hydrateDMMembers(ctx, ch); err != nil {
+		return nil, err
+	}
+	return ch, nil
+}
+
+// hydrateDMMembers populates Channel.Members with the channel's member user
+// IDs when the channel is a DM or group DM. Other channel types are left
+// untouched so the response shape is unchanged for them. Errors in fetching
+// members are surfaced; the field is left nil on error rather than partially
+// populated.
+func (s *Service) hydrateDMMembers(ctx context.Context, channels ...*entity.Channel) error {
+	for _, ch := range channels {
+		if ch == nil {
+			continue
+		}
+		if ch.Type != entity.ChannelTypeDM && ch.Type != entity.ChannelTypeGroupDM {
+			continue
+		}
+		members, err := s.channels.ListMembers(ctx, ch.ID)
+		if err != nil {
+			slog.ErrorContext(ctx, "failed to list DM channel members", "channel_id", ch.ID, "error", err)
+			return cerrors.Internal("failed to list DM channel members", err)
+		}
+		userIDs := make([]uuid.UUID, 0, len(members))
+		for _, m := range members {
+			userIDs = append(userIDs, m.UserID)
+		}
+		ch.Members = userIDs
+	}
+	return nil
 }
 
 // ListChannels returns channels the user is a member of in a workspace.
@@ -394,18 +428,28 @@ func (s *Service) GetChannel(ctx context.Context, channelID, userID uuid.UUID) (
 // suspension, etc.); otherwise membership from channels.ListByUser is
 // authoritative.
 func (s *Service) ListChannels(ctx context.Context, workspaceID, userID uuid.UUID) ([]entity.Channel, error) {
+	var channels []entity.Channel
 	if s.access != nil {
-		channels, err := s.access.ListChannels(ctx, workspaceID, userID, accesspolicy.CapabilityView)
+		result, err := s.access.ListChannels(ctx, workspaceID, userID, accesspolicy.CapabilityView)
 		if err != nil {
 			return nil, err
 		}
-		return channels, nil
+		channels = result
+	} else {
+		result, err := s.channels.ListByUser(ctx, workspaceID, userID)
+		if err != nil {
+			slog.ErrorContext(ctx, "failed to list user channels", "workspace_id", workspaceID, "user_id", userID, "error", err)
+			return nil, cerrors.Internal("failed to list channels", err)
+		}
+		channels = result
 	}
 
-	channels, err := s.channels.ListByUser(ctx, workspaceID, userID)
-	if err != nil {
-		slog.ErrorContext(ctx, "failed to list user channels", "workspace_id", workspaceID, "user_id", userID, "error", err)
-		return nil, cerrors.Internal("failed to list channels", err)
+	ptrs := make([]*entity.Channel, len(channels))
+	for i := range channels {
+		ptrs[i] = &channels[i]
+	}
+	if err := s.hydrateDMMembers(ctx, ptrs...); err != nil {
+		return nil, err
 	}
 	return channels, nil
 }
@@ -1016,6 +1060,9 @@ func (s *Service) GetOrCreateDM(ctx context.Context, workspaceID, userA, userB u
 				return nil, err
 			}
 		}
+		if err := s.hydrateDMMembers(ctx, ch); err != nil {
+			return nil, err
+		}
 		return ch, nil
 	}
 
@@ -1096,6 +1143,7 @@ func (s *Service) GetOrCreateDM(ctx context.Context, workspaceID, userA, userB u
 		})
 	}
 	slog.InfoContext(ctx, "DM channel created", "channel_id", ch.ID, "user_a", userA, "user_b", userB)
+	ch.Members = []uuid.UUID{userA, userB}
 	return ch, nil
 }
 

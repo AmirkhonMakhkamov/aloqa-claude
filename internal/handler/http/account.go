@@ -124,3 +124,25 @@ func (h *AccountHandler) GetPersonalWorkspace(w http.ResponseWriter, r *http.Req
 
 	writeOK(w, workspace)
 }
+
+// ListWorkspaceMembers returns the workspace member list to any member of the
+// workspace (non-admin). Used by the web client to render DM-counterpart
+// avatars and to power the "New DM" picker without requiring admin permissions.
+func (h *AccountHandler) ListWorkspaceMembers(w http.ResponseWriter, r *http.Request) {
+	workspaceID, err := workspaceIDFromRequest(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	p := paginationFromQuery(r)
+
+	members, err := h.svc.ListWorkspaceMembers(r.Context(), workspaceID, userID, p)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, members)
+}

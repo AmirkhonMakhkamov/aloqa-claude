@@ -20,6 +20,7 @@ import (
 	"aloqa/internal/domain/repository"
 	"aloqa/internal/pkg/cerrors"
 	"aloqa/internal/pkg/id"
+	"aloqa/internal/pkg/pagination"
 	"aloqa/internal/pkg/validate"
 )
 
@@ -322,6 +323,20 @@ func (s *Service) ListWorkspaces(ctx context.Context, userID uuid.UUID) ([]entit
 		workspaces[i].Kind = s.workspaceKind(workspaces[i], userID)
 	}
 	return workspaces, nil
+}
+
+// ListWorkspaceMembers returns the paginated list of members of the given
+// workspace, callable by any member of that workspace (not admin-gated).
+// This is the read-only sibling of admin.Service.ListMembers, intended for
+// clients that need to render member avatars / open a DM with another member.
+func (s *Service) ListWorkspaceMembers(ctx context.Context, workspaceID, actorID uuid.UUID, p pagination.Params) ([]entity.WorkspaceMember, error) {
+	if _, err := s.workspaces.GetMember(ctx, workspaceID, actorID); err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return nil, cerrors.Forbidden("user is not a member of this workspace")
+		}
+		return nil, cerrors.Internal("failed to verify workspace membership", err)
+	}
+	return s.workspaces.ListMembers(ctx, workspaceID, p)
 }
 
 func (s *Service) GetWorkspace(ctx context.Context, workspaceID, userID uuid.UUID) (*entity.Workspace, error) {

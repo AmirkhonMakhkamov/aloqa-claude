@@ -33,6 +33,10 @@ type Channel struct {
 	Archived    bool        `json:"archived"`
 	CreatedAt   time.Time   `json:"created_at"`
 	UpdatedAt   time.Time   `json:"updated_at"`
+	// Members is populated only for DM and group DM channels so the client can
+	// resolve the counterpart user(s) without an extra round-trip per row in
+	// the sidebar. Kept omitempty so non-DM channels keep their existing shape.
+	Members []uuid.UUID `json:"members,omitempty"`
 }
 
 type ChannelMember struct {

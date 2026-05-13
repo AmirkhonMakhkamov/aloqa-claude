@@ -51,6 +51,12 @@ func TestCanSubscribeAuthorizesKnownRoomTypes(t *testing.T) {
 	if !handler.canSubscribe(ctx, client, "aloqa.signal."+userID.String()) {
 		t.Fatalf("own signal room subscription was denied")
 	}
+	if !handler.canSubscribe(ctx, client, "aloqa.ws."+userID.String()+".events") {
+		t.Fatalf("own user events subscription was denied")
+	}
+	if handler.canSubscribe(ctx, client, "aloqa.ws."+otherUserID.String()+".events") {
+		t.Fatalf("user events subscription for another user was allowed")
+	}
 	if handler.canSubscribe(ctx, client, "channel:"+privateChannelID.String()) {
 		t.Fatalf("private channel subscription without channel membership was allowed")
 	}
@@ -76,6 +82,9 @@ func TestCanSubscribeFailsClosedWithoutChatService(t *testing.T) {
 	}
 	if !handler.canSubscribe(ctx, client, "aloqa.signal."+userID.String()) {
 		t.Fatalf("own signal subscription should not require chat service")
+	}
+	if !handler.canSubscribe(ctx, client, "aloqa.ws."+userID.String()+".events") {
+		t.Fatalf("own user events subscription should not require chat service")
 	}
 }
 

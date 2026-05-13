@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -268,7 +269,15 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 						ELSE 0
 					END AS score,
 				si.created_at,
-				si.updated_at
+				si.updated_at,
+				u.id AS user_id,
+				u.email AS user_email,
+				u.display_name AS user_display_name,
+				u.avatar_url AS user_avatar_url,
+				u.status AS user_status,
+				u.locale AS user_locale,
+				u.created_at AS user_created_at,
+				u.updated_at AS user_updated_at
 			FROM search_index si
 			CROSS JOIN search_query
 			LEFT JOIN messages m
@@ -346,6 +355,14 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 			score,
 			created_at,
 			updated_at,
+			user_id,
+			user_email,
+			user_display_name,
+			user_avatar_url,
+			user_status,
+			user_locale,
+			user_created_at,
+			user_updated_at,
 			COUNT(*) OVER()
 		FROM ranked
 			ORDER BY score DESC, updated_at DESC, created_at DESC
@@ -373,6 +390,16 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 	total := 0
 	for rows.Next() {
 		var result search.Result
+		var (
+			userID          uuid.NullUUID
+			userEmail       sql.NullString
+			userDisplayName sql.NullString
+			userAvatarURL   sql.NullString
+			userStatus      sql.NullString
+			userLocale      sql.NullString
+			userCreatedAt   sql.NullTime
+			userUpdatedAt   sql.NullTime
+		)
 		if err := rows.Scan(
 			&result.Type,
 			&result.ID,
@@ -383,9 +410,29 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 			&result.Score,
 			&result.CreatedAt,
 			&result.UpdatedAt,
+			&userID,
+			&userEmail,
+			&userDisplayName,
+			&userAvatarURL,
+			&userStatus,
+			&userLocale,
+			&userCreatedAt,
+			&userUpdatedAt,
 			&total,
 		); err != nil {
 			return nil, fmt.Errorf("postgres: scan search result: %w", err)
+		}
+		if userID.Valid {
+			result.User = &entity.User{
+				ID:          userID.UUID,
+				Email:       userEmail.String,
+				DisplayName: userDisplayName.String,
+				AvatarURL:   userAvatarURL.String,
+				Status:      entity.UserStatus(userStatus.String),
+				Locale:      userLocale.String,
+				CreatedAt:   userCreatedAt.Time,
+				UpdatedAt:   userUpdatedAt.Time,
+			}
 		}
 		results = append(results, result)
 	}
@@ -542,6 +589,72 @@ func (r *SearchRepo) ReindexWorkspace(ctx context.Context, workspaceID uuid.UUID
 		return err
 	}
 	return nil
+}
+
+func (r *SearchRepo) BackfillWorkspaceMembers(ctx context.Context, workspaceID uuid.UUID) (int, error) {
+	query := `
+		INSERT INTO search_index_jobs (
+			id, workspace_id, resource_type, resource_id, operation, channel_id,
+			title, content, metadata, created_at, updated_at, available_at,
+			locked_at, processed_at, attempts, max_attempts, status, last_error
+		)
+		SELECT
+			gen_random_uuid(),
+			wm.workspace_id,
+			'user',
+			u.id,
+			$2,
+			NULL,
+			u.display_name,
+			TRIM(CONCAT(u.display_name, ' ', u.email)),
+			jsonb_build_object('email', u.email),
+			wm.joined_at,
+			u.updated_at,
+			NOW(),
+			NULL,
+			NULL,
+			0,
+			$3,
+			$4,
+			NULL
+		FROM workspace_members wm
+		INNER JOIN users u ON u.id = wm.user_id
+		WHERE wm.workspace_id = $1
+			AND u.status = 'active'
+			AND NOT EXISTS (
+				SELECT 1
+				FROM search_index si
+				WHERE si.workspace_id = wm.workspace_id
+					AND si.resource_type = 'user'
+					AND si.resource_id = u.id
+			)
+		ON CONFLICT (workspace_id, resource_type, resource_id) DO UPDATE
+		SET operation = EXCLUDED.operation,
+			channel_id = EXCLUDED.channel_id,
+			title = EXCLUDED.title,
+			content = EXCLUDED.content,
+			metadata = EXCLUDED.metadata,
+			created_at = EXCLUDED.created_at,
+			updated_at = EXCLUDED.updated_at,
+			available_at = NOW(),
+			locked_at = NULL,
+			processed_at = NULL,
+			attempts = 0,
+			max_attempts = EXCLUDED.max_attempts,
+			status = $4,
+			last_error = NULL`
+
+	tag, err := r.pool.Exec(ctx,
+		query,
+		workspaceID,
+		searchJobOperationUpsert,
+		r.maxAttempts,
+		searchJobStatusPending,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: backfill workspace member search jobs: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
 }
 
 func (r *SearchRepo) claimPendingJobs(ctx context.Context, batchSize int) ([]searchJob, error) {

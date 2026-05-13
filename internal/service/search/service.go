@@ -2,6 +2,7 @@ package search
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"aloqa/internal/domain/entity"
 	"aloqa/internal/domain/repository"
 	"aloqa/internal/pkg/cerrors"
+	"aloqa/internal/pkg/pagination"
 	"aloqa/internal/security/accesspolicy"
 )
 
@@ -25,15 +27,16 @@ const (
 
 // Result represents a single search result with type, ID, and score.
 type Result struct {
-	Type        string     `json:"type"` // "message", "file", "channel", "user"
-	ID          uuid.UUID  `json:"id"`
-	WorkspaceID uuid.UUID  `json:"workspace_id"`
-	ChannelID   *uuid.UUID `json:"channel_id,omitempty"`
-	Title       string     `json:"title"`
-	Snippet     string     `json:"snippet"`
-	Score       float64    `json:"score"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	Type        string       `json:"type"` // "message", "file", "channel", "user"
+	ID          uuid.UUID    `json:"id"`
+	WorkspaceID uuid.UUID    `json:"workspace_id"`
+	ChannelID   *uuid.UUID   `json:"channel_id,omitempty"`
+	Title       string       `json:"title"`
+	Snippet     string       `json:"snippet"`
+	Score       float64      `json:"score"`
+	CreatedAt   time.Time    `json:"created_at"`
+	UpdatedAt   time.Time    `json:"updated_at"`
+	User        *entity.User `json:"user,omitempty"`
 }
 
 // SearchResults is a paginated list of search results.
@@ -49,7 +52,7 @@ type Params struct {
 	WorkspaceID uuid.UUID  `json:"workspace_id"`
 	ChannelID   *uuid.UUID `json:"channel_id,omitempty"`
 	UserID      *uuid.UUID `json:"user_id,omitempty"`
-	Type        string     `json:"type,omitempty"` // "message", "file", "channel", ""=all
+	Type        string     `json:"type,omitempty"` // "message", "file", "channel", "user", ""=all
 	DateFrom    *time.Time `json:"date_from,omitempty"`
 	DateTo      *time.Time `json:"date_to,omitempty"`
 	Limit       int        `json:"limit"`
@@ -75,6 +78,14 @@ type Document struct {
 type Indexer interface {
 	EnqueueUpsert(ctx context.Context, doc Document) error
 	EnqueueDelete(ctx context.Context, workspaceID uuid.UUID, resourceType ResourceType, resourceID uuid.UUID) error
+}
+
+type workspaceReindexer interface {
+	ReindexWorkspace(ctx context.Context, workspaceID uuid.UUID) error
+}
+
+type workspaceMemberBackfiller interface {
+	BackfillWorkspaceMembers(ctx context.Context, workspaceID uuid.UUID) (int, error)
 }
 
 // Searcher executes search queries against the search backend.
@@ -149,6 +160,7 @@ func (s *Service) Search(ctx context.Context, params Params) (*SearchResults, er
 		if err := s.requireWorkspaceMember(ctx, params.WorkspaceID, *params.UserID); err != nil {
 			return nil, err
 		}
+		params.AllowUserResults = true
 		if params.ChannelID != nil {
 			if err := s.requireChannelAccess(ctx, *params.ChannelID, *params.UserID); err != nil {
 				return nil, err
@@ -298,6 +310,62 @@ func (s *Service) DeleteUserFromWorkspace(ctx context.Context, workspaceID, user
 		return nil
 	}
 	return s.indexer.EnqueueDelete(ctx, workspaceID, ResourceTypeUser, userID)
+}
+
+func (s *Service) BackfillWorkspaceMembers(ctx context.Context, workspaceID uuid.UUID) (int, error) {
+	if s.indexer == nil {
+		return 0, cerrors.Unavailable("search indexing is not configured")
+	}
+	if backfiller, ok := s.indexer.(workspaceMemberBackfiller); ok {
+		return backfiller.BackfillWorkspaceMembers(ctx, workspaceID)
+	}
+	if s.members == nil {
+		return 0, cerrors.Unavailable("workspace membership repository is not configured")
+	}
+
+	const batchSize = pagination.MaxLimit
+	var (
+		cursor uuid.UUID
+		count  int
+	)
+	for {
+		members, err := s.members.ListMembers(ctx, workspaceID, pagination.Params{
+			Cursor: cursor,
+			Limit:  batchSize,
+		})
+		if err != nil {
+			return count, cerrors.Internal("failed to list workspace members for search backfill", err)
+		}
+		if len(members) == 0 {
+			return count, nil
+		}
+		for _, member := range members {
+			if member.User == nil {
+				return count, cerrors.Internal("workspace member user details are required for search backfill", errors.New("workspace member user details not loaded"))
+			}
+			user := member.User
+			if err := s.IndexUser(ctx, workspaceID, user.ID, user.DisplayName, user.Email, user.CreatedAt, user.UpdatedAt); err != nil {
+				return count, err
+			}
+			count++
+		}
+		if len(members) < batchSize {
+			return count, nil
+		}
+		nextCursor := members[len(members)-1].ID
+		if nextCursor == uuid.Nil || nextCursor == cursor {
+			return count, nil
+		}
+		cursor = nextCursor
+	}
+}
+
+func (s *Service) ReindexWorkspace(ctx context.Context, workspaceID uuid.UUID) error {
+	reindexer, ok := s.indexer.(workspaceReindexer)
+	if !ok || reindexer == nil {
+		return cerrors.Unavailable("search reindexing is not configured")
+	}
+	return reindexer.ReindexWorkspace(ctx, workspaceID)
 }
 
 func (s *Service) filterAuthorizedResults(ctx context.Context, results []Result, userID uuid.UUID) []Result {

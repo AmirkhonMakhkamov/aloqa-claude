@@ -297,6 +297,7 @@ export interface SearchResult {
   score: number;
   created_at: ISODate;
   updated_at: ISODate;
+  user?: User;
 }
 
 // Envelope returned by GET /workspaces/{w}/search.

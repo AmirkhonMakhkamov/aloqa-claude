@@ -126,6 +126,11 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 		// File downloads (authenticated).
 		r.Get("/files/*", deps.Files.Download)
 
+		r.Route("/api/v1/admin", func(r chi.Router) {
+			r.Post("/search/reindex", deps.Admin.ReindexSearch)
+			r.Post("/search/backfill-users", deps.Admin.BackfillSearchUsers)
+		})
+
 		// Workspace catalog plus workspace-scoped collaboration routes.
 		r.Route("/api/v1/workspaces", func(r chi.Router) {
 			r.Get("/", deps.Account.ListWorkspaces)

@@ -383,6 +383,11 @@ func (s *Service) GetOrCreatePersonalWorkspace(ctx context.Context, userID uuid.
 				if err := s.workspaces.AddMember(ctx, member); err != nil {
 					return nil, cerrors.Internal("failed to restore personal workspace membership", err)
 				}
+				if s.search != nil {
+					if err := s.search.IndexUser(ctx, workspace.ID, user.ID, user.DisplayName, user.Email, user.CreatedAt, user.UpdatedAt); err != nil {
+						slog.ErrorContext(ctx, "failed to enqueue restored personal workspace user search index", "workspace_id", workspace.ID, "user_id", user.ID, "error", err)
+					}
+				}
 			} else {
 				return nil, cerrors.Internal("failed to verify personal workspace membership", memberErr)
 			}

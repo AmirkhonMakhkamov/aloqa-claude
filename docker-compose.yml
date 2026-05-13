@@ -1,0 +1,54 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: aloqa-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aloqa
+      POSTGRES_PASSWORD: aloqa
+      POSTGRES_DB: aloqa
+    ports:
+      - "5435:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aloqa -d aloqa"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: aloqa-redis
+    restart: unless-stopped
+    ports:
+      - "6381:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: aloqa-nats
+    restart: unless-stopped
+    # -sd /data persists JetStream state across container restarts. Without it
+    # JetStream writes to the container's ephemeral /tmp, so a restart loses
+    # every stream and the realtime outbox stalls with
+    # "nats: no response from stream" until the backend itself restarts.
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "4223:4222"
+      - "8223:8222"
+    volumes:
+      - nats-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  postgres-data:
+  nats-data:

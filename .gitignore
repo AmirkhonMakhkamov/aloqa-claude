@@ -2,3 +2,7 @@
 .claude/
 /storage/*
 !/storage/.gitkeep
+.env
+.env.local
+/bin/
+/recording-work/

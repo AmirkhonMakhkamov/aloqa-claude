@@ -45,29 +45,30 @@ const (
 )
 
 type CallSettings struct {
-	WaitingRoom       bool `json:"waiting_room"`
-	MuteOnJoin        bool `json:"mute_on_join"`
-	Recording         bool `json:"recording"`
-	ScreenSharing     bool `json:"screen_sharing"`
-	Chat              bool `json:"chat"`
-	BreakoutRooms     bool `json:"breakout_rooms"`
-	MaxParticipants   int  `json:"max_participants"`
-	E2EE              bool `json:"e2ee"`
-	Watermark         bool `json:"watermark"`
+	WaitingRoom     bool `json:"waiting_room"`
+	MuteOnJoin      bool `json:"mute_on_join"`
+	Recording       bool `json:"recording"`
+	ScreenSharing   bool `json:"screen_sharing"`
+	Chat            bool `json:"chat"`
+	BreakoutRooms   bool `json:"breakout_rooms"`
+	MaxParticipants int  `json:"max_participants"`
+	E2EE            bool `json:"e2ee"`
+	Watermark       bool `json:"watermark"`
 }
 
 type Call struct {
-	ID          uuid.UUID    `json:"id"`
-	WorkspaceID uuid.UUID    `json:"workspace_id"`
-	ChannelID   *uuid.UUID   `json:"channel_id,omitempty"`
-	Type        CallType     `json:"type"`
-	Status      CallStatus   `json:"status"`
-	Title       string       `json:"title,omitempty"`
-	CreatedBy   uuid.UUID    `json:"created_by"`
-	Settings    CallSettings `json:"settings"`
-	StartedAt   *time.Time   `json:"started_at,omitempty"`
-	EndedAt     *time.Time   `json:"ended_at,omitempty"`
-	CreatedAt   time.Time    `json:"created_at"`
+	ID              uuid.UUID    `json:"id"`
+	WorkspaceID     uuid.UUID    `json:"workspace_id"`
+	ChannelID       *uuid.UUID   `json:"channel_id,omitempty"`
+	Type            CallType     `json:"type"`
+	Status          CallStatus   `json:"status"`
+	Title           string       `json:"title,omitempty"`
+	CreatedBy       uuid.UUID    `json:"created_by"`
+	ScheduledCallID *uuid.UUID   `json:"scheduled_call_id,omitempty"`
+	Settings        CallSettings `json:"settings"`
+	StartedAt       *time.Time   `json:"started_at,omitempty"`
+	EndedAt         *time.Time   `json:"ended_at,omitempty"`
+	CreatedAt       time.Time    `json:"created_at"`
 }
 
 type CallParticipant struct {

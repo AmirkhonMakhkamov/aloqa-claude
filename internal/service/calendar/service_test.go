@@ -3,6 +3,8 @@ package calendar
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -10,10 +12,13 @@ import (
 
 	"aloqa/internal/domain/entity"
 	"aloqa/internal/domain/event"
+	"aloqa/internal/domain/repository"
 	"aloqa/internal/pkg/cerrors"
 	"aloqa/internal/pkg/id"
 	"aloqa/internal/pkg/pagination"
 	calrrule "aloqa/internal/pkg/rrule"
+	"aloqa/internal/platform/txscope"
+	searchsvc "aloqa/internal/service/search"
 )
 
 func TestStartCallFromEventIsIdempotent(t *testing.T) {
@@ -50,6 +55,82 @@ func TestStartCallFromEventIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestStartCallFromEventRollsBackWhenLinkFails(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	organizerID := uuid.New()
+	eventID := uuid.New()
+	txManager := newCalendarCallTxManager(&entity.CalendarEvent{
+		ID:          eventID,
+		WorkspaceID: workspaceID,
+		OrganizerID: organizerID,
+		Title:       "Planning",
+	})
+	txManager.linkErr = errors.New("link failed")
+	svc := NewService(txManager.calendars.fakeCalendarRepo, fakeMembers{members: map[[2]uuid.UUID]bool{{workspaceID, organizerID}: true}}, nil, noopPublisher{})
+	svc.SetTransactionManager(txManager)
+
+	if _, err := svc.StartCallFromEvent(ctx, workspaceID, eventID, organizerID); err == nil {
+		t.Fatalf("StartCallFromEvent error = nil, want link failure")
+	}
+	if len(txManager.calls.calls) != 0 {
+		t.Fatalf("calls persisted after rollback = %d, want 0", len(txManager.calls.calls))
+	}
+	if got := txManager.calendars.events[eventID].CallID; got != nil {
+		t.Fatalf("event call_id after rollback = %s, want nil", *got)
+	}
+}
+
+func TestStartCallFromEventConcurrentRequestsReturnOneActiveCall(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	organizerID := uuid.New()
+	eventID := uuid.New()
+	txManager := newCalendarCallTxManager(&entity.CalendarEvent{
+		ID:          eventID,
+		WorkspaceID: workspaceID,
+		OrganizerID: organizerID,
+		Title:       "Planning",
+	})
+	svc := NewService(txManager.calendars.fakeCalendarRepo, fakeMembers{members: map[[2]uuid.UUID]bool{{workspaceID, organizerID}: true}}, nil, noopPublisher{})
+	svc.SetTransactionManager(txManager)
+
+	const workers = 8
+	var wg sync.WaitGroup
+	results := make([]uuid.UUID, workers)
+	errs := make([]error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			call, err := svc.StartCallFromEvent(ctx, workspaceID, eventID, organizerID)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			results[i] = call.ID
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("worker %d StartCallFromEvent error = %v", i, err)
+		}
+	}
+	for i := 1; i < workers; i++ {
+		if results[i] != results[0] {
+			t.Fatalf("worker %d call ID = %s, want %s", i, results[i], results[0])
+		}
+	}
+	if len(txManager.calls.calls) != 1 {
+		t.Fatalf("calls persisted = %d, want 1", len(txManager.calls.calls))
+	}
+	call := txManager.calls.calls[results[0]]
+	if call == nil || call.ScheduledCallID == nil || *call.ScheduledCallID != eventID {
+		t.Fatalf("scheduled_call_id was not linked to event")
+	}
+}
+
 func TestUpsertRsvpPublishesRsvpEvent(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -79,26 +160,30 @@ func TestUpsertRsvpPublishesRsvpEvent(t *testing.T) {
 		t.Fatalf("UpsertRsvp error = %v", err)
 	}
 	if len(pub.events) != 2 {
-		t.Fatalf("published events = %d, want workspace + user event", len(pub.events))
+		t.Fatalf("published events = %d, want organizer + attendee user events", len(pub.events))
 	}
 	if pub.events[0].Type != event.TypeCalendarAttendeeRsvpUpdated {
 		t.Fatalf("event type = %s", pub.events[0].Type)
 	}
-	if pub.subjects[1] != userEventsSubject(workspaceID, userID) {
-		t.Fatalf("user subject = %q, want %q", pub.subjects[1], userEventsSubject(workspaceID, userID))
+	if pub.subjects[1] != userEventsSubject(userID) {
+		t.Fatalf("user subject = %q, want %q", pub.subjects[1], userEventsSubject(userID))
 	}
 }
 
-func TestListAndDispatchRemindersDeduplicates(t *testing.T) {
+func TestListAndDispatchRemindersMarksDispatchedForRestartSafety(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
 	userID := uuid.New()
 	eventID := uuid.New()
+	reminderID := uuid.New()
 	now := time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC)
 	repo := &fakeCalendarRepo{
 		reminders: []entity.ReminderTarget{{
+			ReminderID:    reminderID,
 			UserID:        userID,
 			OffsetMinutes: 10,
+			Channel:       entity.ReminderChannelInApp,
+			FireAt:        now,
 			Occurrence: entity.EventOccurrence{
 				CalendarEvent: entity.CalendarEvent{
 					ID:          eventID,
@@ -116,14 +201,67 @@ func TestListAndDispatchRemindersDeduplicates(t *testing.T) {
 	if err := svc.ListAndDispatchReminders(ctx, now); err != nil {
 		t.Fatalf("first dispatch error = %v", err)
 	}
-	if err := svc.ListAndDispatchReminders(ctx, now.Add(time.Second)); err != nil {
-		t.Fatalf("second dispatch error = %v", err)
+	restarted := NewService(repo, fakeMembers{}, nil, pub)
+	if err := restarted.ListAndDispatchReminders(ctx, now.Add(time.Second)); err != nil {
+		t.Fatalf("dispatch after restart error = %v", err)
 	}
 	if len(pub.events) != 1 {
 		t.Fatalf("published reminder events = %d, want 1", len(pub.events))
 	}
 	if pub.events[0].Type != event.TypeCalendarEventReminderFired {
 		t.Fatalf("event type = %s", pub.events[0].Type)
+	}
+	if _, ok := repo.dispatched[reminderID]; !ok {
+		t.Fatalf("reminder was not marked dispatched")
+	}
+}
+
+func TestListAndDispatchRemindersConcurrentWorkersDoNotDoubleFire(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	userID := uuid.New()
+	eventID := uuid.New()
+	reminderID := uuid.New()
+	now := time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC)
+	repo := &claimingReminderRepo{fakeCalendarRepo: fakeCalendarRepo{
+		reminders: []entity.ReminderTarget{{
+			ReminderID:    reminderID,
+			UserID:        userID,
+			OffsetMinutes: 10,
+			Channel:       entity.ReminderChannelInApp,
+			FireAt:        now,
+			Occurrence: entity.EventOccurrence{
+				CalendarEvent: entity.CalendarEvent{
+					ID:          eventID,
+					WorkspaceID: workspaceID,
+					OrganizerID: userID,
+					Title:       "Standup",
+				},
+				InstanceAt: now.Add(10 * time.Minute),
+			},
+		}},
+	}}
+	pub := &capturingPublisher{}
+	svcA := NewService(repo, fakeMembers{}, nil, pub)
+	svcB := NewService(repo, fakeMembers{}, nil, pub)
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i, svc := range []*Service{svcA, svcB} {
+		wg.Add(1)
+		go func(i int, svc *Service) {
+			defer wg.Done()
+			errs[i] = svc.ListAndDispatchReminders(ctx, now)
+		}(i, svc)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("worker %d dispatch error = %v", i, err)
+		}
+	}
+	if len(pub.events) != 1 {
+		t.Fatalf("published reminder events = %d, want 1", len(pub.events))
 	}
 }
 
@@ -172,9 +310,11 @@ func TestListEventsKeepsOriginatorTimezoneAcrossBerlinDST(t *testing.T) {
 }
 
 type fakeCalendarRepo struct {
-	calendars []entity.UserCalendar
-	events    map[uuid.UUID]*entity.CalendarEvent
-	reminders []entity.ReminderTarget
+	mu         sync.Mutex
+	calendars  []entity.UserCalendar
+	events     map[uuid.UUID]*entity.CalendarEvent
+	reminders  []entity.ReminderTarget
+	dispatched map[uuid.UUID]time.Time
 }
 
 func (r *fakeCalendarRepo) ListUserCalendars(context.Context, uuid.UUID, uuid.UUID) ([]entity.UserCalendar, error) {
@@ -218,6 +358,67 @@ func (r *fakeCalendarRepo) ListUpcoming(context.Context, uuid.UUID, uuid.UUID, i
 func (r *fakeCalendarRepo) ListEventsForReminderFanout(context.Context, time.Duration) ([]entity.ReminderTarget, error) {
 	return r.reminders, nil
 }
+func (r *fakeCalendarRepo) ListDueReminderTargets(context.Context, time.Time, int) ([]entity.ReminderTarget, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var targets []entity.ReminderTarget
+	for _, reminder := range r.reminders {
+		if r.dispatched != nil {
+			if _, ok := r.dispatched[reminder.ReminderID]; ok {
+				continue
+			}
+		}
+		targets = append(targets, reminder)
+	}
+	return targets, nil
+}
+func (r *fakeCalendarRepo) MarkReminderDispatched(_ context.Context, reminderID uuid.UUID, dispatchedAt time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.dispatched == nil {
+		r.dispatched = map[uuid.UUID]time.Time{}
+	}
+	r.dispatched[reminderID] = dispatchedAt
+	return nil
+}
+
+type claimingReminderRepo struct {
+	fakeCalendarRepo
+	locked map[uuid.UUID]struct{}
+}
+
+func (r *claimingReminderRepo) ListDueReminderTargets(context.Context, time.Time, int) ([]entity.ReminderTarget, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.locked == nil {
+		r.locked = map[uuid.UUID]struct{}{}
+	}
+	var targets []entity.ReminderTarget
+	for _, reminder := range r.reminders {
+		if r.dispatched != nil {
+			if _, ok := r.dispatched[reminder.ReminderID]; ok {
+				continue
+			}
+		}
+		if _, ok := r.locked[reminder.ReminderID]; ok {
+			continue
+		}
+		r.locked[reminder.ReminderID] = struct{}{}
+		targets = append(targets, reminder)
+	}
+	return targets, nil
+}
+
+func (r *claimingReminderRepo) MarkReminderDispatched(_ context.Context, reminderID uuid.UUID, dispatchedAt time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.dispatched == nil {
+		r.dispatched = map[uuid.UUID]time.Time{}
+	}
+	r.dispatched[reminderID] = dispatchedAt
+	delete(r.locked, reminderID)
+	return nil
+}
 
 type expandingCalendarRepo struct {
 	fakeCalendarRepo
@@ -251,6 +452,7 @@ func (r *expandingCalendarRepo) ListEvents(_ context.Context, workspaceID uuid.U
 	}
 	return occurrences, nil
 }
+
 func (r *fakeCalendarRepo) GetEvent(_ context.Context, eventID uuid.UUID) (*entity.CalendarEvent, error) {
 	eventEntity := r.events[eventID]
 	if eventEntity == nil {
@@ -260,6 +462,9 @@ func (r *fakeCalendarRepo) GetEvent(_ context.Context, eventID uuid.UUID) (*enti
 	copy.Attendees = append([]entity.EventAttendee(nil), eventEntity.Attendees...)
 	copy.Reminders = append([]entity.EventReminder(nil), eventEntity.Reminders...)
 	return &copy, nil
+}
+func (r *fakeCalendarRepo) LockEventForStartCall(ctx context.Context, eventID uuid.UUID) (*entity.CalendarEvent, error) {
+	return r.GetEvent(ctx, eventID)
 }
 func (r *fakeCalendarRepo) CreateEvent(_ context.Context, eventEntity *entity.CalendarEvent) (*entity.CalendarEvent, error) {
 	if r.events == nil {
@@ -282,6 +487,14 @@ func (r *fakeCalendarRepo) SetEventCallIDIfUnset(_ context.Context, eventID, cal
 		eventEntity.CallID = &callID
 	}
 	return eventEntity, nil
+}
+func (r *fakeCalendarRepo) LinkEventAndCall(_ context.Context, eventID, callID uuid.UUID) error {
+	eventEntity := r.events[eventID]
+	if eventEntity == nil {
+		return cerrors.NotFound("event not found")
+	}
+	eventEntity.CallID = &callID
+	return nil
 }
 func (r *fakeCalendarRepo) UpsertRsvp(_ context.Context, eventID, userID uuid.UUID, status entity.RsvpStatus) (*entity.EventAttendee, error) {
 	now := time.Now().UTC()
@@ -338,6 +551,7 @@ func (s *fakeCallService) StartCall(_ context.Context, workspaceID, userID uuid.
 		WorkspaceID: workspaceID,
 		ChannelID:   channelID,
 		Type:        callType,
+		Status:      entity.CallStatusRinging,
 		Title:       title,
 		CreatedBy:   userID,
 		Settings:    settings,
@@ -355,16 +569,225 @@ func (s *fakeCallService) GetCall(_ context.Context, _ uuid.UUID, callID, _ uuid
 	return call, nil
 }
 
+type calendarCallTxManager struct {
+	mu        sync.Mutex
+	calendars *txCalendarRepo
+	calls     *txCallRepo
+	events    []event.Event
+	linkErr   error
+}
+
+func newCalendarCallTxManager(eventEntity *entity.CalendarEvent) *calendarCallTxManager {
+	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{}}
+	copy := *eventEntity
+	repo.events[eventEntity.ID] = &copy
+	return &calendarCallTxManager{
+		calendars: &txCalendarRepo{fakeCalendarRepo: repo},
+		calls:     &txCallRepo{calls: map[uuid.UUID]*entity.Call{}, participants: map[uuid.UUID][]entity.CallParticipant{}},
+	}
+}
+
+func (m *calendarCallTxManager) WithinTx(ctx context.Context, fn func(context.Context, txscope.Scope) error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	calendars := m.calendars.clone()
+	calls := m.calls.clone()
+	calendars.calls = calls
+	calendars.linkErr = m.linkErr
+	scope := &fakeCalendarTxScope{calendars: calendars, calls: calls}
+	if err := fn(ctx, scope); err != nil {
+		return err
+	}
+	m.calendars = calendars
+	m.calls = calls
+	m.events = append(m.events, scope.events...)
+	return nil
+}
+
+type txCalendarRepo struct {
+	*fakeCalendarRepo
+	calls   *txCallRepo
+	linkErr error
+}
+
+func (r *txCalendarRepo) clone() *txCalendarRepo {
+	events := map[uuid.UUID]*entity.CalendarEvent{}
+	for eventID, eventEntity := range r.events {
+		copy := *eventEntity
+		copy.Attendees = append([]entity.EventAttendee(nil), eventEntity.Attendees...)
+		copy.Reminders = append([]entity.EventReminder(nil), eventEntity.Reminders...)
+		events[eventID] = &copy
+	}
+	return &txCalendarRepo{fakeCalendarRepo: &fakeCalendarRepo{
+		calendars:  append([]entity.UserCalendar(nil), r.calendars...),
+		events:     events,
+		reminders:  append([]entity.ReminderTarget(nil), r.reminders...),
+		dispatched: cloneTimeMap(r.dispatched),
+	}}
+}
+
+func (r *txCalendarRepo) LinkEventAndCall(_ context.Context, eventID, callID uuid.UUID) error {
+	if r.linkErr != nil {
+		return r.linkErr
+	}
+	eventEntity := r.events[eventID]
+	if eventEntity == nil {
+		return cerrors.NotFound("event not found")
+	}
+	callEntity := r.calls.calls[callID]
+	if callEntity == nil {
+		return cerrors.NotFound("call not found")
+	}
+	eventEntity.CallID = &callID
+	scheduledCallID := eventID
+	callEntity.ScheduledCallID = &scheduledCallID
+	return nil
+}
+
+type txCallRepo struct {
+	calls        map[uuid.UUID]*entity.Call
+	participants map[uuid.UUID][]entity.CallParticipant
+}
+
+func (r *txCallRepo) clone() *txCallRepo {
+	calls := map[uuid.UUID]*entity.Call{}
+	for callID, callEntity := range r.calls {
+		copy := *callEntity
+		calls[callID] = &copy
+	}
+	participants := map[uuid.UUID][]entity.CallParticipant{}
+	for callID, existing := range r.participants {
+		participants[callID] = append([]entity.CallParticipant(nil), existing...)
+	}
+	return &txCallRepo{calls: calls, participants: participants}
+}
+
+func (r *txCallRepo) Create(_ context.Context, call *entity.Call) error {
+	if r.calls == nil {
+		r.calls = map[uuid.UUID]*entity.Call{}
+	}
+	copy := *call
+	r.calls[call.ID] = &copy
+	return nil
+}
+
+func (r *txCallRepo) GetByID(_ context.Context, id uuid.UUID) (*entity.Call, error) {
+	call := r.calls[id]
+	if call == nil {
+		return nil, cerrors.NotFound("call not found")
+	}
+	copy := *call
+	return &copy, nil
+}
+
+func (r *txCallRepo) ListActiveByWorkspace(_ context.Context, workspaceID uuid.UUID) ([]entity.Call, error) {
+	var calls []entity.Call
+	for _, call := range r.calls {
+		if call.WorkspaceID == workspaceID && call.Status != entity.CallStatusEnded {
+			calls = append(calls, *call)
+		}
+	}
+	return calls, nil
+}
+
+func (r *txCallRepo) UpdateStatus(_ context.Context, id uuid.UUID, status entity.CallStatus) error {
+	call := r.calls[id]
+	if call == nil {
+		return cerrors.NotFound("call not found")
+	}
+	call.Status = status
+	return nil
+}
+
+func (r *txCallRepo) End(_ context.Context, id uuid.UUID) error {
+	call := r.calls[id]
+	if call == nil {
+		return cerrors.NotFound("call not found")
+	}
+	now := time.Now().UTC()
+	call.Status = entity.CallStatusEnded
+	call.EndedAt = &now
+	return nil
+}
+
+func (r *txCallRepo) AddParticipant(_ context.Context, p *entity.CallParticipant) error {
+	if r.participants == nil {
+		r.participants = map[uuid.UUID][]entity.CallParticipant{}
+	}
+	r.participants[p.CallID] = append(r.participants[p.CallID], *p)
+	return nil
+}
+
+func (r *txCallRepo) AddParticipantIfCapacity(ctx context.Context, p *entity.CallParticipant, _ int) error {
+	return r.AddParticipant(ctx, p)
+}
+
+func (r *txCallRepo) GetParticipant(context.Context, uuid.UUID, uuid.UUID) (*entity.CallParticipant, error) {
+	return nil, cerrors.NotFound("participant not found")
+}
+func (r *txCallRepo) ListParticipants(context.Context, uuid.UUID) ([]entity.CallParticipant, error) {
+	return nil, nil
+}
+func (r *txCallRepo) UpdateParticipantStatus(context.Context, uuid.UUID, entity.ParticipantStatus) error {
+	return nil
+}
+func (r *txCallRepo) UpdateParticipantRole(context.Context, uuid.UUID, entity.CallRole) error {
+	return nil
+}
+func (r *txCallRepo) UpdateParticipantMedia(context.Context, uuid.UUID, bool, bool, bool) error {
+	return nil
+}
+func (r *txCallRepo) RemoveParticipant(context.Context, uuid.UUID, uuid.UUID) error { return nil }
+
+type fakeCalendarTxScope struct {
+	calendars repository.CalendarRepository
+	calls     repository.CallRepository
+	events    []event.Event
+}
+
+func (s *fakeCalendarTxScope) Users() repository.UserRepository                       { return nil }
+func (s *fakeCalendarTxScope) Workspaces() repository.WorkspaceRepository             { return nil }
+func (s *fakeCalendarTxScope) Messages() repository.MessageRepository                 { return nil }
+func (s *fakeCalendarTxScope) Channels() repository.ChannelRepository                 { return nil }
+func (s *fakeCalendarTxScope) ChannelGrants() repository.ChannelAccessGrantRepository { return nil }
+func (s *fakeCalendarTxScope) Calls() repository.CallRepository                       { return s.calls }
+func (s *fakeCalendarTxScope) Calendars() repository.CalendarRepository               { return s.calendars }
+func (s *fakeCalendarTxScope) Recordings() repository.RecordingRepository             { return nil }
+func (s *fakeCalendarTxScope) Invites() repository.GuestInviteRepository              { return nil }
+func (s *fakeCalendarTxScope) GuestGrants() repository.GuestAccessRepository          { return nil }
+func (s *fakeCalendarTxScope) Roles() repository.WorkspaceRoleRepository              { return nil }
+func (s *fakeCalendarTxScope) Audit() repository.AuditRepository                      { return nil }
+func (s *fakeCalendarTxScope) SearchIndexer() searchsvc.Indexer                       { return nil }
+func (s *fakeCalendarTxScope) EnqueueRealtime(_ context.Context, evt event.Event, _ []byte) error {
+	s.events = append(s.events, evt)
+	return nil
+}
+
+func cloneTimeMap(in map[uuid.UUID]time.Time) map[uuid.UUID]time.Time {
+	if in == nil {
+		return nil
+	}
+	out := map[uuid.UUID]time.Time{}
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
 type noopPublisher struct{}
 
 func (noopPublisher) Publish(context.Context, string, []byte) error { return nil }
 
 type capturingPublisher struct {
+	mu       sync.Mutex
 	subjects []string
 	events   []event.Event
 }
 
 func (p *capturingPublisher) Publish(_ context.Context, subject string, data []byte) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.subjects = append(p.subjects, subject)
 	var evt event.Event
 	if err := json.Unmarshal(data, &evt); err == nil {

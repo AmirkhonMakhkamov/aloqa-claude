@@ -231,6 +231,130 @@ func (r *CalendarRepo) ListEventsForReminderFanout(ctx context.Context, withinWi
 	return r.computeReminderTargets(ctx, windowStart, now, horizon)
 }
 
+func (r *CalendarRepo) ListDueReminderTargets(ctx context.Context, now time.Time, limit int) ([]entity.ReminderTarget, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := r.db.Query(ctx, `
+		SELECT r.id, e.id, e.calendar_id, e.workspace_id, e.channel_id, e.organizer_id, e.title,
+		       e.description, e.location_type, e.location_value, e.scheduled_at, e.originator_tz, e.duration_minutes,
+		       e.all_day, e.recurrence_rrule, e.recurrence_exdates, e.call_id, e.created_at, e.updated_at,
+		       r.user_id, r.offset_minutes, r.channel, r.fire_at
+		FROM event_reminders r
+		JOIN calendar_events e ON e.id = r.event_id
+		WHERE r.reminders_dispatched_at IS NULL
+		  AND r.fire_at <= $1
+		ORDER BY r.fire_at ASC, r.id ASC
+		LIMIT $2
+		FOR UPDATE OF r SKIP LOCKED`, now.UTC(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list due reminder targets: %w", err)
+	}
+	defer rows.Close()
+
+	type dueReminderRow struct {
+		reminderID    uuid.UUID
+		event         *entity.CalendarEvent
+		userID        uuid.UUID
+		offsetMinutes int
+		channel       entity.ReminderChannel
+		fireAt        time.Time
+	}
+
+	var dueRows []dueReminderRow
+	var events []*entity.CalendarEvent
+	for rows.Next() {
+		var reminderID uuid.UUID
+		var event entity.CalendarEvent
+		var locationValue *string
+		var recurrenceRRule *string
+		var recurrenceExdates []time.Time
+		var userID uuid.UUID
+		var offsetMinutes int
+		var channel entity.ReminderChannel
+		var fireAt time.Time
+		if err := rows.Scan(
+			&reminderID,
+			&event.ID,
+			&event.CalendarID,
+			&event.WorkspaceID,
+			&event.ChannelID,
+			&event.OrganizerID,
+			&event.Title,
+			&event.Description,
+			&event.Location.Type,
+			&locationValue,
+			&event.ScheduledAt,
+			&event.OriginatorTZ,
+			&event.DurationMinutes,
+			&event.AllDay,
+			&recurrenceRRule,
+			&recurrenceExdates,
+			&event.CallID,
+			&event.CreatedAt,
+			&event.UpdatedAt,
+			&userID,
+			&offsetMinutes,
+			&channel,
+			&fireAt,
+		); err != nil {
+			return nil, fmt.Errorf("postgres: list due reminder targets scan: %w", err)
+		}
+		event.Location.Value = locationValue
+		if recurrenceRRule != nil {
+			event.Recurrence = &entity.RecurrenceRule{RRule: *recurrenceRRule, Exdates: recurrenceExdates}
+		}
+		event.OriginatorTZ = originatorTZOrDefault(event.OriginatorTZ)
+		eventCopy := &event
+		events = append(events, eventCopy)
+		dueRows = append(dueRows, dueReminderRow{
+			reminderID:    reminderID,
+			event:         eventCopy,
+			userID:        userID,
+			offsetMinutes: offsetMinutes,
+			channel:       channel,
+			fireAt:        fireAt.UTC(),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list due reminder targets rows: %w", err)
+	}
+	if err := r.hydrateEvents(ctx, events); err != nil {
+		return nil, err
+	}
+
+	targets := make([]entity.ReminderTarget, 0, len(dueRows))
+	for _, row := range dueRows {
+		instanceAt := row.fireAt.Add(time.Duration(row.offsetMinutes) * time.Minute)
+		targets = append(targets, entity.ReminderTarget{
+			ReminderID: row.reminderID,
+			Occurrence: entity.EventOccurrence{
+				CalendarEvent:       *row.event,
+				InstanceAt:          instanceAt,
+				IsRecurringInstance: row.event.Recurrence != nil,
+			},
+			UserID:        row.userID,
+			OffsetMinutes: row.offsetMinutes,
+			Channel:       row.channel,
+			FireAt:        row.fireAt,
+		})
+	}
+	return targets, nil
+}
+
+func (r *CalendarRepo) MarkReminderDispatched(ctx context.Context, reminderID uuid.UUID, dispatchedAt time.Time) error {
+	_ = dispatchedAt
+	_, err := r.db.Exec(ctx, `
+		UPDATE event_reminders
+		SET reminders_dispatched_at = NOW()
+		WHERE id = $1
+		  AND reminders_dispatched_at IS NULL`, reminderID)
+	if err != nil {
+		return fmt.Errorf("postgres: mark reminder dispatched: %w", err)
+	}
+	return nil
+}
+
 func (r *CalendarRepo) computeReminderTargets(ctx context.Context, windowStart, now, horizon time.Time) ([]entity.ReminderTarget, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT e.id, e.calendar_id, e.workspace_id, e.channel_id, e.organizer_id, e.title,
@@ -325,6 +449,21 @@ func (r *CalendarRepo) GetEvent(ctx context.Context, eventID uuid.UUID) (*entity
 	return event, nil
 }
 
+func (r *CalendarRepo) LockEventForStartCall(ctx context.Context, eventID uuid.UUID) (*entity.CalendarEvent, error) {
+	row := r.db.QueryRow(ctx, calendarEventSelectSQL()+` WHERE e.id = $1 FOR UPDATE OF e`, eventID)
+	event, err := scanCalendarEvent(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, cerrors.NotFound("event not found")
+		}
+		return nil, err
+	}
+	if err := r.hydrateEvents(ctx, []*entity.CalendarEvent{event}); err != nil {
+		return nil, err
+	}
+	return event, nil
+}
+
 func (r *CalendarRepo) CreateEvent(ctx context.Context, event *entity.CalendarEvent) (*entity.CalendarEvent, error) {
 	if r.pool == nil {
 		return nil, cerrors.Unavailable("calendar repository transaction support is not configured")
@@ -402,6 +541,31 @@ func (r *CalendarRepo) SetEventCallIDIfUnset(ctx context.Context, eventID, callI
 		return r.GetEvent(ctx, eventID)
 	}
 	return r.GetEvent(ctx, eventID)
+}
+
+func (r *CalendarRepo) LinkEventAndCall(ctx context.Context, eventID, callID uuid.UUID) error {
+	tag, err := r.db.Exec(ctx, `
+		UPDATE calendar_events
+		SET call_id = $2
+		WHERE id = $1`, eventID, callID)
+	if err != nil {
+		return fmt.Errorf("postgres: link calendar event to call: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return cerrors.NotFound("event not found")
+	}
+
+	tag, err = r.db.Exec(ctx, `
+		UPDATE calls
+		SET scheduled_call_id = $1
+		WHERE id = $2`, eventID, callID)
+	if err != nil {
+		return fmt.Errorf("postgres: link call to calendar event: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return cerrors.NotFound("call not found")
+	}
+	return nil
 }
 
 func (r *CalendarRepo) UpsertRsvp(ctx context.Context, eventID, userID uuid.UUID, status entity.RsvpStatus) (*entity.EventAttendee, error) {
@@ -503,6 +667,15 @@ func (r *CalendarRepo) replaceReminders(ctx context.Context, eventID uuid.UUID, 
 	if _, err := r.db.Exec(ctx, `DELETE FROM event_reminders WHERE event_id = $1`, eventID); err != nil {
 		return fmt.Errorf("postgres: replace event reminders delete: %w", err)
 	}
+	var scheduledAt time.Time
+	for _, reminder := range reminders {
+		if reminder.UserID != uuid.Nil && reminder.FireAt.IsZero() {
+			if err := r.db.QueryRow(ctx, `SELECT scheduled_at FROM calendar_events WHERE id = $1`, eventID).Scan(&scheduledAt); err != nil {
+				return fmt.Errorf("postgres: replace event reminders scheduled_at: %w", err)
+			}
+			break
+		}
+	}
 	for _, reminder := range reminders {
 		if reminder.UserID == uuid.Nil {
 			continue
@@ -510,11 +683,14 @@ func (r *CalendarRepo) replaceReminders(ctx context.Context, eventID uuid.UUID, 
 		if reminder.ID == uuid.Nil {
 			reminder.ID = id.New()
 		}
+		if reminder.FireAt.IsZero() {
+			reminder.FireAt = scheduledAt.Add(-time.Duration(reminder.OffsetMinutes) * time.Minute)
+		}
 		_, err := r.db.Exec(ctx, `
-			INSERT INTO event_reminders (id, event_id, user_id, offset_minutes, channel, reminders_dispatched_at)
-			VALUES ($1, $2, $3, $4, $5, $6)
+			INSERT INTO event_reminders (id, event_id, user_id, offset_minutes, channel, fire_at, reminders_dispatched_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
 			ON CONFLICT (event_id, user_id, offset_minutes, channel) DO NOTHING`,
-			reminder.ID, eventID, reminder.UserID, reminder.OffsetMinutes, reminder.Channel, reminder.RemindersDispatchedAt)
+			reminder.ID, eventID, reminder.UserID, reminder.OffsetMinutes, reminder.Channel, reminder.FireAt.UTC(), reminder.RemindersDispatchedAt)
 		if err != nil {
 			return wrapCalendarWriteErr(err, "replace event reminders")
 		}

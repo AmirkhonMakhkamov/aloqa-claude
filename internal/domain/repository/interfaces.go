@@ -236,10 +236,14 @@ type CalendarRepository interface {
 	ListEvents(ctx context.Context, workspaceID uuid.UUID, fromTS, toTS time.Time, viewerID uuid.UUID) ([]entity.EventOccurrence, error)
 	ListUpcoming(ctx context.Context, workspaceID, viewerID uuid.UUID, withinMinutes int) ([]entity.EventOccurrence, error)
 	ListEventsForReminderFanout(ctx context.Context, withinWindow time.Duration) ([]entity.ReminderTarget, error)
+	ListDueReminderTargets(ctx context.Context, now time.Time, limit int) ([]entity.ReminderTarget, error)
+	MarkReminderDispatched(ctx context.Context, reminderID uuid.UUID, dispatchedAt time.Time) error
 	GetEvent(ctx context.Context, eventID uuid.UUID) (*entity.CalendarEvent, error)
+	LockEventForStartCall(ctx context.Context, eventID uuid.UUID) (*entity.CalendarEvent, error)
 	CreateEvent(ctx context.Context, event *entity.CalendarEvent) (*entity.CalendarEvent, error)
 	UpdateEvent(ctx context.Context, event *entity.CalendarEvent) (*entity.CalendarEvent, error)
 	DeleteEvent(ctx context.Context, workspaceID, eventID uuid.UUID) error
 	SetEventCallIDIfUnset(ctx context.Context, eventID, callID uuid.UUID) (*entity.CalendarEvent, error)
+	LinkEventAndCall(ctx context.Context, eventID, callID uuid.UUID) error
 	UpsertRsvp(ctx context.Context, eventID, userID uuid.UUID, status entity.RsvpStatus) (*entity.EventAttendee, error)
 }

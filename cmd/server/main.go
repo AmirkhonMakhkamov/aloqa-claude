@@ -259,6 +259,7 @@ func run() error {
 		Channels:            channelRepo,
 		ChannelGrants:       channelAccessGrantRepo,
 		Calls:               callRepo,
+		Calendars:           calendarRepo,
 		Recordings:          recordingRepo,
 		Invites:             guestInviteRepo,
 		GuestGrants:         guestAccessRepo,
@@ -367,6 +368,7 @@ func run() error {
 	callSvc.SetMediaControlPlane(mediaOpsSvc)
 	callSvc.SetTransactionManager(txManager)
 	calendarSvc := calendarsvc.NewService(calendarRepo, workspaceRepo, callSvc, realtimePublisher)
+	calendarSvc.SetTransactionManager(txManager)
 	mediaOpsSvc.SetEventPublisher(realtimePublisher)
 	mediaOpsSvc.SetRelayTransport(ps)
 	presenceSvc := presence.NewService(rdb,

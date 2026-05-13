@@ -80,6 +80,7 @@ type EventReminder struct {
 	UserID                uuid.UUID       `json:"-"`
 	OffsetMinutes         int             `json:"offset_minutes"`
 	Channel               ReminderChannel `json:"channel"`
+	FireAt                time.Time       `json:"-"`
 	RemindersDispatchedAt *time.Time      `json:"-"`
 }
 
@@ -120,7 +121,10 @@ type EventOverride struct {
 }
 
 type ReminderTarget struct {
+	ReminderID    uuid.UUID       `json:"-"`
 	Occurrence    EventOccurrence `json:"event"`
 	UserID        uuid.UUID       `json:"user_id"`
 	OffsetMinutes int             `json:"offset_minutes"`
+	Channel       ReminderChannel `json:"channel"`
+	FireAt        time.Time       `json:"fire_at"`
 }

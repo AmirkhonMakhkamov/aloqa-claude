@@ -184,8 +184,13 @@ type MemberPayload struct {
 }
 
 type PresencePayload struct {
-	UserID uuid.UUID `json:"user_id"`
-	Online bool      `json:"online"`
+	UserID       uuid.UUID  `json:"user_id"`
+	WorkspaceID  uuid.UUID  `json:"workspace_id"`
+	Status       string     `json:"status"`
+	Online       bool       `json:"online"`
+	CustomStatus string     `json:"custom_status,omitempty"`
+	CustomEmoji  string     `json:"custom_emoji,omitempty"`
+	LastSeenAt   *time.Time `json:"last_seen_at,omitempty"`
 }
 
 type CallPayload struct {

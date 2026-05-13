@@ -372,6 +372,7 @@ func run() error {
 	presenceSvc := presence.NewService(rdb,
 		presence.WithOperationTimeout(cfg.Redis.OperationTimeout),
 		presence.WithOnlineShardCount(cfg.Redis.PresenceShardCount),
+		presence.WithEventPublisher(realtimePublisher),
 	)
 	fileSvc := file.NewService(fileStore, messageRepo, channelRepo, workspaceRepo, nil, searchSvc, file.Config{
 		MaxFileSize:  cfg.Media.MaxFileSize,

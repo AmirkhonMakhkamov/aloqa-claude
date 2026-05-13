@@ -13,8 +13,15 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
+	"aloqa/internal/domain/event"
+	"aloqa/internal/pkg/id"
 	"aloqa/internal/platform/reliability"
 )
+
+// EventPublisher abstracts realtime event publishing (typically NATS).
+type EventPublisher interface {
+	Publish(ctx context.Context, subject string, data []byte) error
+}
 
 // Status represents a user's online status.
 type Status string
@@ -56,6 +63,7 @@ type Service struct {
 	rdb              *redis.Client
 	opTimeout        time.Duration
 	onlineShardCount int
+	pubsub           EventPublisher
 }
 
 type Option func(*Service)
@@ -76,6 +84,14 @@ func WithOnlineShardCount(count int) Option {
 	}
 }
 
+// WithEventPublisher wires a realtime publisher used to broadcast
+// presence.changed events to workspace subscribers.
+func WithEventPublisher(pubsub EventPublisher) Option {
+	return func(s *Service) {
+		s.pubsub = pubsub
+	}
+}
+
 func NewService(rdb *redis.Client, opts ...Option) *Service {
 	svc := &Service{
 		rdb:              rdb,
@@ -92,19 +108,50 @@ func NewService(rdb *redis.Client, opts ...Option) *Service {
 }
 
 func (s *Service) SetOnline(ctx context.Context, userID, workspaceID uuid.UUID, sessionID string) error {
-	return s.setPresence(ctx, userID, workspaceID, sessionID, StatusOnline)
+	if err := s.setPresence(ctx, userID, workspaceID, sessionID, StatusOnline); err != nil {
+		return err
+	}
+	s.publishPresenceChanged(ctx, userID, workspaceID, StatusOnline, time.Now().UTC())
+	return nil
 }
 
 func (s *Service) SetAway(ctx context.Context, userID, workspaceID uuid.UUID, sessionID string) error {
-	return s.setPresence(ctx, userID, workspaceID, sessionID, StatusAway)
+	if err := s.setPresence(ctx, userID, workspaceID, sessionID, StatusAway); err != nil {
+		return err
+	}
+	s.publishPresenceChanged(ctx, userID, workspaceID, StatusAway, time.Now().UTC())
+	return nil
 }
 
 func (s *Service) SetDND(ctx context.Context, userID, workspaceID uuid.UUID, sessionID string) error {
-	return s.setPresence(ctx, userID, workspaceID, sessionID, StatusDND)
+	if err := s.setPresence(ctx, userID, workspaceID, sessionID, StatusDND); err != nil {
+		return err
+	}
+	s.publishPresenceChanged(ctx, userID, workspaceID, StatusDND, time.Now().UTC())
+	return nil
 }
 
 func (s *Service) SetOffline(ctx context.Context, userID, workspaceID uuid.UUID, sessionID string) error {
-	return s.removeSessionPresence(ctx, userID, workspaceID, normalizeSessionID(sessionID, userID))
+	if err := s.removeSessionPresence(ctx, userID, workspaceID, normalizeSessionID(sessionID, userID)); err != nil {
+		return err
+	}
+	// Only emit offline when the user truly has no remaining sessions in this
+	// workspace. With multi-device support a single logout shouldn't flip the
+	// aggregate to offline if another session is still active.
+	aggregate, err := s.aggregatePresence(ctx, userID, workspaceID)
+	if err != nil {
+		// Aggregation is best-effort for the broadcast decision. Fall back to
+		// emitting offline so subscribers eventually converge to a sensible state.
+		slog.WarnContext(ctx, "presence: aggregate after offline failed", "user_id", userID, "workspace_id", workspaceID, "error", err)
+		s.publishPresenceChanged(ctx, userID, workspaceID, StatusOffline, time.Now().UTC())
+		return nil
+	}
+	if aggregate == nil {
+		s.publishPresenceChanged(ctx, userID, workspaceID, StatusOffline, time.Now().UTC())
+		return nil
+	}
+	s.publishPresenceChanged(ctx, userID, workspaceID, aggregate.Status, aggregate.LastSeenAt)
+	return nil
 }
 
 func (s *Service) SetCustomStatus(ctx context.Context, userID, workspaceID uuid.UUID, sessionID, text, emoji string) error {
@@ -455,6 +502,50 @@ func workspaceOnlineKey(workspaceID uuid.UUID) string {
 
 func workspaceOnlineShardKey(workspaceID uuid.UUID, shard int) string {
 	return fmt.Sprintf("presence:online:%s:%02d", workspaceID, shard)
+}
+
+// publishPresenceChanged emits a presence.changed event on the workspace room
+// so other clients can update their cached presence state in realtime.
+// Publishing is best-effort: a failure here must not break the HTTP request,
+// the next aggregate query or WS reconnect will reconcile.
+func (s *Service) publishPresenceChanged(ctx context.Context, userID, workspaceID uuid.UUID, status Status, lastSeenAt time.Time) {
+	if s == nil || s.pubsub == nil || workspaceID == uuid.Nil {
+		return
+	}
+
+	var lastSeenPtr *time.Time
+	if status != StatusOnline && !lastSeenAt.IsZero() {
+		ts := lastSeenAt.UTC()
+		lastSeenPtr = &ts
+	}
+
+	payload := event.PresencePayload{
+		UserID:      userID,
+		WorkspaceID: workspaceID,
+		Status:      string(status),
+		Online:      status == StatusOnline,
+		LastSeenAt:  lastSeenPtr,
+	}
+
+	evt := event.Event{
+		ID:          id.New(),
+		Type:        event.TypePresenceChanged,
+		WorkspaceID: workspaceID,
+		UserID:      userID,
+		Timestamp:   time.Now().UTC(),
+		Payload:     payload,
+	}
+
+	data, err := json.Marshal(evt)
+	if err != nil {
+		slog.ErrorContext(ctx, "presence: marshal presence.changed", "user_id", userID, "workspace_id", workspaceID, "error", err)
+		return
+	}
+
+	subject := fmt.Sprintf("aloqa.ws.%s", workspaceID)
+	if err := s.pubsub.Publish(ctx, subject, data); err != nil {
+		slog.ErrorContext(ctx, "presence: publish presence.changed", "subject", subject, "user_id", userID, "error", err)
+	}
 }
 
 func workspaceOnlineKeyForUser(workspaceID, userID uuid.UUID, shardCount int) string {

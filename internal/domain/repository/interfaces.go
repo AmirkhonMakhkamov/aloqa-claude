@@ -223,3 +223,23 @@ type CallRepository interface {
 	UpdateParticipantMedia(ctx context.Context, id uuid.UUID, audioMuted, videoMuted, screenSharing bool) error
 	RemoveParticipant(ctx context.Context, callID, userID uuid.UUID) error
 }
+
+type CalendarRepository interface {
+	ListUserCalendars(ctx context.Context, workspaceID, ownerID uuid.UUID) ([]entity.UserCalendar, error)
+	GetUserCalendar(ctx context.Context, workspaceID, calendarID, ownerID uuid.UUID) (*entity.UserCalendar, error)
+	CreateUserCalendar(ctx context.Context, calendar *entity.UserCalendar) error
+	UpdateUserCalendar(ctx context.Context, calendar *entity.UserCalendar) error
+	DeleteUserCalendar(ctx context.Context, workspaceID, calendarID, ownerID uuid.UUID) error
+	SetCalendarVisibility(ctx context.Context, workspaceID, calendarID, ownerID uuid.UUID, visible bool) (*entity.UserCalendar, error)
+	EnsureDefaultCalendar(ctx context.Context, workspaceID, ownerID uuid.UUID) (*entity.UserCalendar, error)
+
+	ListEvents(ctx context.Context, workspaceID uuid.UUID, fromTS, toTS time.Time, viewerID uuid.UUID) ([]entity.EventOccurrence, error)
+	ListUpcoming(ctx context.Context, workspaceID, viewerID uuid.UUID, withinMinutes int) ([]entity.EventOccurrence, error)
+	ListEventsForReminderFanout(ctx context.Context, withinWindow time.Duration) ([]entity.ReminderTarget, error)
+	GetEvent(ctx context.Context, eventID uuid.UUID) (*entity.CalendarEvent, error)
+	CreateEvent(ctx context.Context, event *entity.CalendarEvent) (*entity.CalendarEvent, error)
+	UpdateEvent(ctx context.Context, event *entity.CalendarEvent) (*entity.CalendarEvent, error)
+	DeleteEvent(ctx context.Context, workspaceID, eventID uuid.UUID) error
+	SetEventCallIDIfUnset(ctx context.Context, eventID, callID uuid.UUID) (*entity.CalendarEvent, error)
+	UpsertRsvp(ctx context.Context, eventID, userID uuid.UUID, status entity.RsvpStatus) (*entity.EventAttendee, error)
+}

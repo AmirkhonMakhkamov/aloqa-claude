@@ -147,6 +147,65 @@ func (r *CallRepo) ListActiveByWorkspace(ctx context.Context, workspaceID uuid.U
 	return calls, nil
 }
 
+func (r *CallRepo) ListRecentByWorkspace(ctx context.Context, workspaceID uuid.UUID, limit int, before *time.Time) ([]entity.Call, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	query := `
+		SELECT id, workspace_id, channel_id, type, status, title, created_by, settings, started_at, ended_at, created_at
+		FROM calls
+		WHERE workspace_id = $1`
+	args := []any{workspaceID}
+	if before != nil {
+		query += ` AND created_at < $2`
+		args = append(args, *before)
+		query += ` ORDER BY created_at DESC LIMIT $3`
+		args = append(args, limit+1)
+	} else {
+		query += ` ORDER BY created_at DESC LIMIT $2`
+		args = append(args, limit+1)
+	}
+
+	rows, err := r.db.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list recent calls: %w", err)
+	}
+	defer rows.Close()
+
+	var calls []entity.Call
+	for rows.Next() {
+		var call entity.Call
+		var settingsJSON []byte
+		if err := rows.Scan(
+			&call.ID,
+			&call.WorkspaceID,
+			&call.ChannelID,
+			&call.Type,
+			&call.Status,
+			&call.Title,
+			&call.CreatedBy,
+			&settingsJSON,
+			&call.StartedAt,
+			&call.EndedAt,
+			&call.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("postgres: list recent calls scan: %w", err)
+		}
+		if err := json.Unmarshal(settingsJSON, &call.Settings); err != nil {
+			return nil, fmt.Errorf("postgres: unmarshal recent call settings: %w", err)
+		}
+		calls = append(calls, call)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list recent calls rows: %w", err)
+	}
+	return calls, nil
+}
+
 func (r *CallRepo) UpdateStatus(ctx context.Context, id uuid.UUID, status entity.CallStatus) error {
 	query := `
 		UPDATE calls

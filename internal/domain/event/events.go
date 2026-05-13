@@ -63,6 +63,16 @@ const (
 	TypeSignalOffer     Type = "signal.offer"
 	TypeSignalAnswer    Type = "signal.answer"
 	TypeSignalCandidate Type = "signal.candidate"
+
+	// Calendar events.
+	TypeUserCalendarCreated         Type = "calendar.user.created"
+	TypeUserCalendarUpdated         Type = "calendar.user.updated"
+	TypeUserCalendarDeleted         Type = "calendar.user.deleted"
+	TypeCalendarEventCreated        Type = "calendar.event.created"
+	TypeCalendarEventUpdated        Type = "calendar.event.updated"
+	TypeCalendarEventDeleted        Type = "calendar.event.deleted"
+	TypeCalendarEventReminderFired  Type = "calendar.event.reminder_fired"
+	TypeCalendarAttendeeRsvpUpdated Type = "calendar.attendee.rsvp_updated"
 )
 
 // Event is the envelope for all domain events published through the event bus.
@@ -226,6 +236,19 @@ type BreakoutBroadcastPayload struct {
 	CallID  uuid.UUID `json:"call_id"`
 	UserID  uuid.UUID `json:"user_id"`
 	Message string    `json:"message"`
+}
+
+type UserCalendarPayload struct {
+	Calendar entity.UserCalendar `json:"calendar"`
+}
+
+type CalendarEventPayload struct {
+	Event entity.CalendarEvent `json:"event"`
+}
+
+type CalendarRsvpPayload struct {
+	EventID  uuid.UUID            `json:"event_id"`
+	Attendee entity.EventAttendee `json:"attendee"`
 }
 
 type SignalPayload struct {

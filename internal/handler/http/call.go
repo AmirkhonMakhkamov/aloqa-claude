@@ -2,12 +2,14 @@ package http
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"aloqa/internal/domain/entity"
 	"aloqa/internal/middleware"
+	"aloqa/internal/pkg/cerrors"
 	"aloqa/internal/pkg/id"
 	"aloqa/internal/service/call"
 )
@@ -85,6 +87,27 @@ func (h *CallHandler) ListActive(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeOK(w, calls)
+}
+
+func (h *CallHandler) Recents(w http.ResponseWriter, r *http.Request) {
+	wsID := middleware.WorkspaceIDFromContext(r.Context())
+	userID := middleware.UserIDFromContext(r.Context())
+
+	limit := 20
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			writeErr(w, cerrors.InvalidInput("invalid limit"))
+			return
+		}
+		limit = parsed
+	}
+	result, err := h.svc.ListRecentCalls(r.Context(), wsID, userID, limit, r.URL.Query().Get("cursor"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w, result)
 }
 
 func (h *CallHandler) Join(w http.ResponseWriter, r *http.Request) {

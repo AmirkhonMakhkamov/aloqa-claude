@@ -40,6 +40,10 @@ type MediaControlPlane interface {
 	RecordQualitySnapshot(ctx context.Context, sample entity.MediaQoSSample) error
 }
 
+type recentCallRepository interface {
+	ListRecentByWorkspace(ctx context.Context, workspaceID uuid.UUID, limit int, before *time.Time) ([]entity.Call, error)
+}
+
 // Service handles call lifecycle, participant management, and WebRTC signaling.
 type Service struct {
 	calls         repository.CallRepository
@@ -64,6 +68,11 @@ type MediaConfig struct {
 	MaxTracksPerPresenter    int
 	DefaultWebinarPresenters int
 	Adaptive                 sfu.AdaptiveOptions
+}
+
+type RecentCallsResult struct {
+	Calls      []entity.Call `json:"calls"`
+	NextCursor string        `json:"next_cursor,omitempty"`
 }
 
 // NewService creates a new call service.
@@ -862,6 +871,44 @@ func (s *Service) ListActiveCalls(ctx context.Context, workspaceID, userID uuid.
 		return nil, cerrors.Internal("failed to list active calls", err)
 	}
 	return calls, nil
+}
+
+func (s *Service) ListRecentCalls(ctx context.Context, workspaceID, userID uuid.UUID, limit int, cursor string) (*RecentCallsResult, error) {
+	if err := s.requireWorkspaceMember(ctx, workspaceID, userID); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	var before *time.Time
+	if cursor != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, cursor)
+		if err != nil {
+			return nil, cerrors.InvalidInput("invalid cursor")
+		}
+		before = &parsed
+	}
+
+	repo, ok := s.calls.(recentCallRepository)
+	if !ok {
+		return nil, cerrors.Unavailable("recent calls are not available")
+	}
+	calls, err := repo.ListRecentByWorkspace(ctx, workspaceID, limit, before)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to list recent calls", "workspace_id", workspaceID, "error", err)
+		return nil, cerrors.Internal("failed to list recent calls", err)
+	}
+
+	result := &RecentCallsResult{Calls: calls}
+	if len(calls) > limit {
+		result.NextCursor = calls[limit-1].CreatedAt.UTC().Format(time.RFC3339Nano)
+		result.Calls = calls[:limit]
+	}
+	return result, nil
 }
 
 // GetParticipants returns all participants in a call.

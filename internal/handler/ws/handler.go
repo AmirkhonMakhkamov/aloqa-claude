@@ -358,6 +358,41 @@ func (h *Handler) canSubscribe(ctx context.Context, client *platformws.Client, r
 
 func (h *Handler) authorizeSubscription(ctx context.Context, client *platformws.Client, room string) (uuid.UUID, error) {
 	switch {
+	case strings.HasPrefix(room, "aloqa.ws.") && strings.HasSuffix(room, ".calendar"):
+		if h.chatSvc == nil {
+			return uuid.Nil, errNotAllowed()
+		}
+		rawWorkspaceID := strings.TrimSuffix(strings.TrimPrefix(room, "aloqa.ws."), ".calendar")
+		workspaceID, err := uuid.Parse(rawWorkspaceID)
+		if err != nil {
+			return uuid.Nil, errNotAllowed()
+		}
+		if err := h.chatSvc.CanAccessWorkspace(ctx, workspaceID, client.UserID); err != nil {
+			return uuid.Nil, err
+		}
+		return workspaceID, nil
+	case strings.HasPrefix(room, "aloqa.ws.") && strings.HasSuffix(room, ".events") && strings.Contains(room, ".user."):
+		if h.chatSvc == nil {
+			return uuid.Nil, errNotAllowed()
+		}
+		rest := strings.TrimPrefix(room, "aloqa.ws.")
+		workspacePart, userPart, ok := strings.Cut(rest, ".user.")
+		if !ok {
+			return uuid.Nil, errNotAllowed()
+		}
+		userPart = strings.TrimSuffix(userPart, ".events")
+		workspaceID, err := uuid.Parse(workspacePart)
+		if err != nil {
+			return uuid.Nil, errNotAllowed()
+		}
+		userID, err := uuid.Parse(userPart)
+		if err != nil || userID != client.UserID {
+			return uuid.Nil, errNotAllowed()
+		}
+		if err := h.chatSvc.CanAccessWorkspace(ctx, workspaceID, client.UserID); err != nil {
+			return uuid.Nil, err
+		}
+		return workspaceID, nil
 	case strings.HasPrefix(room, "aloqa.ws."):
 		if h.chatSvc == nil {
 			return uuid.Nil, errNotAllowed()

@@ -18,6 +18,7 @@ type RouterDeps struct {
 	Channels         *ChannelHandler
 	Messages         *MessageHandler
 	Calls            *CallHandler
+	Calendar         *CalendarHandler
 	Breakout         *BreakoutHandler
 	Files            *FileHandler
 	Presence         *PresenceHandler
@@ -270,6 +271,7 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 	r.Route("/calls", func(r chi.Router) {
 		r.Post("/", deps.Calls.Start)
 		r.Get("/", deps.Calls.ListActive)
+		r.Get("/recents", deps.Calls.Recents)
 
 		r.Route("/{callID}", func(r chi.Router) {
 			r.Get("/", deps.Calls.Get)
@@ -320,6 +322,31 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 					r.Get("/participants", deps.Breakout.Participants)
 				})
 			})
+		})
+	})
+
+	// Calendars.
+	r.Route("/calendars", func(r chi.Router) {
+		r.Get("/", deps.Calendar.ListCalendars)
+		r.Post("/", deps.Calendar.CreateCalendar)
+		r.Route("/{calendarID}", func(r chi.Router) {
+			r.Patch("/", deps.Calendar.UpdateCalendar)
+			r.Delete("/", deps.Calendar.DeleteCalendar)
+			r.Put("/visibility", deps.Calendar.SetCalendarVisibility)
+		})
+	})
+
+	// Calendar events.
+	r.Route("/events", func(r chi.Router) {
+		r.Get("/", deps.Calendar.ListEvents)
+		r.Post("/", deps.Calendar.CreateEvent)
+		r.Get("/upcoming", deps.Calendar.ListUpcoming)
+		r.Route("/{eventID}", func(r chi.Router) {
+			r.Get("/", deps.Calendar.GetEvent)
+			r.Patch("/", deps.Calendar.UpdateEvent)
+			r.Delete("/", deps.Calendar.DeleteEvent)
+			r.Put("/rsvp", deps.Calendar.UpsertRsvp)
+			r.Post("/start-call", deps.Calendar.StartCallFromEvent)
 		})
 	})
 }

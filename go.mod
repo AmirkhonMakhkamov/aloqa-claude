@@ -11,14 +11,13 @@ require (
 	github.com/jackc/pgx/v5 v5.7.4
 	github.com/nats-io/nats.go v1.39.1
 	github.com/pion/interceptor v0.1.37
+	github.com/pion/rtp v1.8.11
 	github.com/pion/webrtc/v4 v4.0.10
 	github.com/redis/go-redis/v9 v9.7.3
 	github.com/teambition/rrule-go v1.8.2
 	golang.org/x/crypto v0.36.0
 	nhooyr.io/websocket v1.8.17
 )
-
-replace github.com/teambition/rrule-go => ./internal/third_party/rrule-go
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -40,7 +39,6 @@ require (
 	github.com/pion/mdns/v2 v2.0.7 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
 	github.com/pion/rtcp v1.2.15 // indirect
-	github.com/pion/rtp v1.8.11 // indirect
 	github.com/pion/sctp v1.8.35 // indirect
 	github.com/pion/sdp/v3 v3.0.10 // indirect
 	github.com/pion/srtp/v3 v3.0.4 // indirect

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -164,7 +166,7 @@ func (r *CalendarRepo) EnsureDefaultCalendar(ctx context.Context, workspaceID, o
 func (r *CalendarRepo) ListEvents(ctx context.Context, workspaceID uuid.UUID, fromTS, toTS time.Time, viewerID uuid.UUID) ([]entity.EventOccurrence, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT e.id, e.calendar_id, e.workspace_id, e.channel_id, e.organizer_id, e.title,
-		       e.description, e.location_type, e.location_value, e.scheduled_at, e.duration_minutes,
+		       e.description, e.location_type, e.location_value, e.scheduled_at, e.originator_tz, e.duration_minutes,
 		       e.all_day, e.recurrence_rrule, e.recurrence_exdates, e.call_id, e.created_at, e.updated_at
 		FROM calendar_events e
 		JOIN user_calendars uc ON uc.id = e.calendar_id
@@ -232,7 +234,7 @@ func (r *CalendarRepo) ListEventsForReminderFanout(ctx context.Context, withinWi
 func (r *CalendarRepo) computeReminderTargets(ctx context.Context, windowStart, now, horizon time.Time) ([]entity.ReminderTarget, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT e.id, e.calendar_id, e.workspace_id, e.channel_id, e.organizer_id, e.title,
-		       e.description, e.location_type, e.location_value, e.scheduled_at, e.duration_minutes,
+		       e.description, e.location_type, e.location_value, e.scheduled_at, e.originator_tz, e.duration_minutes,
 		       e.all_day, e.recurrence_rrule, e.recurrence_exdates, e.call_id, e.created_at, e.updated_at,
 		       r.user_id, r.offset_minutes
 		FROM calendar_events e
@@ -438,13 +440,13 @@ func (r *CalendarRepo) insertEvent(ctx context.Context, event *entity.CalendarEv
 	_, err := r.db.Exec(ctx, `
 		INSERT INTO calendar_events (
 			id, calendar_id, workspace_id, channel_id, organizer_id, title, description,
-			location_type, location_value, scheduled_at, duration_minutes, all_day,
+			location_type, location_value, scheduled_at, originator_tz, duration_minutes, all_day,
 			recurrence_rrule, recurrence_exdates, call_id, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
 		event.ID, event.CalendarID, event.WorkspaceID, event.ChannelID, event.OrganizerID,
 		event.Title, event.Description, event.Location.Type, event.Location.Value, event.ScheduledAt,
-		event.DurationMinutes, event.AllDay, rrule, exdates, event.CallID, event.CreatedAt, event.UpdatedAt)
+		originatorTZOrDefault(event.OriginatorTZ), event.DurationMinutes, event.AllDay, rrule, exdates, event.CallID, event.CreatedAt, event.UpdatedAt)
 	if err != nil {
 		return wrapCalendarWriteErr(err, "create calendar event")
 	}
@@ -456,14 +458,14 @@ func (r *CalendarRepo) updateEventRow(ctx context.Context, event *entity.Calenda
 	row := r.db.QueryRow(ctx, `
 		UPDATE calendar_events
 		SET calendar_id = $2, channel_id = $3, title = $4, description = $5,
-		    location_type = $6, location_value = $7, scheduled_at = $8, duration_minutes = $9,
-		    all_day = $10, recurrence_rrule = $11, recurrence_exdates = $12, call_id = $13
-		WHERE id = $1 AND workspace_id = $14
+		    location_type = $6, location_value = $7, scheduled_at = $8, originator_tz = $9, duration_minutes = $10,
+		    all_day = $11, recurrence_rrule = $12, recurrence_exdates = $13, call_id = $14
+		WHERE id = $1 AND workspace_id = $15
 		RETURNING id, calendar_id, workspace_id, channel_id, organizer_id, title,
-		          description, location_type, location_value, scheduled_at, duration_minutes,
+		          description, location_type, location_value, scheduled_at, originator_tz, duration_minutes,
 		          all_day, recurrence_rrule, recurrence_exdates, call_id, created_at, updated_at`,
 		event.ID, event.CalendarID, event.ChannelID, event.Title, event.Description,
-		event.Location.Type, event.Location.Value, event.ScheduledAt, event.DurationMinutes,
+		event.Location.Type, event.Location.Value, event.ScheduledAt, originatorTZOrDefault(event.OriginatorTZ), event.DurationMinutes,
 		event.AllDay, rrule, exdates, event.CallID, event.WorkspaceID)
 	updated, err := scanCalendarEvent(row)
 	if err != nil {
@@ -633,6 +635,7 @@ func scanCalendarEvent(row scanner) (*entity.CalendarEvent, error) {
 		&event.Location.Type,
 		&locationValue,
 		&event.ScheduledAt,
+		&event.OriginatorTZ,
 		&event.DurationMinutes,
 		&event.AllDay,
 		&recurrenceRRule,
@@ -650,6 +653,7 @@ func scanCalendarEvent(row scanner) (*entity.CalendarEvent, error) {
 			Exdates: recurrenceExdates,
 		}
 	}
+	event.OriginatorTZ = originatorTZOrDefault(event.OriginatorTZ)
 	return &event, nil
 }
 
@@ -671,6 +675,7 @@ func scanCalendarEventReminderRow(row scanner) (*entity.CalendarEvent, uuid.UUID
 		&event.Location.Type,
 		&locationValue,
 		&event.ScheduledAt,
+		&event.OriginatorTZ,
 		&event.DurationMinutes,
 		&event.AllDay,
 		&recurrenceRRule,
@@ -687,6 +692,7 @@ func scanCalendarEventReminderRow(row scanner) (*entity.CalendarEvent, uuid.UUID
 	if recurrenceRRule != nil {
 		event.Recurrence = &entity.RecurrenceRule{RRule: *recurrenceRRule, Exdates: recurrenceExdates}
 	}
+	event.OriginatorTZ = originatorTZOrDefault(event.OriginatorTZ)
 	return &event, userID, offsetMinutes, nil
 }
 
@@ -709,7 +715,7 @@ func scanEventAttendee(row scanner) (*entity.EventAttendee, error) {
 func calendarEventSelectSQL() string {
 	return `
 		SELECT e.id, e.calendar_id, e.workspace_id, e.channel_id, e.organizer_id, e.title,
-		       e.description, e.location_type, e.location_value, e.scheduled_at, e.duration_minutes,
+		       e.description, e.location_type, e.location_value, e.scheduled_at, e.originator_tz, e.duration_minutes,
 		       e.all_day, e.recurrence_rrule, e.recurrence_exdates, e.call_id, e.created_at, e.updated_at
 		FROM calendar_events e`
 }
@@ -719,6 +725,14 @@ func recurrenceColumns(recurrence *entity.RecurrenceRule) (*string, []time.Time)
 		return nil, nil
 	}
 	return &recurrence.RRule, recurrence.Exdates
+}
+
+func originatorTZOrDefault(originatorTZ string) string {
+	originatorTZ = strings.TrimSpace(originatorTZ)
+	if originatorTZ == "" {
+		return "UTC"
+	}
+	return originatorTZ
 }
 
 func expandOccurrences(events []*entity.CalendarEvent, fromTS, toTS time.Time) ([]entity.EventOccurrence, error) {
@@ -736,20 +750,31 @@ func expandOccurrences(events []*entity.CalendarEvent, fromTS, toTS time.Time) (
 			})
 			continue
 		}
-		expanded, err := calrrule.Expand(event.Recurrence.RRule, event.ScheduledAt, event.Recurrence.Exdates, fromTS, toTS)
+		loc := loadOriginatorLocation(event.OriginatorTZ)
+		expanded, err := calrrule.Expand(event.Recurrence.RRule, event.ScheduledAt.In(loc), event.Recurrence.Exdates, fromTS.In(loc), toTS.In(loc))
 		if err != nil {
 			return nil, err
 		}
 		for _, instanceAt := range expanded {
 			occurrences = append(occurrences, entity.EventOccurrence{
 				CalendarEvent:       *event,
-				InstanceAt:          instanceAt,
+				InstanceAt:          instanceAt.UTC(),
 				IsRecurringInstance: true,
 			})
 		}
 	}
 	sortOccurrences(occurrences)
 	return occurrences, nil
+}
+
+func loadOriginatorLocation(originatorTZ string) *time.Location {
+	originatorTZ = originatorTZOrDefault(originatorTZ)
+	loc, err := time.LoadLocation(originatorTZ)
+	if err == nil {
+		return loc
+	}
+	slog.Warn("invalid calendar event originator_tz, falling back to UTC", "originator_tz", originatorTZ, "error", err)
+	return time.UTC
 }
 
 func sortOccurrences(occurrences []entity.EventOccurrence) {

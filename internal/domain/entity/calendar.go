@@ -93,6 +93,7 @@ type CalendarEvent struct {
 	Description     *string         `json:"description"`
 	Location        EventLocation   `json:"location"`
 	ScheduledAt     time.Time       `json:"scheduled_at"`
+	OriginatorTZ    string          `json:"originator_tz"`
 	DurationMinutes int             `json:"duration_minutes"`
 	AllDay          bool            `json:"all_day"`
 	Recurrence      *RecurrenceRule `json:"recurrence"`

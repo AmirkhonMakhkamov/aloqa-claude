@@ -44,6 +44,7 @@ type CreateEventInput struct {
 	Description     *string
 	Location        entity.EventLocation
 	ScheduledAt     time.Time
+	OriginatorTZ    string
 	DurationMinutes int
 	AllDay          bool
 	Recurrence      *entity.RecurrenceRule
@@ -62,6 +63,8 @@ type UpdateEventInput struct {
 	DescriptionSet  bool
 	Location        *entity.EventLocation
 	ScheduledAt     *time.Time
+	OriginatorTZ    *string
+	OriginatorTZSet bool
 	DurationMinutes *int
 	AllDay          *bool
 	Recurrence      *entity.RecurrenceRule
@@ -237,6 +240,7 @@ func (s *Service) CreateEvent(ctx context.Context, workspaceID, organizerID uuid
 		Description:     input.Description,
 		Location:        input.Location,
 		ScheduledAt:     input.ScheduledAt.UTC(),
+		OriginatorTZ:    normalizeOriginatorTZ(input.OriginatorTZ),
 		DurationMinutes: input.DurationMinutes,
 		AllDay:          input.AllDay,
 		Recurrence:      normalizeRecurrence(input.Recurrence),
@@ -289,6 +293,12 @@ func (s *Service) UpdateEvent(ctx context.Context, workspaceID, eventID, actorID
 	}
 	if input.ScheduledAt != nil {
 		existing.ScheduledAt = input.ScheduledAt.UTC()
+	}
+	if input.OriginatorTZSet {
+		existing.OriginatorTZ = normalizeOriginatorTZ("")
+		if input.OriginatorTZ != nil {
+			existing.OriginatorTZ = normalizeOriginatorTZ(*input.OriginatorTZ)
+		}
 	}
 	if input.DurationMinutes != nil {
 		existing.DurationMinutes = *input.DurationMinutes
@@ -492,6 +502,14 @@ func normalizeRecurrence(recurrence *entity.RecurrenceRule) *entity.RecurrenceRu
 		return nil
 	}
 	return &entity.RecurrenceRule{RRule: rrule, Exdates: recurrence.Exdates}
+}
+
+func normalizeOriginatorTZ(originatorTZ string) string {
+	originatorTZ = strings.TrimSpace(originatorTZ)
+	if originatorTZ == "" {
+		return "UTC"
+	}
+	return originatorTZ
 }
 
 func buildAttendees(eventID uuid.UUID, userIDs []uuid.UUID, emails []string, requiredUserIDs []uuid.UUID) []entity.EventAttendee {

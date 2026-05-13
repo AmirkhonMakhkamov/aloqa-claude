@@ -27,9 +27,37 @@ func (s transientSubscription) Close() error {
 	return s.sub.Unsubscribe()
 }
 
+// aloqaStreamConfig is the JetStream stream that backs every durable
+// realtime subject the app publishes to. Defined here so the initial
+// AddStream call and the reconnect-time recovery use exactly the same shape.
+var aloqaStreamConfig = &nats.StreamConfig{
+	Name:      "ALOQA",
+	Subjects:  []string{"aloqa.>"},
+	Retention: nats.InterestPolicy,
+	MaxAge:    24 * time.Hour,
+	Storage:   nats.FileStorage,
+}
+
+// ensureAloqaStream creates or re-creates the ALOQA stream. Idempotent — if a
+// stream with the same config already exists, AddStream returns the existing
+// info without error.
+func ensureAloqaStream(js nats.JetStreamContext) error {
+	if _, err := js.AddStream(aloqaStreamConfig); err != nil {
+		return fmt.Errorf("creating ALOQA stream: %w", err)
+	}
+	return nil
+}
+
 // New connects to NATS, creates a JetStream context, and ensures the ALOQA
-// stream exists covering all "aloqa.>" subjects.
+// stream exists covering all "aloqa.>" subjects. The ReconnectHandler re-runs
+// ensureAloqaStream so a NATS server restart (which wipes non-persisted
+// JetStream state) cannot leave the backend publishing into a void — without
+// this, every realtime outbox flush after reconnect fails with
+// "nats: no response from stream" and recipients stop seeing live messages
+// until the backend itself is restarted.
 func New(url string) (*PubSub, error) {
+	var js nats.JetStreamContext
+
 	conn, err := nats.Connect(url,
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(10),
@@ -39,29 +67,29 @@ func New(url string) (*PubSub, error) {
 		}),
 		nats.ReconnectHandler(func(c *nats.Conn) {
 			slog.Info("nats reconnected", slog.String("url", c.ConnectedUrl()))
+			if js == nil {
+				return
+			}
+			if err := ensureAloqaStream(js); err != nil {
+				slog.Error("re-ensuring ALOQA stream after reconnect failed", slog.Any("error", err))
+				return
+			}
+			slog.Info("ALOQA stream re-ensured after NATS reconnect")
 		}),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to nats: %w", err)
 	}
 
-	js, err := conn.JetStream()
+	js, err = conn.JetStream()
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("creating jetstream context: %w", err)
 	}
 
-	// Create or update the ALOQA stream.
-	_, err = js.AddStream(&nats.StreamConfig{
-		Name:      "ALOQA",
-		Subjects:  []string{"aloqa.>"},
-		Retention: nats.InterestPolicy,
-		MaxAge:    24 * time.Hour,
-		Storage:   nats.FileStorage,
-	})
-	if err != nil {
+	if err := ensureAloqaStream(js); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("creating ALOQA stream: %w", err)
+		return nil, err
 	}
 
 	slog.Info("nats connected", slog.String("url", conn.ConnectedUrl()))

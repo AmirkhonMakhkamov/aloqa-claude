@@ -221,32 +221,32 @@ func (r *CalendarRepo) ListUpcoming(ctx context.Context, workspaceID, viewerID u
 	return filtered, nil
 }
 
-func (r *CalendarRepo) ListEventsForReminderFanout(ctx context.Context, withinWindow time.Duration) ([]entity.ReminderTarget, error) {
-	if withinWindow <= 0 {
-		withinWindow = 30 * time.Second
-	}
-	now := time.Now().UTC()
-	windowStart := now.Add(-withinWindow)
-	horizon := now.Add(10080 * time.Minute)
-	return r.computeReminderTargets(ctx, windowStart, now, horizon)
-}
-
-func (r *CalendarRepo) ListDueReminderTargets(ctx context.Context, now time.Time, limit int) ([]entity.ReminderTarget, error) {
+func (r *CalendarRepo) ListDueReminderTargets(ctx context.Context, now time.Time, horizonWindow time.Duration, limit int) ([]entity.ReminderTarget, error) {
 	if limit <= 0 {
 		limit = 100
 	}
+	if horizonWindow <= 0 {
+		horizonWindow = 24 * time.Hour
+	}
+	now = now.UTC()
+	if err := r.discoverDueReminderDispatches(ctx, now, horizonWindow); err != nil {
+		return nil, err
+	}
+
 	rows, err := r.db.Query(ctx, `
-		SELECT r.id, e.id, e.calendar_id, e.workspace_id, e.channel_id, e.organizer_id, e.title,
+		SELECT d.reminder_id, d.occurrence_at,
+		       e.id, e.calendar_id, e.workspace_id, e.channel_id, e.organizer_id, e.title,
 		       e.description, e.location_type, e.location_value, e.scheduled_at, e.originator_tz, e.duration_minutes,
 		       e.all_day, e.recurrence_rrule, e.recurrence_exdates, e.call_id, e.created_at, e.updated_at,
-		       r.user_id, r.offset_minutes, r.channel, r.fire_at
-		FROM event_reminders r
+		       r.user_id, r.offset_minutes, r.channel
+		FROM event_reminder_dispatches d
+		JOIN event_reminders r ON r.id = d.reminder_id
 		JOIN calendar_events e ON e.id = r.event_id
-		WHERE r.reminders_dispatched_at IS NULL
-		  AND r.fire_at <= $1
-		ORDER BY r.fire_at ASC, r.id ASC
+		WHERE d.dispatched_at IS NULL
+		  AND d.occurrence_at - make_interval(mins => r.offset_minutes) <= $1
+		ORDER BY d.occurrence_at - make_interval(mins => r.offset_minutes), d.reminder_id
 		LIMIT $2
-		FOR UPDATE OF r SKIP LOCKED`, now.UTC(), limit)
+		FOR UPDATE OF d SKIP LOCKED`, now, limit)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list due reminder targets: %w", err)
 	}
@@ -254,17 +254,18 @@ func (r *CalendarRepo) ListDueReminderTargets(ctx context.Context, now time.Time
 
 	type dueReminderRow struct {
 		reminderID    uuid.UUID
+		occurrenceAt  time.Time
 		event         *entity.CalendarEvent
 		userID        uuid.UUID
 		offsetMinutes int
 		channel       entity.ReminderChannel
-		fireAt        time.Time
 	}
 
 	var dueRows []dueReminderRow
 	var events []*entity.CalendarEvent
 	for rows.Next() {
 		var reminderID uuid.UUID
+		var occurrenceAt time.Time
 		var event entity.CalendarEvent
 		var locationValue *string
 		var recurrenceRRule *string
@@ -272,9 +273,9 @@ func (r *CalendarRepo) ListDueReminderTargets(ctx context.Context, now time.Time
 		var userID uuid.UUID
 		var offsetMinutes int
 		var channel entity.ReminderChannel
-		var fireAt time.Time
 		if err := rows.Scan(
 			&reminderID,
+			&occurrenceAt,
 			&event.ID,
 			&event.CalendarID,
 			&event.WorkspaceID,
@@ -296,7 +297,6 @@ func (r *CalendarRepo) ListDueReminderTargets(ctx context.Context, now time.Time
 			&userID,
 			&offsetMinutes,
 			&channel,
-			&fireAt,
 		); err != nil {
 			return nil, fmt.Errorf("postgres: list due reminder targets scan: %w", err)
 		}
@@ -309,11 +309,11 @@ func (r *CalendarRepo) ListDueReminderTargets(ctx context.Context, now time.Time
 		events = append(events, eventCopy)
 		dueRows = append(dueRows, dueReminderRow{
 			reminderID:    reminderID,
+			occurrenceAt:  occurrenceAt.UTC(),
 			event:         eventCopy,
 			userID:        userID,
 			offsetMinutes: offsetMinutes,
 			channel:       channel,
-			fireAt:        fireAt.UTC(),
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -325,7 +325,7 @@ func (r *CalendarRepo) ListDueReminderTargets(ctx context.Context, now time.Time
 
 	targets := make([]entity.ReminderTarget, 0, len(dueRows))
 	for _, row := range dueRows {
-		instanceAt := row.fireAt.Add(time.Duration(row.offsetMinutes) * time.Minute)
+		instanceAt := row.occurrenceAt
 		targets = append(targets, entity.ReminderTarget{
 			ReminderID: row.reminderID,
 			Occurrence: entity.EventOccurrence{
@@ -336,31 +336,20 @@ func (r *CalendarRepo) ListDueReminderTargets(ctx context.Context, now time.Time
 			UserID:        row.userID,
 			OffsetMinutes: row.offsetMinutes,
 			Channel:       row.channel,
-			FireAt:        row.fireAt,
+			FireAt:        instanceAt.Add(-time.Duration(row.offsetMinutes) * time.Minute),
 		})
 	}
 	return targets, nil
 }
 
-func (r *CalendarRepo) MarkReminderDispatched(ctx context.Context, reminderID uuid.UUID, dispatchedAt time.Time) error {
-	_ = dispatchedAt
-	_, err := r.db.Exec(ctx, `
-		UPDATE event_reminders
-		SET reminders_dispatched_at = NOW()
-		WHERE id = $1
-		  AND reminders_dispatched_at IS NULL`, reminderID)
-	if err != nil {
-		return fmt.Errorf("postgres: mark reminder dispatched: %w", err)
-	}
-	return nil
-}
-
-func (r *CalendarRepo) computeReminderTargets(ctx context.Context, windowStart, now, horizon time.Time) ([]entity.ReminderTarget, error) {
+func (r *CalendarRepo) discoverDueReminderDispatches(ctx context.Context, now time.Time, horizonWindow time.Duration) error {
+	windowStart := now.Add(-30 * time.Second)
+	horizon := now.Add(horizonWindow)
 	rows, err := r.db.Query(ctx, `
-		SELECT e.id, e.calendar_id, e.workspace_id, e.channel_id, e.organizer_id, e.title,
+		SELECT r.id, e.id, e.calendar_id, e.workspace_id, e.channel_id, e.organizer_id, e.title,
 		       e.description, e.location_type, e.location_value, e.scheduled_at, e.originator_tz, e.duration_minutes,
 		       e.all_day, e.recurrence_rrule, e.recurrence_exdates, e.call_id, e.created_at, e.updated_at,
-		       r.user_id, r.offset_minutes
+		       r.user_id, r.offset_minutes, r.channel
 		FROM calendar_events e
 		JOIN event_reminders r ON r.event_id = e.id
 		WHERE e.scheduled_at <= $2
@@ -370,37 +359,40 @@ func (r *CalendarRepo) computeReminderTargets(ctx context.Context, windowStart, 
 		  )
 		ORDER BY e.scheduled_at ASC`, windowStart, horizon)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: compute reminder targets: %w", err)
+		return fmt.Errorf("postgres: discover reminder dispatches: %w", err)
 	}
 	defer rows.Close()
 
-	type reminderRow struct {
+	type reminderDefinition struct {
+		reminderID    uuid.UUID
 		eventID       uuid.UUID
-		userID        uuid.UUID
 		offsetMinutes int
 	}
 	eventsByID := map[uuid.UUID]*entity.CalendarEvent{}
 	var events []*entity.CalendarEvent
-	var reminders []reminderRow
+	var reminders []reminderDefinition
 	for rows.Next() {
-		event, userID, offset, err := scanCalendarEventReminderRow(rows)
+		event, reminderID, _, offset, _, err := scanCalendarEventReminderRow(rows)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if _, ok := eventsByID[event.ID]; !ok {
 			eventsByID[event.ID] = event
 			events = append(events, event)
 		}
-		reminders = append(reminders, reminderRow{eventID: event.ID, userID: userID, offsetMinutes: offset})
+		reminders = append(reminders, reminderDefinition{
+			reminderID:    reminderID,
+			eventID:       event.ID,
+			offsetMinutes: offset,
+		})
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: compute reminder targets rows: %w", err)
+		return fmt.Errorf("postgres: discover reminder dispatches rows: %w", err)
 	}
 	if err := r.hydrateEvents(ctx, events); err != nil {
-		return nil, err
+		return err
 	}
 
-	var targets []entity.ReminderTarget
 	seen := map[string]struct{}{}
 	for _, reminder := range reminders {
 		event := eventsByID[reminder.eventID]
@@ -409,29 +401,150 @@ func (r *CalendarRepo) computeReminderTargets(ctx context.Context, windowStart, 
 		}
 		occurrences, err := expandOccurrences([]*entity.CalendarEvent{event}, windowStart, horizon)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		for _, occurrence := range occurrences {
-			dueAt := occurrence.InstanceAt.Add(-time.Duration(reminder.offsetMinutes) * time.Minute)
-			if !dueAt.After(windowStart) || dueAt.After(now) {
+			occurrenceAt := occurrence.InstanceAt.UTC()
+			fireAt := occurrenceAt.Add(-time.Duration(reminder.offsetMinutes) * time.Minute)
+			if fireAt.After(now) {
 				continue
 			}
-			key := fmt.Sprintf("%s:%s:%d:%s", reminder.eventID, reminder.userID, reminder.offsetMinutes, occurrence.InstanceAt.UTC().Format(time.RFC3339Nano))
+			key := reminder.reminderID.String() + ":" + occurrenceAt.Format(time.RFC3339Nano)
 			if _, ok := seen[key]; ok {
 				continue
 			}
 			seen[key] = struct{}{}
-			targets = append(targets, entity.ReminderTarget{
-				Occurrence:    occurrence,
-				UserID:        reminder.userID,
-				OffsetMinutes: reminder.offsetMinutes,
-			})
+			if _, err := r.db.Exec(ctx, `
+				INSERT INTO event_reminder_dispatches (reminder_id, occurrence_at)
+				VALUES ($1, $2)
+				ON CONFLICT DO NOTHING`, reminder.reminderID, occurrenceAt); err != nil {
+				return fmt.Errorf("postgres: insert reminder dispatch: %w", err)
+			}
 		}
 	}
-	sort.Slice(targets, func(i, j int) bool {
-		return targets[i].Occurrence.InstanceAt.Before(targets[j].Occurrence.InstanceAt)
-	})
-	return targets, nil
+	return nil
+}
+
+func (r *CalendarRepo) EnqueueReminderOutbox(ctx context.Context, target entity.ReminderTarget, payloadJSON []byte, enqueuedAt time.Time) error {
+	if _, err := r.db.Exec(ctx, `
+		INSERT INTO reminder_outbox (reminder_id, event_id, occurrence_at, user_id, payload_json, enqueued_at)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		target.ReminderID,
+		target.Occurrence.ID,
+		target.Occurrence.InstanceAt.UTC(),
+		target.UserID,
+		string(payloadJSON),
+		enqueuedAt.UTC(),
+	); err != nil {
+		return fmt.Errorf("postgres: enqueue reminder outbox: %w", err)
+	}
+	return nil
+}
+
+func (r *CalendarRepo) MarkReminderDispatched(ctx context.Context, reminderID uuid.UUID, occurrenceAt, dispatchedAt time.Time) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE event_reminder_dispatches
+		SET dispatched_at = $3
+		WHERE reminder_id = $1
+		  AND occurrence_at = $2
+		  AND dispatched_at IS NULL`, reminderID, occurrenceAt.UTC(), dispatchedAt.UTC())
+	if err != nil {
+		return fmt.Errorf("postgres: mark reminder dispatched: %w", err)
+	}
+	return nil
+}
+
+func (r *CalendarRepo) PublishReminderOutbox(ctx context.Context, limit, maxAttempts int, publish func(context.Context, entity.ReminderOutboxMessage) error) (processed, failed, dead int, err error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if maxAttempts <= 0 {
+		maxAttempts = 10
+	}
+	if r.pool == nil {
+		return 0, 0, 0, cerrors.Unavailable("calendar repository transaction support is not configured")
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("postgres: begin reminder outbox tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	rows, err := tx.Query(ctx, `
+		SELECT id, reminder_id, event_id, occurrence_at, user_id, payload_json, enqueued_at, attempts
+		FROM reminder_outbox
+		WHERE published_at IS NULL
+		  AND attempts < $2
+		ORDER BY enqueued_at ASC, id ASC
+		LIMIT $1
+		FOR UPDATE SKIP LOCKED`, limit, maxAttempts)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("postgres: claim reminder outbox: %w", err)
+	}
+
+	var messages []entity.ReminderOutboxMessage
+	for rows.Next() {
+		var msg entity.ReminderOutboxMessage
+		if err := rows.Scan(
+			&msg.ID,
+			&msg.ReminderID,
+			&msg.EventID,
+			&msg.OccurrenceAt,
+			&msg.UserID,
+			&msg.PayloadJSON,
+			&msg.EnqueuedAt,
+			&msg.Attempts,
+		); err != nil {
+			rows.Close()
+			return 0, 0, 0, fmt.Errorf("postgres: scan reminder outbox: %w", err)
+		}
+		msg.OccurrenceAt = msg.OccurrenceAt.UTC()
+		msg.EnqueuedAt = msg.EnqueuedAt.UTC()
+		messages = append(messages, msg)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, 0, 0, fmt.Errorf("postgres: reminder outbox rows: %w", err)
+	}
+	rows.Close()
+
+	for _, msg := range messages {
+		if publish != nil {
+			if err := publish(ctx, msg); err != nil {
+				if _, updateErr := tx.Exec(ctx, `
+					UPDATE reminder_outbox
+					SET attempts = attempts + 1
+					WHERE id = $1`, msg.ID); updateErr != nil {
+					return processed, failed, dead, fmt.Errorf("postgres: mark reminder outbox failed: %w", updateErr)
+				}
+				if msg.Attempts+1 >= maxAttempts {
+					dead++
+				} else {
+					failed++
+				}
+				continue
+			}
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE reminder_outbox
+			SET published_at = NOW(),
+			    attempts = attempts + 1
+			WHERE id = $1
+			  AND published_at IS NULL`, msg.ID); err != nil {
+			return processed, failed, dead, fmt.Errorf("postgres: mark reminder outbox published: %w", err)
+		}
+		processed++
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return processed, failed, dead, fmt.Errorf("postgres: commit reminder outbox tx: %w", err)
+	}
+	committed = true
+	return processed, failed, dead, nil
 }
 
 func (r *CalendarRepo) GetEvent(ctx context.Context, eventID uuid.UUID) (*entity.CalendarEvent, error) {
@@ -667,15 +780,6 @@ func (r *CalendarRepo) replaceReminders(ctx context.Context, eventID uuid.UUID, 
 	if _, err := r.db.Exec(ctx, `DELETE FROM event_reminders WHERE event_id = $1`, eventID); err != nil {
 		return fmt.Errorf("postgres: replace event reminders delete: %w", err)
 	}
-	var scheduledAt time.Time
-	for _, reminder := range reminders {
-		if reminder.UserID != uuid.Nil && reminder.FireAt.IsZero() {
-			if err := r.db.QueryRow(ctx, `SELECT scheduled_at FROM calendar_events WHERE id = $1`, eventID).Scan(&scheduledAt); err != nil {
-				return fmt.Errorf("postgres: replace event reminders scheduled_at: %w", err)
-			}
-			break
-		}
-	}
 	for _, reminder := range reminders {
 		if reminder.UserID == uuid.Nil {
 			continue
@@ -683,14 +787,11 @@ func (r *CalendarRepo) replaceReminders(ctx context.Context, eventID uuid.UUID, 
 		if reminder.ID == uuid.Nil {
 			reminder.ID = id.New()
 		}
-		if reminder.FireAt.IsZero() {
-			reminder.FireAt = scheduledAt.Add(-time.Duration(reminder.OffsetMinutes) * time.Minute)
-		}
 		_, err := r.db.Exec(ctx, `
-			INSERT INTO event_reminders (id, event_id, user_id, offset_minutes, channel, fire_at, reminders_dispatched_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			INSERT INTO event_reminders (id, event_id, user_id, offset_minutes, channel)
+			VALUES ($1, $2, $3, $4, $5)
 			ON CONFLICT (event_id, user_id, offset_minutes, channel) DO NOTHING`,
-			reminder.ID, eventID, reminder.UserID, reminder.OffsetMinutes, reminder.Channel, reminder.FireAt.UTC(), reminder.RemindersDispatchedAt)
+			reminder.ID, eventID, reminder.UserID, reminder.OffsetMinutes, reminder.Channel)
 		if err != nil {
 			return wrapCalendarWriteErr(err, "replace event reminders")
 		}
@@ -833,14 +934,17 @@ func scanCalendarEvent(row scanner) (*entity.CalendarEvent, error) {
 	return &event, nil
 }
 
-func scanCalendarEventReminderRow(row scanner) (*entity.CalendarEvent, uuid.UUID, int, error) {
+func scanCalendarEventReminderRow(row scanner) (*entity.CalendarEvent, uuid.UUID, uuid.UUID, int, entity.ReminderChannel, error) {
 	var event entity.CalendarEvent
+	var reminderID uuid.UUID
 	var locationValue *string
 	var recurrenceRRule *string
 	var recurrenceExdates []time.Time
 	var userID uuid.UUID
 	var offsetMinutes int
+	var channel entity.ReminderChannel
 	if err := row.Scan(
+		&reminderID,
 		&event.ID,
 		&event.CalendarID,
 		&event.WorkspaceID,
@@ -861,15 +965,16 @@ func scanCalendarEventReminderRow(row scanner) (*entity.CalendarEvent, uuid.UUID
 		&event.UpdatedAt,
 		&userID,
 		&offsetMinutes,
+		&channel,
 	); err != nil {
-		return nil, uuid.Nil, 0, fmt.Errorf("postgres: scan calendar event reminder row: %w", err)
+		return nil, uuid.Nil, uuid.Nil, 0, "", fmt.Errorf("postgres: scan calendar event reminder row: %w", err)
 	}
 	event.Location.Value = locationValue
 	if recurrenceRRule != nil {
 		event.Recurrence = &entity.RecurrenceRule{RRule: *recurrenceRRule, Exdates: recurrenceExdates}
 	}
 	event.OriginatorTZ = originatorTZOrDefault(event.OriginatorTZ)
-	return &event, userID, offsetMinutes, nil
+	return &event, reminderID, userID, offsetMinutes, channel, nil
 }
 
 func scanEventAttendee(row scanner) (*entity.EventAttendee, error) {

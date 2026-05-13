@@ -33,11 +33,11 @@ type Extension struct {
 
 // IVRMenu represents an interactive voice response menu.
 type IVRMenu struct {
-	ID          uuid.UUID    `json:"id"`
-	WorkspaceID uuid.UUID    `json:"workspace_id"`
-	Name        string       `json:"name"`
-	Greeting    string       `json:"greeting"` // Audio file or TTS text
-	Options     []IVROption  `json:"options"`
+	ID          uuid.UUID   `json:"id"`
+	WorkspaceID uuid.UUID   `json:"workspace_id"`
+	Name        string      `json:"name"`
+	Greeting    string      `json:"greeting"` // Audio file or TTS text
+	Options     []IVROption `json:"options"`
 }
 
 // IVROption maps a DTMF digit to an action.
@@ -49,11 +49,11 @@ type IVROption struct {
 
 // CallQueue represents a call queue for distributing inbound calls.
 type CallQueue struct {
-	ID           uuid.UUID `json:"id"`
-	WorkspaceID  uuid.UUID `json:"workspace_id"`
-	Name         string    `json:"name"`
-	Strategy     string    `json:"strategy"` // round_robin, least_recent, simultaneous, random
-	MaxWaitTime  int       `json:"max_wait_time"` // seconds
-	MusicOnHold  string    `json:"music_on_hold"`
-	Members      []uuid.UUID `json:"members"` // Agent user IDs
+	ID          uuid.UUID   `json:"id"`
+	WorkspaceID uuid.UUID   `json:"workspace_id"`
+	Name        string      `json:"name"`
+	Strategy    string      `json:"strategy"`      // round_robin, least_recent, simultaneous, random
+	MaxWaitTime int         `json:"max_wait_time"` // seconds
+	MusicOnHold string      `json:"music_on_hold"`
+	Members     []uuid.UUID `json:"members"` // Agent user IDs
 }

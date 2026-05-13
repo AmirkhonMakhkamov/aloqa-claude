@@ -35,6 +35,13 @@ type Service struct {
 	tx        txscope.Manager
 }
 
+const (
+	reminderDispatchLimit     = 100
+	reminderDiscoveryHorizon  = 24 * time.Hour
+	reminderOutboxBatchSize   = 100
+	reminderOutboxMaxAttempts = 10
+)
+
 type CreateEventInput struct {
 	CalendarID      uuid.UUID
 	ChannelID       *uuid.UUID
@@ -249,7 +256,7 @@ func (s *Service) CreateEvent(ctx context.Context, workspaceID, organizerID uuid
 		UpdatedAt:       now,
 	}
 	eventEntity.Attendees = buildAttendees(eventEntity.ID, input.AttendeeUserIDs, input.AttendeeEmails, input.RequiredUserIDs)
-	eventEntity.Reminders = buildReminderRows(eventEntity.ID, organizerID, eventEntity.ScheduledAt, eventEntity.Attendees, input.Reminders)
+	eventEntity.Reminders = buildReminderRows(eventEntity.ID, organizerID, eventEntity.Attendees, input.Reminders)
 
 	created, err := s.calendars.CreateEvent(ctx, eventEntity)
 	if err != nil {
@@ -319,7 +326,7 @@ func (s *Service) UpdateEvent(ctx context.Context, workspaceID, eventID, actorID
 	if err := s.validateEventEntity(existing); err != nil {
 		return nil, err
 	}
-	existing.Reminders = buildReminderRows(existing.ID, existing.OrganizerID, existing.ScheduledAt, existing.Attendees, existing.Reminders)
+	existing.Reminders = buildReminderRows(existing.ID, existing.OrganizerID, existing.Attendees, existing.Reminders)
 
 	updated, err := s.calendars.UpdateEvent(ctx, existing)
 	if err != nil {
@@ -512,33 +519,50 @@ func (s *Service) startCallFromEventTx(ctx context.Context, workspaceID, eventID
 
 func (s *Service) ListAndDispatchReminders(ctx context.Context, now time.Time) error {
 	now = now.UTC()
-	if s.tx != nil {
-		return s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
-			if scope.Calendars() == nil {
-				return cerrors.Unavailable("calendar transaction scope is not configured")
-			}
-			return s.dispatchDueReminders(ctx, scope.Calendars(), now)
-		})
+	if s.tx == nil {
+		return cerrors.Unavailable("calendar transaction manager is not configured")
 	}
-	return s.dispatchDueReminders(ctx, s.calendars, now)
+	return s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
+		if scope.Calendars() == nil {
+			return cerrors.Unavailable("calendar transaction scope is not configured")
+		}
+		return s.dispatchDueReminders(ctx, scope.Calendars(), now)
+	})
 }
 
 func (s *Service) dispatchDueReminders(ctx context.Context, calendars repository.CalendarRepository, now time.Time) error {
-	targets, err := calendars.ListDueReminderTargets(ctx, now, 100)
+	targets, err := calendars.ListDueReminderTargets(ctx, now, reminderDiscoveryHorizon, reminderDispatchLimit)
 	if err != nil {
 		return err
 	}
 	for _, target := range targets {
-		if err := s.publishReminder(ctx, target); err != nil {
+		if target.ReminderID == uuid.Nil {
+			return cerrors.Internal("reminder target is missing reminder id", nil)
+		}
+		payload, err := prepareReminderPayload(target, now)
+		if err != nil {
 			return err
 		}
-		if target.ReminderID != uuid.Nil {
-			if err := calendars.MarkReminderDispatched(ctx, target.ReminderID, now); err != nil {
-				return err
-			}
+		if err := calendars.EnqueueReminderOutbox(ctx, target, payload, now); err != nil {
+			return err
+		}
+		if err := calendars.MarkReminderDispatched(ctx, target.ReminderID, target.Occurrence.InstanceAt, now); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func (s *Service) PublishPendingReminderOutbox(ctx context.Context) (processed, failed, dead int, err error) {
+	if s.calendars == nil {
+		return 0, 0, 0, cerrors.Unavailable("calendar repository is not configured")
+	}
+	return s.calendars.PublishReminderOutbox(ctx, reminderOutboxBatchSize, reminderOutboxMaxAttempts, func(ctx context.Context, msg entity.ReminderOutboxMessage) error {
+		if s.pubsub == nil {
+			return nil
+		}
+		return s.pubsub.Publish(ctx, userEventsSubject(msg.UserID), msg.PayloadJSON)
+	})
 }
 
 func (s *Service) requireWorkspaceMember(ctx context.Context, workspaceID, userID uuid.UUID) error {
@@ -666,7 +690,7 @@ func buildAttendees(eventID uuid.UUID, userIDs []uuid.UUID, emails []string, req
 	return attendees
 }
 
-func buildReminderRows(eventID, organizerID uuid.UUID, scheduledAt time.Time, attendees []entity.EventAttendee, reminders []entity.EventReminder) []entity.EventReminder {
+func buildReminderRows(eventID, organizerID uuid.UUID, attendees []entity.EventAttendee, reminders []entity.EventReminder) []entity.EventReminder {
 	if len(reminders) == 0 {
 		return nil
 	}
@@ -697,7 +721,6 @@ func buildReminderRows(eventID, organizerID uuid.UUID, scheduledAt time.Time, at
 				UserID:        userID,
 				OffsetMinutes: reminder.OffsetMinutes,
 				Channel:       reminder.Channel,
-				FireAt:        scheduledAt.Add(-time.Duration(reminder.OffsetMinutes) * time.Minute).UTC(),
 			})
 		}
 	}
@@ -765,8 +788,29 @@ func (s *Service) publishRsvp(ctx context.Context, eventEntity *entity.CalendarE
 }
 
 func (s *Service) publishReminder(ctx context.Context, target entity.ReminderTarget) error {
-	payload := event.CalendarEventPayload{Event: target.Occurrence.CalendarEvent}
-	return s.publish(ctx, event.TypeCalendarEventReminderFired, userEventsSubject(target.UserID), target.Occurrence.WorkspaceID, uuid.Nil, target.UserID, payload)
+	payload, err := prepareReminderPayload(target, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	if s.pubsub == nil {
+		return nil
+	}
+	return s.pubsub.Publish(ctx, userEventsSubject(target.UserID), payload)
+}
+
+func prepareReminderPayload(target entity.ReminderTarget, timestamp time.Time) ([]byte, error) {
+	_, body, _, err := event.Prepare(userEventsSubject(target.UserID), event.Event{
+		Type:        event.TypeCalendarEventReminderFired,
+		WorkspaceID: target.Occurrence.WorkspaceID,
+		ChannelID:   uuid.Nil,
+		UserID:      target.UserID,
+		Timestamp:   timestamp.UTC(),
+		Payload:     event.CalendarEventPayload{Event: target.Occurrence.CalendarEvent},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("prepare reminder event: %w", err)
+	}
+	return body, nil
 }
 
 func (s *Service) enqueueTx(ctx context.Context, scope txscope.Scope, eventType event.Type, subject string, workspaceID, channelID, userID uuid.UUID, payload any) error {

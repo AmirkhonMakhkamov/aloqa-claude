@@ -75,13 +75,11 @@ const (
 )
 
 type EventReminder struct {
-	ID                    uuid.UUID       `json:"-"`
-	EventID               uuid.UUID       `json:"-"`
-	UserID                uuid.UUID       `json:"-"`
-	OffsetMinutes         int             `json:"offset_minutes"`
-	Channel               ReminderChannel `json:"channel"`
-	FireAt                time.Time       `json:"-"`
-	RemindersDispatchedAt *time.Time      `json:"-"`
+	ID            uuid.UUID       `json:"-"`
+	EventID       uuid.UUID       `json:"-"`
+	UserID        uuid.UUID       `json:"-"`
+	OffsetMinutes int             `json:"offset_minutes"`
+	Channel       ReminderChannel `json:"channel"`
 }
 
 type CalendarEvent struct {
@@ -127,4 +125,15 @@ type ReminderTarget struct {
 	OffsetMinutes int             `json:"offset_minutes"`
 	Channel       ReminderChannel `json:"channel"`
 	FireAt        time.Time       `json:"fire_at"`
+}
+
+type ReminderOutboxMessage struct {
+	ID           uuid.UUID `json:"id"`
+	ReminderID   uuid.UUID `json:"reminder_id"`
+	EventID      uuid.UUID `json:"event_id"`
+	OccurrenceAt time.Time `json:"occurrence_at"`
+	UserID       uuid.UUID `json:"user_id"`
+	PayloadJSON  []byte    `json:"payload_json"`
+	EnqueuedAt   time.Time `json:"enqueued_at"`
+	Attempts     int       `json:"attempts"`
 }

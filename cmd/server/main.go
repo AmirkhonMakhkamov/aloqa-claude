@@ -442,6 +442,9 @@ func run() error {
 	reliability.Supervise(ctx, "calendar_reminders", func(c context.Context) {
 		runCalendarReminderWorker(c, calendarSvc, 30*time.Second)
 	})
+	reliability.Supervise(ctx, "calendar_reminder_outbox", func(c context.Context) {
+		runCalendarReminderOutboxWorker(c, calendarSvc, 2*time.Second)
+	})
 
 	// WebSocket hub.
 	hub := ws.NewHub(wsStateStore)
@@ -635,6 +638,31 @@ func runCalendarReminderWorker(ctx context.Context, svc *calendarsvc.Service, in
 	for {
 		if err := svc.ListAndDispatchReminders(ctx, time.Now().UTC()); err != nil {
 			slog.ErrorContext(ctx, "calendar reminder dispatch failed", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func runCalendarReminderOutboxWorker(ctx context.Context, svc *calendarsvc.Service, interval time.Duration) {
+	if svc == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		processed, failed, dead, err := svc.PublishPendingReminderOutbox(ctx)
+		if err != nil {
+			slog.ErrorContext(ctx, "calendar reminder outbox publish failed", "error", err)
+		} else if processed > 0 || failed > 0 || dead > 0 {
+			slog.InfoContext(ctx, "calendar reminder outbox processed", "processed", processed, "failed", failed, "dead", dead)
 		}
 		select {
 		case <-ctx.Done():

@@ -181,13 +181,15 @@ func isIdempotentWriteMethod(method string) bool {
 }
 
 func copyHeaders(dst, src http.Header) {
-	for key := range dst {
-		delete(dst, key)
-	}
+	// Merge src into dst, replacing only the keys src actually defines.
+	// Wiping dst would discard headers set by outer middleware (CORS, security)
+	// before idempotency wrapped the writer, which silently breaks cross-origin
+	// responses to write methods carrying an Idempotency-Key.
 	for key, values := range src {
 		if strings.EqualFold(key, "Content-Length") {
 			continue
 		}
+		dst.Del(key)
 		for _, value := range values {
 			dst.Add(key, value)
 		}

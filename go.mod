@@ -13,9 +13,12 @@ require (
 	github.com/pion/interceptor v0.1.37
 	github.com/pion/webrtc/v4 v4.0.10
 	github.com/redis/go-redis/v9 v9.7.3
+	github.com/teambition/rrule-go v1.8.2
 	golang.org/x/crypto v0.36.0
 	nhooyr.io/websocket v1.8.17
 )
+
+replace github.com/teambition/rrule-go => ./internal/third_party/rrule-go
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

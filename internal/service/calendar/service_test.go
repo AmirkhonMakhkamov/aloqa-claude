@@ -13,6 +13,7 @@ import (
 	"aloqa/internal/pkg/cerrors"
 	"aloqa/internal/pkg/id"
 	"aloqa/internal/pkg/pagination"
+	calrrule "aloqa/internal/pkg/rrule"
 )
 
 func TestStartCallFromEventIsIdempotent(t *testing.T) {
@@ -126,6 +127,50 @@ func TestListAndDispatchRemindersDeduplicates(t *testing.T) {
 	}
 }
 
+func TestListEventsKeepsOriginatorTimezoneAcrossBerlinDST(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	organizerID := uuid.New()
+	eventID := uuid.New()
+	calendarID := uuid.New()
+	loc, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	startLocal := time.Date(2026, 3, 28, 9, 30, 0, 0, loc)
+	repo := &expandingCalendarRepo{fakeCalendarRepo: fakeCalendarRepo{
+		events: map[uuid.UUID]*entity.CalendarEvent{
+			eventID: {
+				ID:              eventID,
+				CalendarID:      calendarID,
+				WorkspaceID:     workspaceID,
+				OrganizerID:     organizerID,
+				Title:           "Berlin standup",
+				Location:        entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+				ScheduledAt:     startLocal.UTC(),
+				OriginatorTZ:    "Europe/Berlin",
+				DurationMinutes: 30,
+				Recurrence:      &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=4"},
+			},
+		},
+	}}
+	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{workspaceID, organizerID}: true}}, nil, noopPublisher{})
+
+	occurrences, err := svc.ListEvents(ctx, workspaceID, startLocal.Add(-time.Hour).UTC(), startLocal.AddDate(0, 0, 5).UTC(), organizerID)
+	if err != nil {
+		t.Fatalf("ListEvents error = %v", err)
+	}
+	if len(occurrences) != 4 {
+		t.Fatalf("occurrences = %v, want 4", occurrences)
+	}
+	for _, occurrence := range occurrences {
+		local := occurrence.InstanceAt.In(loc)
+		if local.Hour() != 9 || local.Minute() != 30 {
+			t.Fatalf("occurrence shifted from 09:30 Europe/Berlin: %v", occurrences)
+		}
+	}
+}
+
 type fakeCalendarRepo struct {
 	calendars []entity.UserCalendar
 	events    map[uuid.UUID]*entity.CalendarEvent
@@ -172,6 +217,39 @@ func (r *fakeCalendarRepo) ListUpcoming(context.Context, uuid.UUID, uuid.UUID, i
 }
 func (r *fakeCalendarRepo) ListEventsForReminderFanout(context.Context, time.Duration) ([]entity.ReminderTarget, error) {
 	return r.reminders, nil
+}
+
+type expandingCalendarRepo struct {
+	fakeCalendarRepo
+}
+
+func (r *expandingCalendarRepo) ListEvents(_ context.Context, workspaceID uuid.UUID, fromTS, toTS time.Time, viewerID uuid.UUID) ([]entity.EventOccurrence, error) {
+	var occurrences []entity.EventOccurrence
+	for _, eventEntity := range r.events {
+		if eventEntity.WorkspaceID != workspaceID || !canAccessEvent(eventEntity, viewerID) {
+			continue
+		}
+		if eventEntity.Recurrence == nil {
+			occurrences = append(occurrences, entity.EventOccurrence{CalendarEvent: *eventEntity, InstanceAt: eventEntity.ScheduledAt})
+			continue
+		}
+		loc, err := time.LoadLocation(eventEntity.OriginatorTZ)
+		if err != nil {
+			loc = time.UTC
+		}
+		expanded, err := calrrule.Expand(eventEntity.Recurrence.RRule, eventEntity.ScheduledAt.In(loc), eventEntity.Recurrence.Exdates, fromTS.In(loc), toTS.In(loc))
+		if err != nil {
+			return nil, err
+		}
+		for _, instanceAt := range expanded {
+			occurrences = append(occurrences, entity.EventOccurrence{
+				CalendarEvent:       *eventEntity,
+				InstanceAt:          instanceAt.UTC(),
+				IsRecurringInstance: true,
+			})
+		}
+	}
+	return occurrences, nil
 }
 func (r *fakeCalendarRepo) GetEvent(_ context.Context, eventID uuid.UUID) (*entity.CalendarEvent, error) {
 	eventEntity := r.events[eventID]

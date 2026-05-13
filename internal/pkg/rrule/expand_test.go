@@ -56,6 +56,24 @@ func TestExpandWeeklyByDay(t *testing.T) {
 	}
 }
 
+func TestExpandWeeklyAcrossISOWeekYearBoundary(t *testing.T) {
+	start := time.Date(2020, 12, 28, 9, 0, 0, 0, time.UTC) // Monday in ISO week 53.
+	got, err := Expand("FREQ=WEEKLY;COUNT=3", start, nil, start, start.AddDate(0, 0, 21))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantWeeks := []int{53, 1, 2}
+	if len(got) != len(wantWeeks) {
+		t.Fatalf("got %v, want %d occurrences", got, len(wantWeeks))
+	}
+	for i, occurrence := range got {
+		_, week := occurrence.ISOWeek()
+		if week != wantWeeks[i] {
+			t.Fatalf("occurrence %d ISO week = %d, want %d (%v)", i, week, wantWeeks[i], got)
+		}
+	}
+}
+
 func TestExpandMonthlyLastMonday(t *testing.T) {
 	start := time.Date(2026, 1, 26, 9, 0, 0, 0, time.UTC)
 	got, err := Expand("FREQ=MONTHLY;BYDAY=-1MO;COUNT=3", start, nil, start, time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC))
@@ -69,6 +87,28 @@ func TestExpandMonthlyLastMonday(t *testing.T) {
 	}
 	for i := range want {
 		if i >= len(got) || !got[i].Equal(want[i]) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
+
+func TestExpandMonthlyOn31stSkipsShortMonths(t *testing.T) {
+	start := time.Date(2026, 1, 31, 9, 0, 0, 0, time.UTC)
+	got, err := Expand("FREQ=MONTHLY;COUNT=4", start, nil, start, time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []time.Time{
+		time.Date(2026, 1, 31, 9, 0, 0, 0, time.UTC),
+		time.Date(2026, 3, 31, 9, 0, 0, 0, time.UTC),
+		time.Date(2026, 5, 31, 9, 0, 0, 0, time.UTC),
+		time.Date(2026, 7, 31, 9, 0, 0, 0, time.UTC),
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if !got[i].Equal(want[i]) {
 			t.Fatalf("got %v, want %v", got, want)
 		}
 	}
@@ -102,6 +142,30 @@ func TestExpandDSTForwardAndBack(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestExpandUntilUsesLocalTimezoneBoundary(t *testing.T) {
+	loc, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 3, 28, 9, 30, 0, 0, loc)
+	got, err := Expand("FREQ=DAILY;UNTIL=20260330T080000", start, nil, start, start.AddDate(0, 0, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %v, want two local occurrences before 2026-03-30 08:00 Europe/Berlin", got)
+	}
+	for _, occurrence := range got {
+		local := occurrence.In(loc)
+		if local.Hour() != 9 || local.Minute() != 30 {
+			t.Fatalf("wall clock shifted: %v", got)
+		}
+		if !local.Before(time.Date(2026, 3, 30, 8, 0, 0, 0, loc)) {
+			t.Fatalf("occurrence crossed local UNTIL boundary: %v", got)
+		}
 	}
 }
 

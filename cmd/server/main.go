@@ -32,6 +32,7 @@ import (
 	"aloqa/internal/security/rbac"
 	"aloqa/internal/service/admin"
 	"aloqa/internal/service/auth"
+	calendarsvc "aloqa/internal/service/calendar"
 	"aloqa/internal/service/call"
 	"aloqa/internal/service/chat"
 	"aloqa/internal/service/collaboration"
@@ -190,6 +191,7 @@ func run() error {
 	workspaceCollaborationRepo := postgres.NewWorkspaceCollaborationRepo(pool)
 	realtimeRepo := postgres.NewRealtimeRepo(pool)
 	mediaRepo := postgres.NewMediaRepo(pool)
+	calendarRepo := postgres.NewCalendarRepo(pool)
 
 	// File/object storage.
 	var fileStore storage.Storage
@@ -364,6 +366,7 @@ func run() error {
 	}, guestAccessChecker, collaborationAccessChecker)
 	callSvc.SetMediaControlPlane(mediaOpsSvc)
 	callSvc.SetTransactionManager(txManager)
+	calendarSvc := calendarsvc.NewService(calendarRepo, workspaceRepo, callSvc, realtimePublisher)
 	mediaOpsSvc.SetEventPublisher(realtimePublisher)
 	mediaOpsSvc.SetRelayTransport(ps)
 	presenceSvc := presence.NewService(rdb,
@@ -433,6 +436,9 @@ func run() error {
 	reliability.Supervise(ctx, "recording_lifecycle", func(c context.Context) {
 		recordingSvc.RunLifecycleWorker(c, cfg.Media.RecordingLifecycleInterval, 20)
 	})
+	reliability.Supervise(ctx, "calendar_reminders", func(c context.Context) {
+		runCalendarReminderWorker(c, calendarSvc, 30*time.Second)
+	})
 
 	// WebSocket hub.
 	hub := ws.NewHub(wsStateStore)
@@ -453,6 +459,7 @@ func run() error {
 	channelHandler := httphandler.NewChannelHandler(chatSvc)
 	messageHandler := httphandler.NewMessageHandler(chatSvc)
 	callHandler := httphandler.NewCallHandler(callSvc)
+	calendarHandler := httphandler.NewCalendarHandler(calendarSvc)
 	breakoutHandler := httphandler.NewBreakoutHandler(callSvc)
 	fileHandler := httphandler.NewFileHandler(fileSvc, cfg.Media.MaxFileSize)
 	presenceHandler := httphandler.NewPresenceHandler(presenceSvc)
@@ -472,6 +479,7 @@ func run() error {
 		Channels:         channelHandler,
 		Messages:         messageHandler,
 		Calls:            callHandler,
+		Calendar:         calendarHandler,
 		Breakout:         breakoutHandler,
 		Files:            fileHandler,
 		Presence:         presenceHandler,
@@ -609,6 +617,28 @@ func parseRealtimeEvent(data []byte) *event.Event {
 		return nil
 	}
 	return &evt
+}
+
+func runCalendarReminderWorker(ctx context.Context, svc *calendarsvc.Service, interval time.Duration) {
+	if svc == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		if err := svc.ListAndDispatchReminders(ctx, time.Now().UTC()); err != nil {
+			slog.ErrorContext(ctx, "calendar reminder dispatch failed", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func forwardSessionEvictions(ctx context.Context, ps *pubsub.PubSub, hub *ws.Hub, presenceSvc *presence.Service) {

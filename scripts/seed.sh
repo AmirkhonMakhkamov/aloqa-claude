@@ -120,6 +120,40 @@ ensure_dm() {
     -d "$(jbody --arg u "$target" '{user_id:$u}')" | jq -r .id
 }
 
+# ensure_channel CREATOR_TOKEN WS_ID NAME TOPIC TYPE -> channel id
+# Looks up an existing channel by name within the workspace before creating.
+ensure_channel() {
+  local token=$1 ws=$2 name=$3 topic=$4 ctype=$5
+  local id
+  id=$(curl -fsS "$API/workspaces/$ws/channels" -H "Authorization: Bearer $token" \
+    | jq -r --arg n "$name" 'map(select(.name==$n)) | .[0].id // ""')
+  if [[ -n "$id" ]]; then
+    skip "channel #$name exists" >&2
+  else
+    id=$(curl -fsS -X POST "$API/workspaces/$ws/channels" \
+      -H "Authorization: Bearer $token" \
+      -H 'Content-Type: application/json' \
+      -d "$(jbody --arg n "$name" --arg t "$topic" --arg k "$ctype" \
+            '{name:$n,topic:$t,type:$k}')" | jq -r .id)
+    log "created #$name ($id)" >&2
+  fi
+  printf '%s' "$id"
+}
+
+# ensure_channel_member USER_TOKEN WS_ID CHAN_ID
+# Joins a public channel as the calling user; backend rejects already-member
+# with 409 which we treat as a no-op.
+ensure_channel_member() {
+  local token=$1 ws=$2 chan=$3
+  local code
+  code=$(http_status POST "$API/workspaces/$ws/channels/$chan/join" "$token" '')
+  case "$code" in
+    200|204|201) ;;
+    409) ;;  # already a member
+    *) echo "join $chan failed ($code): $(cat "$TMP/resp")" >&2; exit 1 ;;
+  esac
+}
+
 # channel_has_messages TOKEN WS_ID CHAN_ID -> exit 0 if yes
 channel_has_messages() {
   local token=$1 ws=$2 chan=$3
@@ -174,7 +208,55 @@ for email in bob@aloqa.test carol@aloqa.test david@aloqa.test eve@aloqa.test fra
   ensure_member "$ALICE_TOKEN" "$WS_ID" "$email"
 done
 
-log 'ensuring DM threads (alice <-> carol/david, bob <-> carol/david)'
+log 'ensuring public channels'
+GENERAL_ID=$(ensure_channel "$ALICE_TOKEN" "$WS_ID" 'general' 'Company-wide announcements' 'public')
+RANDOM_ID=$( ensure_channel "$ALICE_TOKEN" "$WS_ID" 'random'  'Off-topic and watercooler' 'public')
+DEV_ID=$(    ensure_channel "$ALICE_TOKEN" "$WS_ID" 'dev'     'Engineering team chat'     'public')
+
+log 'joining channels'
+for token in "$BOB_TOKEN" "$CAROL_TOKEN" "$DAVID_TOKEN" "$EVE_TOKEN" "$FRANK_TOKEN"; do
+  for chan in "$GENERAL_ID" "$RANDOM_ID" "$DEV_ID"; do
+    ensure_channel_member "$token" "$WS_ID" "$chan"
+  done
+done
+
+log 'seeding channel messages'
+
+seed_thread "$WS_ID" "$GENERAL_ID" "$ALICE_TOKEN" \
+  "$ALICE_TOKEN|Всем привет! Это наш общий канал — здесь анонсы и новости команды." \
+  "$BOB_TOKEN|👋"  \
+  "$CAROL_TOKEN|Привет, рада быть здесь!" \
+  "$ALICE_TOKEN|Завтра в 10:00 — всекомандный синк, ссылку скину утром." \
+  "$DAVID_TOKEN|Принято." \
+  "$EVE_TOKEN|Я подключусь из Самарканда, связь может прыгать." \
+  "$FRANK_TOKEN|Ок 👍" \
+  "$BOB_TOKEN|Кстати, дизайн нового логина уехал на ревью — спасибо @carol!" \
+  "$CAROL_TOKEN|🙏"
+
+seed_thread "$WS_ID" "$RANDOM_ID" "$BOB_TOKEN" \
+  "$BOB_TOKEN|Кто пьёт кофе по утрам? Поделитесь рецептом идеальной заварки ☕️" \
+  "$DAVID_TOKEN|V60, помол средний, вода 92°. Всё остальное — ересь." \
+  "$EVE_TOKEN|Холодный брю forever 🧊" \
+  "$ALICE_TOKEN|Эспрессо + овсянка. Минимализм." \
+  "$FRANK_TOKEN|Я просто завариваю растворимый и не страдаю 🤷‍♂️" \
+  "$CAROL_TOKEN|Frank, нет 😭" \
+  "$BOB_TOKEN|Frank, после тебя дегустация не нужна 😄"
+
+seed_thread "$WS_ID" "$DEV_ID" "$ALICE_TOKEN" \
+  "$ALICE_TOKEN|Завели канал для инженерных обсуждений — PR'ы, инциденты, архитектурные холивары." \
+  "$DAVID_TOKEN|👍 закрепить бы FAQ по локальному setup'у." \
+  "$ALICE_TOKEN|+1, добавлю в pinned после онбординга." \
+  "$BOB_TOKEN|Сегодня нашёл утечку в WS-клиенте при reconnect — фикс в PR #142." \
+  "$CAROL_TOKEN|Гляну в обед." \
+  "$DAVID_TOKEN|Спасибо. Я пока разбираюсь с гонкой в SearchWorker." \
+  "$EVE_TOKEN|У кого-то падает миграция 026 на свежей БД? Или только у меня?" \
+  "$ALICE_TOKEN|Eve, проверь что переменная DB_VALIDATE_MIGRATIONS_ON_START=true." \
+  "$EVE_TOKEN|Ага, помогло, спасибо!" \
+  "$FRANK_TOKEN|Я подключился к проекту, какой стек у фронта?" \
+  "$BOB_TOKEN|Next.js 16 (App Router), TanStack Query, Zustand, RN на десктоп через Tauri." \
+  "$FRANK_TOKEN|Понял, погружаюсь."
+
+log 'ensuring DM threads'
 
 DM=$(ensure_dm "$ALICE_TOKEN" "$WS_ID" "$CAROL_ID")
 seed_thread "$WS_ID" "$DM" "$ALICE_TOKEN" \
@@ -206,13 +288,84 @@ seed_thread "$WS_ID" "$DM" "$BOB_TOKEN" \
   "$BOB_TOKEN|Окей, держи в курсе если упрёшься." \
   "$DAVID_TOKEN|Принял."
 
+DM=$(ensure_dm "$ALICE_TOKEN" "$WS_ID" "$BOB_ID")
+seed_thread "$WS_ID" "$DM" "$ALICE_TOKEN" \
+  "$ALICE_TOKEN|Bob, есть пара минут? Хочу синкнуться по релизу." \
+  "$BOB_TOKEN|Да, конечно. Сейчас вернусь с кофе." \
+  "$ALICE_TOKEN|Ок." \
+  "$BOB_TOKEN|Вернулся. Что по релизу?" \
+  "$ALICE_TOKEN|Хочу зафиксировать scope — три фичи (поиск, календарь, звонки) и багфикс с миграциями." \
+  "$BOB_TOKEN|Согласен. Остальное в следующий спринт."
+
+DM=$(ensure_dm "$ALICE_TOKEN" "$WS_ID" "$EVE_ID")
+seed_thread "$WS_ID" "$DM" "$ALICE_TOKEN" \
+  "$ALICE_TOKEN|Eve, привет. Как тебе первая неделя?" \
+  "$EVE_TOKEN|Привет, Alice! Норм, втягиваюсь. Локальный сетап заработал со второй попытки." \
+  "$ALICE_TOKEN|Отлично. Если что — спрашивай, не стесняйся." \
+  "$EVE_TOKEN|Спасибо 🙏"
+
+DM=$(ensure_dm "$ALICE_TOKEN" "$WS_ID" "$FRANK_ID")
+seed_thread "$WS_ID" "$DM" "$ALICE_TOKEN" \
+  "$ALICE_TOKEN|Frank, добро пожаловать! Если есть вопросы по проекту — пиши." \
+  "$FRANK_TOKEN|Спасибо! Где почитать про деплой?" \
+  "$ALICE_TOKEN|В docs/ есть observability-and-sre.md и performance-and-latency.md — это база." \
+  "$FRANK_TOKEN|Принято, изучу."
+
+DM=$(ensure_dm "$BOB_TOKEN" "$WS_ID" "$EVE_ID")
+seed_thread "$WS_ID" "$DM" "$BOB_TOKEN" \
+  "$BOB_TOKEN|Eve, видел твой PR — мелкий комментарий по типизации." \
+  "$EVE_TOKEN|Окей, посмотрю через час." \
+  "$BOB_TOKEN|Не срочно."
+
+DM=$(ensure_dm "$BOB_TOKEN" "$WS_ID" "$FRANK_ID")
+seed_thread "$WS_ID" "$DM" "$BOB_TOKEN" \
+  "$BOB_TOKEN|Frank, есть Figma access? Скинь почту — добавлю в проект." \
+  "$FRANK_TOKEN|f.abdullayev@aloqa.test" \
+  "$BOB_TOKEN|Добавил."
+
+DM=$(ensure_dm "$CAROL_TOKEN" "$WS_ID" "$DAVID_ID")
+seed_thread "$WS_ID" "$DM" "$CAROL_TOKEN" \
+  "$CAROL_TOKEN|David, расскажи как у вас на бэке решают rate limiting?" \
+  "$DAVID_TOKEN|Token bucket в Redis, ключ — user+route. Лимиты в конфиге." \
+  "$CAROL_TOKEN|Понял, спасибо." \
+  "$DAVID_TOKEN|Если будут вопросы — пинг."
+
+DM=$(ensure_dm "$CAROL_TOKEN" "$WS_ID" "$EVE_ID")
+seed_thread "$WS_ID" "$DM" "$CAROL_TOKEN" \
+  "$CAROL_TOKEN|Eve, привет! Дизайн-токены живут в packages/ui-kit-web/src/tokens.ts." \
+  "$EVE_TOKEN|Спасибо! Гляну сегодня."
+
+DM=$(ensure_dm "$CAROL_TOKEN" "$WS_ID" "$FRANK_ID")
+seed_thread "$WS_ID" "$DM" "$CAROL_TOKEN" \
+  "$CAROL_TOKEN|Frank, у нас в Figma есть готовая библиотека компонентов — пришлю инвайт." \
+  "$FRANK_TOKEN|👍 жду."
+
+DM=$(ensure_dm "$DAVID_TOKEN" "$WS_ID" "$EVE_ID")
+seed_thread "$WS_ID" "$DM" "$DAVID_TOKEN" \
+  "$DAVID_TOKEN|Eve, увидел падение в SearchWorker на твоей ветке." \
+  "$EVE_TOKEN|Уже фикшу, забыла обработать nil контекст." \
+  "$DAVID_TOKEN|Окей."
+
+DM=$(ensure_dm "$DAVID_TOKEN" "$WS_ID" "$FRANK_ID")
+seed_thread "$WS_ID" "$DM" "$DAVID_TOKEN" \
+  "$DAVID_TOKEN|Frank, если будешь трогать API — у нас все ручки в /api/v1/*." \
+  "$FRANK_TOKEN|Спасибо, посмотрю swagger."
+
+DM=$(ensure_dm "$EVE_TOKEN" "$WS_ID" "$FRANK_ID")
+seed_thread "$WS_ID" "$DM" "$EVE_TOKEN" \
+  "$EVE_TOKEN|Frank, привет! Мы оба новички, давай пройдёмся по локальному сетапу вместе?" \
+  "$FRANK_TOKEN|Привет! С удовольствием. Завтра 11:00 ок?" \
+  "$EVE_TOKEN|Договорились."
+
 echo
 log 'done'
 note "workspace_id=$WS_ID"
+note "channels: #general, #random, #dev — all 6 users joined"
+note 'DMs: all 15 pairs between the 6 users are populated'
 note 'Credentials (all valid against the password policy):'
 note '  alice@aloqa.test / AlicePass123!'
 note '  bob@aloqa.test   / BobPass123!'
 note '  carol@aloqa.test / CarolPass123!'
 note '  david@aloqa.test / DavidPass123!'
-note '  eve@aloqa.test   / EvePass123!     (no DMs yet)'
-note '  frank@aloqa.test / FrankPass123!   (no DMs yet)'
+note '  eve@aloqa.test   / EvePass123!'
+note '  frank@aloqa.test / FrankPass123!'

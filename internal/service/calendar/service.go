@@ -36,10 +36,12 @@ type Service struct {
 }
 
 const (
-	reminderDispatchLimit     = 100
-	reminderDiscoveryHorizon  = 24 * time.Hour
-	reminderOutboxBatchSize   = 100
-	reminderOutboxMaxAttempts = 10
+	reminderDispatchLimit         = 100
+	reminderDiscoveryHorizon      = 24 * time.Hour
+	maxReminderOffsetMinutes      = 10080
+	reminderEventLookaheadHorizon = time.Duration(maxReminderOffsetMinutes)*time.Minute + reminderDiscoveryHorizon
+	reminderOutboxBatchSize       = 100
+	reminderOutboxMaxAttempts     = 10
 )
 
 type CreateEventInput struct {
@@ -531,7 +533,7 @@ func (s *Service) ListAndDispatchReminders(ctx context.Context, now time.Time) e
 }
 
 func (s *Service) dispatchDueReminders(ctx context.Context, calendars repository.CalendarRepository, now time.Time) error {
-	targets, err := calendars.ListDueReminderTargets(ctx, now, reminderDiscoveryHorizon, reminderDispatchLimit)
+	targets, err := calendars.ListDueReminderTargets(ctx, now, reminderEventLookaheadHorizon, reminderDispatchLimit)
 	if err != nil {
 		return err
 	}
@@ -704,7 +706,7 @@ func buildReminderRows(eventID, organizerID uuid.UUID, attendees []entity.EventA
 	seen := map[string]struct{}{}
 	for _, userID := range userIDs {
 		for _, reminder := range reminders {
-			if reminder.OffsetMinutes < 0 || reminder.OffsetMinutes > 10080 {
+			if reminder.OffsetMinutes < 0 || reminder.OffsetMinutes > maxReminderOffsetMinutes {
 				continue
 			}
 			if reminder.Channel != entity.ReminderChannelInApp && reminder.Channel != entity.ReminderChannelOS {

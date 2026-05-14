@@ -365,6 +365,63 @@ func TestListAndDispatchRemindersConcurrentWorkersDoNotDoubleDiscover(t *testing
 	}
 }
 
+func TestListAndDispatchRemindersDiscoversLongOffsetEventWithinLookahead(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	userID := uuid.New()
+	eventID := uuid.New()
+	reminderID := uuid.New()
+	now := time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC)
+	target := reminderTarget(workspaceID, userID, eventID, reminderID, now.Add(-48*time.Hour), now.Add(5*24*time.Hour))
+	txManager := newCalendarReminderTxManager(&fakeCalendarRepo{reminders: []entity.ReminderTarget{target}})
+	svc := NewService(txManager.calendars.fakeCalendarRepo, fakeMembers{}, nil, noopPublisher{})
+	svc.SetTransactionManager(txManager)
+
+	if err := svc.ListAndDispatchReminders(ctx, now); err != nil {
+		t.Fatalf("dispatch error = %v", err)
+	}
+	if txManager.calendars.lastReminderHorizon != reminderEventLookaheadHorizon {
+		t.Fatalf("horizon = %s, want %s", txManager.calendars.lastReminderHorizon, reminderEventLookaheadHorizon)
+	}
+	if len(txManager.calendars.outbox) != 1 {
+		t.Fatalf("outbox rows = %d, want 1", len(txManager.calendars.outbox))
+	}
+	if err := svc.ListAndDispatchReminders(ctx, now.Add(time.Second)); err != nil {
+		t.Fatalf("second dispatch error = %v", err)
+	}
+	if len(txManager.calendars.outbox) != 1 {
+		t.Fatalf("outbox rows after second run = %d, want 1", len(txManager.calendars.outbox))
+	}
+}
+
+func TestListAndDispatchRemindersWaitsForLongOffsetFireTime(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	userID := uuid.New()
+	eventID := uuid.New()
+	reminderID := uuid.New()
+	start := time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC)
+	occurrenceAt := start.Add(14 * 24 * time.Hour)
+	fireAt := occurrenceAt.Add(-time.Duration(maxReminderOffsetMinutes) * time.Minute)
+	target := reminderTarget(workspaceID, userID, eventID, reminderID, fireAt, occurrenceAt)
+	txManager := newCalendarReminderTxManager(&fakeCalendarRepo{reminders: []entity.ReminderTarget{target}})
+	svc := NewService(txManager.calendars.fakeCalendarRepo, fakeMembers{}, nil, noopPublisher{})
+	svc.SetTransactionManager(txManager)
+
+	if err := svc.ListAndDispatchReminders(ctx, start); err != nil {
+		t.Fatalf("early dispatch error = %v", err)
+	}
+	if len(txManager.calendars.outbox) != 0 {
+		t.Fatalf("early outbox rows = %d, want 0", len(txManager.calendars.outbox))
+	}
+	if err := svc.ListAndDispatchReminders(ctx, fireAt); err != nil {
+		t.Fatalf("dispatch at fire time error = %v", err)
+	}
+	if len(txManager.calendars.outbox) != 1 {
+		t.Fatalf("outbox rows at fire time = %d, want 1", len(txManager.calendars.outbox))
+	}
+}
+
 func TestPublishPendingReminderOutboxConcurrentPublishersDoNotDoublePublish(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -464,14 +521,16 @@ func TestListEventsKeepsOriginatorTimezoneAcrossBerlinDST(t *testing.T) {
 }
 
 type fakeCalendarRepo struct {
-	mu              sync.Mutex
-	calendars       []entity.UserCalendar
-	events          map[uuid.UUID]*entity.CalendarEvent
-	reminders       []entity.ReminderTarget
-	dispatched      map[reminderDispatchKey]time.Time
-	outbox          []entity.ReminderOutboxMessage
-	publishedOutbox map[uuid.UUID]time.Time
-	enqueueErr      error
+	mu                  sync.Mutex
+	calendars           []entity.UserCalendar
+	events              map[uuid.UUID]*entity.CalendarEvent
+	reminders           []entity.ReminderTarget
+	dispatched          map[reminderDispatchKey]time.Time
+	outbox              []entity.ReminderOutboxMessage
+	publishedOutbox     map[uuid.UUID]time.Time
+	enqueueErr          error
+	lastReminderHorizon time.Duration
+	lastReminderLimit   int
 }
 
 type reminderDispatchKey struct {
@@ -540,6 +599,8 @@ func (r *fakeCalendarRepo) ListUpcoming(context.Context, uuid.UUID, uuid.UUID, i
 func (r *fakeCalendarRepo) ListDueReminderTargets(_ context.Context, now time.Time, horizon time.Duration, limit int) ([]entity.ReminderTarget, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.lastReminderHorizon = horizon
+	r.lastReminderLimit = limit
 	if limit <= 0 {
 		limit = len(r.reminders)
 	}
@@ -841,13 +902,15 @@ func (r *txCalendarRepo) clone() *txCalendarRepo {
 		events[eventID] = &copy
 	}
 	return &txCalendarRepo{fakeCalendarRepo: &fakeCalendarRepo{
-		calendars:       append([]entity.UserCalendar(nil), r.calendars...),
-		events:          events,
-		reminders:       append([]entity.ReminderTarget(nil), r.reminders...),
-		dispatched:      cloneReminderDispatchMap(r.dispatched),
-		outbox:          cloneReminderOutbox(r.outbox),
-		publishedOutbox: cloneUUIDTimeMap(r.publishedOutbox),
-		enqueueErr:      r.enqueueErr,
+		calendars:           append([]entity.UserCalendar(nil), r.calendars...),
+		events:              events,
+		reminders:           append([]entity.ReminderTarget(nil), r.reminders...),
+		dispatched:          cloneReminderDispatchMap(r.dispatched),
+		outbox:              cloneReminderOutbox(r.outbox),
+		publishedOutbox:     cloneUUIDTimeMap(r.publishedOutbox),
+		enqueueErr:          r.enqueueErr,
+		lastReminderHorizon: r.lastReminderHorizon,
+		lastReminderLimit:   r.lastReminderLimit,
 	}}
 }
 

@@ -169,8 +169,14 @@ func (h *ChannelHandler) UnreadCounts(w http.ResponseWriter, r *http.Request) {
 }
 
 type createDMRequest struct {
-	UserID            string  `json:"user_id"`
-	TargetWorkspaceID *string `json:"target_workspace_id,omitempty"`
+	// UserID is the legacy single-target form used by seed.sh and the Go SDK.
+	UserID string `json:"user_id"`
+	// UserIDs matches the OpenAPI contract that the web client was generated
+	// from. For now the backend only supports 1-on-1 DMs, so we accept the
+	// array form for compatibility and use its first element. Group DMs are
+	// a separate feature.
+	UserIDs           []string `json:"user_ids"`
+	TargetWorkspaceID *string  `json:"target_workspace_id,omitempty"`
 }
 
 func (h *ChannelHandler) CreateDM(w http.ResponseWriter, r *http.Request) {
@@ -180,7 +186,11 @@ func (h *ChannelHandler) CreateDM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	targetID, err := id.Parse(req.UserID)
+	rawTarget := req.UserID
+	if rawTarget == "" && len(req.UserIDs) > 0 {
+		rawTarget = req.UserIDs[0]
+	}
+	targetID, err := id.Parse(rawTarget)
 	if err != nil {
 		writeErr(w, err)
 		return

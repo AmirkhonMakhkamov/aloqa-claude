@@ -1096,6 +1096,8 @@ func (s *Service) GetOrCreateDM(ctx context.Context, workspaceID, userA, userB u
 		},
 	}
 
+	ch.Members = []uuid.UUID{userA, userB}
+
 	if s.tx != nil {
 		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
 			if scope.Channels() == nil {
@@ -1114,7 +1116,13 @@ func (s *Service) GetOrCreateDM(ctx context.Context, workspaceID, userA, userB u
 					return err
 				}
 			}
-			return s.enqueueChannelSearchTx(ctx, scope, ch)
+			if err := s.enqueueChannelSearchTx(ctx, scope, ch); err != nil {
+				return err
+			}
+			// Broadcast on the workspace subject so the recipient — who has no
+			// reason to be subscribed to the brand-new channel yet — learns
+			// about the DM and can refresh their sidebar in realtime.
+			return s.enqueueEventTx(ctx, scope, event.TypeChannelCreated, fmt.Sprintf("aloqa.ws.%s", workspaceID), workspaceID, ch.ID, userA, event.ChannelPayload{Channel: ch})
 		}); err != nil {
 			slog.ErrorContext(ctx, "failed to create DM channel transaction", "error", err)
 			return nil, cerrors.Internal("failed to create DM channel", err)
@@ -1141,9 +1149,10 @@ func (s *Service) GetOrCreateDM(ctx context.Context, workspaceID, userA, userB u
 		s.enqueueSearch(ctx, "index channel", func() error {
 			return s.search.IndexChannel(ctx, ch.WorkspaceID, ch.ID, ch.Name, ch.Topic, ch.CreatedAt, ch.UpdatedAt)
 		})
+
+		s.publishToWorkspace(ctx, event.TypeChannelCreated, workspaceID, ch.ID, userA, event.ChannelPayload{Channel: ch})
 	}
 	slog.InfoContext(ctx, "DM channel created", "channel_id", ch.ID, "user_a", userA, "user_b", userB)
-	ch.Members = []uuid.UUID{userA, userB}
 	return ch, nil
 }
 

@@ -1116,13 +1116,15 @@ func (s *Service) GetOrCreateDM(ctx context.Context, workspaceID, userA, userB u
 					return err
 				}
 			}
-			if err := s.enqueueChannelSearchTx(ctx, scope, ch); err != nil {
-				return err
-			}
-			// Broadcast on the workspace subject so the recipient — who has no
-			// reason to be subscribed to the brand-new channel yet — learns
-			// about the DM and can refresh their sidebar in realtime.
-			return s.enqueueEventTx(ctx, scope, event.TypeChannelCreated, fmt.Sprintf("aloqa.ws.%s", workspaceID), workspaceID, ch.ID, userA, event.ChannelPayload{Channel: ch})
+			// Lazy DM visibility for the recipient: no channel.created
+			// broadcast on the workspace subject. The creator already has the
+			// channel via the API response (useOpenDm.onSuccess invalidates
+			// their sidebar); the recipient discovers the DM only when the
+			// first message.created event arrives on the workspace subject,
+			// triggering a sidebar refresh on their side. An empty just-
+			// opened DM stays invisible to the recipient until something is
+			// actually said in it.
+			return s.enqueueChannelSearchTx(ctx, scope, ch)
 		}); err != nil {
 			slog.ErrorContext(ctx, "failed to create DM channel transaction", "error", err)
 			return nil, cerrors.Internal("failed to create DM channel", err)
@@ -1149,8 +1151,7 @@ func (s *Service) GetOrCreateDM(ctx context.Context, workspaceID, userA, userB u
 		s.enqueueSearch(ctx, "index channel", func() error {
 			return s.search.IndexChannel(ctx, ch.WorkspaceID, ch.ID, ch.Name, ch.Topic, ch.CreatedAt, ch.UpdatedAt)
 		})
-
-		s.publishToWorkspace(ctx, event.TypeChannelCreated, workspaceID, ch.ID, userA, event.ChannelPayload{Channel: ch})
+		// Lazy DM visibility: see the matching comment in the tx path above.
 	}
 	slog.InfoContext(ctx, "DM channel created", "channel_id", ch.ID, "user_a", userA, "user_b", userB)
 	return ch, nil

@@ -45,6 +45,42 @@ func TestHubEvictSessionDisconnectsMatchingClients(t *testing.T) {
 	}
 }
 
+func TestHubRegisterIsSynchronouslyVisibleToSubscribe(t *testing.T) {
+	hub := NewHub(nil)
+	client := &Client{
+		ID:        uuid.New(),
+		UserID:    uuid.New(),
+		SessionID: "session-sync",
+		ResumeKey: "resume-sync",
+		Send:      make(chan []byte, 1),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		hub.Register(client)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Register did not return synchronously")
+	}
+
+	room := "aloqa.chat." + uuid.NewString()
+	hub.Subscribe(client.ID.String(), room)
+	hub.BroadcastToRoom(room, []byte(`{"type":"message.created"}`))
+
+	select {
+	case msg := <-client.Send:
+		if string(msg) != `{"type":"message.created"}` {
+			t.Fatalf("unexpected message: %s", msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("registered client did not receive immediate room broadcast")
+	}
+}
+
 func TestHubConcurrentBroadcastAndSubscribe(t *testing.T) {
 	hub := NewHub(nil)
 	ctx, cancel := context.WithCancel(context.Background())

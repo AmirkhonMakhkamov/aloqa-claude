@@ -4,7 +4,7 @@
 CREATE TABLE IF NOT EXISTS search_index (
     id             UUID PRIMARY KEY,
     workspace_id   UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-    resource_type  VARCHAR(20) NOT NULL,  -- 'message', 'file', 'channel'
+    resource_type  VARCHAR(20) NOT NULL,  -- 'message', 'file', 'channel', 'user'
     resource_id    UUID NOT NULL,
     channel_id     UUID REFERENCES channels(id) ON DELETE SET NULL,
     content        TEXT NOT NULL DEFAULT '',

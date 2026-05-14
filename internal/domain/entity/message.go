@@ -31,10 +31,10 @@ type Message struct {
 	DeletedAt *time.Time  `json:"deleted_at,omitempty"`
 
 	// Aggregated fields (populated by queries, not stored directly).
-	ReplyCount    int          `json:"reply_count,omitempty"`
-	Reactions     []Reaction   `json:"reactions,omitempty"`
-	Attachments   []Attachment `json:"attachments,omitempty"`
-	User          *User        `json:"user,omitempty"`
+	ReplyCount  int          `json:"reply_count,omitempty"`
+	Reactions   []Reaction   `json:"reactions,omitempty"`
+	Attachments []Attachment `json:"attachments,omitempty"`
+	User        *User        `json:"user,omitempty"`
 }
 
 type Reaction struct {

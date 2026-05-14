@@ -72,6 +72,38 @@ func (h *AdminHandler) InviteMember(w http.ResponseWriter, r *http.Request) {
 	writeCreated(w, member)
 }
 
+func (h *AdminHandler) ReindexSearch(w http.ResponseWriter, r *http.Request) {
+	workspaceID, err := workspaceIDFromQuery(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	actorID := middleware.UserIDFromContext(r.Context())
+
+	result, err := h.svc.ReindexSearch(r.Context(), workspaceID, actorID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w, result)
+}
+
+func (h *AdminHandler) BackfillSearchUsers(w http.ResponseWriter, r *http.Request) {
+	workspaceID, err := workspaceIDFromQuery(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	actorID := middleware.UserIDFromContext(r.Context())
+
+	result, err := h.svc.BackfillSearchUsers(r.Context(), workspaceID, actorID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w, result)
+}
+
 func (h *AdminHandler) ListRoles(w http.ResponseWriter, r *http.Request) {
 	workspaceID, err := workspaceIDFromRequest(r)
 	if err != nil {
@@ -683,6 +715,18 @@ func workspaceIDFromRequest(r *http.Request) (uuid.UUID, error) {
 		return workspaceID, nil
 	}
 	return id.Parse(chi.URLParam(r, "workspaceID"))
+}
+
+func workspaceIDFromQuery(r *http.Request) (uuid.UUID, error) {
+	value := r.URL.Query().Get("workspace_id")
+	if value == "" {
+		return uuid.Nil, cerrors.InvalidInput("workspace_id query parameter is required")
+	}
+	workspaceID, err := id.Parse(value)
+	if err != nil {
+		return uuid.Nil, cerrors.InvalidInput("invalid workspace_id")
+	}
+	return workspaceID, nil
 }
 
 func paginationFromQuery(r *http.Request) pagination.Params {

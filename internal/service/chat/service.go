@@ -444,6 +444,15 @@ func (s *Service) ListChannels(ctx context.Context, workspaceID, userID uuid.UUI
 		channels = result
 	}
 
+	// Lazy DM visibility: enforce at the service layer so both the
+	// access-policy path (CapabilityView via accesspolicy.ListChannels →
+	// channels.ListByWorkspace, which does not carry the filter) and the
+	// no-access-policy fallback (channels.ListByUser, which already filters
+	// in SQL) converge on the same visibility contract. Duplicate work on
+	// the fallback path is a no-op because all empty-recipient DMs were
+	// already removed before they reached us.
+	channels = s.filterAbandonedRecipientDMs(ctx, userID, channels)
+
 	ptrs := make([]*entity.Channel, len(channels))
 	for i := range channels {
 		ptrs[i] = &channels[i]
@@ -452,6 +461,36 @@ func (s *Service) ListChannels(ctx context.Context, workspaceID, userID uuid.UUI
 		return nil, err
 	}
 	return channels, nil
+}
+
+// filterAbandonedRecipientDMs drops DM channels where the caller is not the
+// creator and no message has ever been sent. Empty DMs the caller created
+// stay visible so they can come back to a recipient they searched for; non-DM
+// channels are unaffected.
+func (s *Service) filterAbandonedRecipientDMs(ctx context.Context, userID uuid.UUID, channels []entity.Channel) []entity.Channel {
+	if len(channels) == 0 || s.messages == nil {
+		return channels
+	}
+	out := make([]entity.Channel, 0, len(channels))
+	for _, ch := range channels {
+		if ch.Type != entity.ChannelTypeDM || ch.CreatedBy == userID {
+			out = append(out, ch)
+			continue
+		}
+		msgs, err := s.messages.ListByChannel(ctx, ch.ID, pagination.Params{Limit: 1})
+		if err != nil {
+			// Fail open — surface the channel rather than hide a real DM. The
+			// concrete error is already logged by the caller's request log.
+			slog.WarnContext(ctx, "failed to probe DM messages for visibility filter", "channel_id", ch.ID, "error", err)
+			out = append(out, ch)
+			continue
+		}
+		if len(msgs) == 0 {
+			continue
+		}
+		out = append(out, ch)
+	}
+	return out
 }
 
 // JoinChannel adds a user to a public channel.
@@ -1096,6 +1135,8 @@ func (s *Service) GetOrCreateDM(ctx context.Context, workspaceID, userA, userB u
 		},
 	}
 
+	ch.Members = []uuid.UUID{userA, userB}
+
 	if s.tx != nil {
 		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
 			if scope.Channels() == nil {
@@ -1114,6 +1155,14 @@ func (s *Service) GetOrCreateDM(ctx context.Context, workspaceID, userA, userB u
 					return err
 				}
 			}
+			// Lazy DM visibility for the recipient: no channel.created
+			// broadcast on the workspace subject. The creator already has the
+			// channel via the API response (useOpenDm.onSuccess invalidates
+			// their sidebar); the recipient discovers the DM only when the
+			// first message.created event arrives on the workspace subject,
+			// triggering a sidebar refresh on their side. An empty just-
+			// opened DM stays invisible to the recipient until something is
+			// actually said in it.
 			return s.enqueueChannelSearchTx(ctx, scope, ch)
 		}); err != nil {
 			slog.ErrorContext(ctx, "failed to create DM channel transaction", "error", err)
@@ -1141,9 +1190,9 @@ func (s *Service) GetOrCreateDM(ctx context.Context, workspaceID, userA, userB u
 		s.enqueueSearch(ctx, "index channel", func() error {
 			return s.search.IndexChannel(ctx, ch.WorkspaceID, ch.ID, ch.Name, ch.Topic, ch.CreatedAt, ch.UpdatedAt)
 		})
+		// Lazy DM visibility: see the matching comment in the tx path above.
 	}
 	slog.InfoContext(ctx, "DM channel created", "channel_id", ch.ID, "user_a", userA, "user_b", userB)
-	ch.Members = []uuid.UUID{userA, userB}
 	return ch, nil
 }
 

@@ -360,7 +360,14 @@ export const searchApi = {
   query: (
     wsId: UUID,
     q: string,
-    opts: { type?: string; limit?: number; offset?: number; channel_id?: UUID } = {},
+    opts: {
+      type?: string;
+      limit?: number;
+      offset?: number;
+      channel_id?: UUID;
+      date_from?: string;
+      date_to?: string;
+    } = {},
   ) =>
     http.get<SearchResults>(`/api/v1/workspaces/${wsId}/search`, {
       query: { q, ...opts },

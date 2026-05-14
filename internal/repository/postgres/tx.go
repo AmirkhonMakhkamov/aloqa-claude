@@ -27,6 +27,7 @@ type TxManagerConfig struct {
 	Channels            *ChannelRepo
 	ChannelGrants       *ChannelAccessGrantRepo
 	Calls               *CallRepo
+	Calendars           *CalendarRepo
 	Recordings          *RecordingRepo
 	Invites             *GuestInviteRepo
 	GuestGrants         *GuestAccessRepo
@@ -45,6 +46,7 @@ type TxManager struct {
 	channels            *ChannelRepo
 	channelGrants       *ChannelAccessGrantRepo
 	calls               *CallRepo
+	calendars           *CalendarRepo
 	recordings          *RecordingRepo
 	invites             *GuestInviteRepo
 	guestGrants         *GuestAccessRepo
@@ -62,6 +64,7 @@ type txScope struct {
 	channels            repository.ChannelRepository
 	channelGrants       repository.ChannelAccessGrantRepository
 	calls               repository.CallRepository
+	calendars           repository.CalendarRepository
 	recordings          repository.RecordingRepository
 	invites             repository.GuestInviteRepository
 	guestGrants         repository.GuestAccessRepository
@@ -85,6 +88,7 @@ func NewTxManager(pool *pgxpool.Pool, cfg TxManagerConfig) *TxManager {
 		channels:            cfg.Channels,
 		channelGrants:       cfg.ChannelGrants,
 		calls:               cfg.Calls,
+		calendars:           cfg.Calendars,
 		recordings:          cfg.Recordings,
 		invites:             cfg.Invites,
 		guestGrants:         cfg.GuestGrants,
@@ -134,6 +138,9 @@ func (m *TxManager) WithinTx(ctx context.Context, fn func(ctx context.Context, s
 	if m.calls != nil {
 		scope.calls = m.calls.withTx(tx)
 	}
+	if m.calendars != nil {
+		scope.calendars = m.calendars.withTx(tx)
+	}
 	if m.recordings != nil {
 		scope.recordings = m.recordings.withTx(tx)
 	}
@@ -173,6 +180,9 @@ func (s *txScope) ChannelGrants() repository.ChannelAccessGrantRepository {
 	return s.channelGrants
 }
 func (s *txScope) Calls() repository.CallRepository { return s.calls }
+func (s *txScope) Calendars() repository.CalendarRepository {
+	return s.calendars
+}
 func (s *txScope) Recordings() repository.RecordingRepository {
 	return s.recordings
 }

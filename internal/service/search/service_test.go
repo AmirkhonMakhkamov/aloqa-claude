@@ -108,14 +108,88 @@ func TestSearchGuestScopeUsesAccessibleChannelsOnly(t *testing.T) {
 	}
 }
 
+func TestSearchIncludesUserResultsForWorkspaceMembers(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	requesterID := uuid.New()
+	resultUserID := uuid.New()
+
+	for _, role := range []entity.WorkspaceRole{
+		entity.WorkspaceRoleMember,
+		entity.WorkspaceRoleAdmin,
+		entity.WorkspaceRoleOwner,
+	} {
+		t.Run(string(role), func(t *testing.T) {
+			searcher := &capturingSearcher{
+				results: &SearchResults{
+					Results: []Result{{
+						Type:        string(ResourceTypeUser),
+						ID:          resultUserID,
+						WorkspaceID: workspaceID,
+						Title:       "Bob Builder",
+						Snippet:     "<mark>Bob</mark> Builder",
+						Score:       1,
+						CreatedAt:   time.Now(),
+						UpdatedAt:   time.Now(),
+						User: &entity.User{
+							ID:          resultUserID,
+							Email:       "bob@example.com",
+							DisplayName: "Bob Builder",
+							Status:      entity.UserStatusActive,
+						},
+					}},
+					Total: 1,
+				},
+			}
+			workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+				{workspaceID, requesterID}: {WorkspaceID: workspaceID, UserID: requesterID, Role: role},
+			}}
+			channels := &fakeChannelRepo{
+				channels: map[uuid.UUID]*entity.Channel{},
+				members:  map[[2]uuid.UUID]*entity.ChannelMember{},
+			}
+			svc := NewService(nil, searcher, workspaces, channels, nil)
+			svc.SetAccessPolicy(accesspolicy.NewChecker(workspaces, channels, nil, nil))
+
+			results, err := svc.Search(ctx, Params{
+				WorkspaceID: workspaceID,
+				UserID:      &requesterID,
+				Query:       "Bob",
+				Type:        string(ResourceTypeUser),
+				Limit:       5,
+			})
+			if err != nil {
+				t.Fatalf("Search returned error: %v", err)
+			}
+			if !searcher.params.AllowUserResults {
+				t.Fatalf("AllowUserResults = false, want true for workspace role %s", role)
+			}
+			if len(results.Results) != 1 {
+				t.Fatalf("result count = %d, want 1", len(results.Results))
+			}
+			result := results.Results[0]
+			if result.Type != string(ResourceTypeUser) || result.ID != resultUserID {
+				t.Fatalf("result = %+v, want user %s", result, resultUserID)
+			}
+			if result.User == nil || result.User.DisplayName != "Bob Builder" {
+				t.Fatalf("result user = %+v, want hydrated Bob user", result.User)
+			}
+		})
+	}
+}
+
 type capturingSearcher struct {
-	called bool
-	params Params
+	called  bool
+	params  Params
+	results *SearchResults
 }
 
 func (s *capturingSearcher) Search(_ context.Context, params Params) (*SearchResults, error) {
 	s.called = true
 	s.params = params
+	if s.results != nil {
+		return s.results, nil
+	}
 	return &SearchResults{}, nil
 }
 

@@ -46,7 +46,6 @@ func NewClientSendChan() chan []byte {
 type Hub struct {
 	clients    map[uuid.UUID]*Client         // client ID -> client
 	rooms      map[string]map[uuid.UUID]bool // room name -> set of client IDs
-	register   chan *Client
 	unregister chan *Client
 	evict      chan string
 	state      SubscriptionStateStore
@@ -61,7 +60,6 @@ func NewHub(state SubscriptionStateStore) *Hub {
 	return &Hub{
 		clients:    make(map[uuid.UUID]*Client),
 		rooms:      make(map[string]map[uuid.UUID]bool),
-		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		evict:      make(chan string),
 		state:      state,
@@ -89,21 +87,6 @@ func (h *Hub) Run(ctx context.Context) {
 			}
 			h.mu.Unlock()
 			return
-		case client := <-h.register:
-			h.mu.Lock()
-			h.clients[client.ID] = client
-			signalRoom := "aloqa.signal." + client.UserID.String()
-			if h.rooms[signalRoom] == nil {
-				h.rooms[signalRoom] = make(map[uuid.UUID]bool)
-			}
-			h.rooms[signalRoom][client.ID] = true
-			h.mu.Unlock()
-
-			slog.Info("client registered",
-				slog.String("client_id", client.ID.String()),
-				slog.String("user_id", client.UserID.String()),
-			)
-
 		case client := <-h.unregister:
 			h.mu.Lock()
 			removed := h.removeClientLocked(client.ID)
@@ -146,9 +129,23 @@ func (h *Hub) Run(ctx context.Context) {
 	}
 }
 
-// Register queues a client for addition to the hub.
+// Register adds a client to the hub and returns only after subscriptions can
+// see it. The WebSocket reader may receive a subscribe message immediately
+// after the handshake opens, so registration must not be eventually visible.
 func (h *Hub) Register(client *Client) {
-	h.register <- client
+	h.mu.Lock()
+	h.clients[client.ID] = client
+	signalRoom := "aloqa.signal." + client.UserID.String()
+	if h.rooms[signalRoom] == nil {
+		h.rooms[signalRoom] = make(map[uuid.UUID]bool)
+	}
+	h.rooms[signalRoom][client.ID] = true
+	h.mu.Unlock()
+
+	slog.Info("client registered",
+		slog.String("client_id", client.ID.String()),
+		slog.String("user_id", client.UserID.String()),
+	)
 }
 
 // Unregister queues a client for removal from the hub.

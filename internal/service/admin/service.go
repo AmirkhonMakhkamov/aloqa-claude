@@ -31,6 +31,8 @@ type Service struct {
 	search      interface {
 		IndexUser(ctx context.Context, workspaceID, userID uuid.UUID, displayName, email string, createdAt, updatedAt time.Time) error
 		DeleteUserFromWorkspace(ctx context.Context, workspaceID, userID uuid.UUID) error
+		BackfillWorkspaceMembers(ctx context.Context, workspaceID uuid.UUID) (int, error)
+		ReindexWorkspace(ctx context.Context, workspaceID uuid.UUID) error
 	}
 	media interface {
 		ListNodes(ctx context.Context) ([]entity.MediaNodeSnapshot, error)
@@ -65,6 +67,12 @@ type RoleDefinitionInput struct {
 	Permissions []string
 }
 
+type SearchReindexResult struct {
+	WorkspaceID       uuid.UUID `json:"workspace_id"`
+	Reindexed         bool      `json:"reindexed"`
+	BackfilledMembers int       `json:"backfilled_members,omitempty"`
+}
+
 // NewService creates a new admin service.
 func NewService(
 	users repository.UserRepository,
@@ -77,6 +85,8 @@ func NewService(
 	search interface {
 		IndexUser(ctx context.Context, workspaceID, userID uuid.UUID, displayName, email string, createdAt, updatedAt time.Time) error
 		DeleteUserFromWorkspace(ctx context.Context, workspaceID, userID uuid.UUID) error
+		BackfillWorkspaceMembers(ctx context.Context, workspaceID uuid.UUID) (int, error)
+		ReindexWorkspace(ctx context.Context, workspaceID uuid.UUID) error
 	},
 ) *Service {
 	return &Service{
@@ -182,6 +192,39 @@ func (s *Service) ListMembers(ctx context.Context, workspaceID, actorID uuid.UUI
 		return nil, err
 	}
 	return s.workspaces.ListMembers(ctx, workspaceID, p)
+}
+
+func (s *Service) ReindexSearch(ctx context.Context, workspaceID, actorID uuid.UUID) (*SearchReindexResult, error) {
+	if err := s.requirePermission(ctx, workspaceID, actorID, rbac.PermissionWorkspaceSettings); err != nil {
+		return nil, err
+	}
+	if s.search == nil {
+		return nil, cerrors.Unavailable("search reindexing is not configured")
+	}
+	if err := s.search.ReindexWorkspace(ctx, workspaceID); err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok {
+			return nil, appErr
+		}
+		return nil, cerrors.Internal("failed to reindex workspace search", err)
+	}
+	return &SearchReindexResult{WorkspaceID: workspaceID, Reindexed: true}, nil
+}
+
+func (s *Service) BackfillSearchUsers(ctx context.Context, workspaceID, actorID uuid.UUID) (*SearchReindexResult, error) {
+	if err := s.requirePermission(ctx, workspaceID, actorID, rbac.PermissionWorkspaceSettings); err != nil {
+		return nil, err
+	}
+	if s.search == nil {
+		return nil, cerrors.Unavailable("search indexing is not configured")
+	}
+	count, err := s.search.BackfillWorkspaceMembers(ctx, workspaceID)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok {
+			return nil, appErr
+		}
+		return nil, cerrors.Internal("failed to backfill workspace member search documents", err)
+	}
+	return &SearchReindexResult{WorkspaceID: workspaceID, BackfilledMembers: count}, nil
 }
 
 func (s *Service) InviteMember(ctx context.Context, workspaceID, actorID uuid.UUID, input InviteMemberInput) (*entity.WorkspaceMember, error) {

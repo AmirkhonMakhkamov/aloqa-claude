@@ -21,7 +21,7 @@ func DefaultCORSConfig() CORSConfig {
 	return CORSConfig{
 		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Request-ID"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "Idempotency-Key", "X-Request-ID"},
 		ExposedHeaders:   []string{"X-Request-ID"},
 		AllowCredentials: false,
 		MaxAge:           86400,

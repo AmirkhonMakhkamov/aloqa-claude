@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -16,6 +15,7 @@ import (
 	"aloqa/internal/domain/repository"
 	"aloqa/internal/pkg/cerrors"
 	"aloqa/internal/pkg/id"
+	"aloqa/internal/platform/txscope"
 )
 
 type EventPublisher interface {
@@ -32,10 +32,17 @@ type Service struct {
 	members   repository.WorkspaceRepository
 	calls     CallService
 	pubsub    EventPublisher
-
-	reminderMu     sync.Mutex
-	reminderDedupe map[string]time.Time
+	tx        txscope.Manager
 }
+
+const (
+	reminderDispatchLimit         = 100
+	reminderDiscoveryHorizon      = 24 * time.Hour
+	maxReminderOffsetMinutes      = 10080
+	reminderEventLookaheadHorizon = time.Duration(maxReminderOffsetMinutes)*time.Minute + reminderDiscoveryHorizon
+	reminderOutboxBatchSize       = 100
+	reminderOutboxMaxAttempts     = 10
+)
 
 type CreateEventInput struct {
 	CalendarID      uuid.UUID
@@ -44,6 +51,7 @@ type CreateEventInput struct {
 	Description     *string
 	Location        entity.EventLocation
 	ScheduledAt     time.Time
+	OriginatorTZ    string
 	DurationMinutes int
 	AllDay          bool
 	Recurrence      *entity.RecurrenceRule
@@ -62,6 +70,8 @@ type UpdateEventInput struct {
 	DescriptionSet  bool
 	Location        *entity.EventLocation
 	ScheduledAt     *time.Time
+	OriginatorTZ    *string
+	OriginatorTZSet bool
 	DurationMinutes *int
 	AllDay          *bool
 	Recurrence      *entity.RecurrenceRule
@@ -81,12 +91,15 @@ func NewService(
 	pubsub EventPublisher,
 ) *Service {
 	return &Service{
-		calendars:      calendars,
-		members:        members,
-		calls:          calls,
-		pubsub:         pubsub,
-		reminderDedupe: map[string]time.Time{},
+		calendars: calendars,
+		members:   members,
+		calls:     calls,
+		pubsub:    pubsub,
 	}
+}
+
+func (s *Service) SetTransactionManager(manager txscope.Manager) {
+	s.tx = manager
 }
 
 func (s *Service) ListUserCalendars(ctx context.Context, workspaceID, ownerID uuid.UUID) ([]entity.UserCalendar, error) {
@@ -237,6 +250,7 @@ func (s *Service) CreateEvent(ctx context.Context, workspaceID, organizerID uuid
 		Description:     input.Description,
 		Location:        input.Location,
 		ScheduledAt:     input.ScheduledAt.UTC(),
+		OriginatorTZ:    normalizeOriginatorTZ(input.OriginatorTZ),
 		DurationMinutes: input.DurationMinutes,
 		AllDay:          input.AllDay,
 		Recurrence:      normalizeRecurrence(input.Recurrence),
@@ -289,6 +303,12 @@ func (s *Service) UpdateEvent(ctx context.Context, workspaceID, eventID, actorID
 	}
 	if input.ScheduledAt != nil {
 		existing.ScheduledAt = input.ScheduledAt.UTC()
+	}
+	if input.OriginatorTZSet {
+		existing.OriginatorTZ = normalizeOriginatorTZ("")
+		if input.OriginatorTZ != nil {
+			existing.OriginatorTZ = normalizeOriginatorTZ(*input.OriginatorTZ)
+		}
 	}
 	if input.DurationMinutes != nil {
 		existing.DurationMinutes = *input.DurationMinutes
@@ -360,13 +380,16 @@ func (s *Service) UpsertRsvp(ctx context.Context, workspaceID, eventID, userID u
 	if err != nil {
 		return nil, err
 	}
-	s.publishRsvp(ctx, workspaceID, eventID, *attendee)
+	s.publishRsvp(ctx, eventEntity, *attendee)
 	return attendee, nil
 }
 
 func (s *Service) StartCallFromEvent(ctx context.Context, workspaceID, eventID, initiatorID uuid.UUID) (*entity.Call, error) {
 	if err := s.requireWorkspaceMember(ctx, workspaceID, initiatorID); err != nil {
 		return nil, err
+	}
+	if s.tx != nil {
+		return s.startCallFromEventTx(ctx, workspaceID, eventID, initiatorID)
 	}
 	eventEntity, err := s.calendars.GetEvent(ctx, eventID)
 	if err != nil {
@@ -382,7 +405,13 @@ func (s *Service) StartCallFromEvent(ctx context.Context, workspaceID, eventID, 
 		return nil, cerrors.Unavailable("call service is not configured")
 	}
 	if eventEntity.CallID != nil {
-		return s.calls.GetCall(ctx, workspaceID, *eventEntity.CallID, initiatorID)
+		callEntity, err := s.calls.GetCall(ctx, workspaceID, *eventEntity.CallID, initiatorID)
+		if err != nil {
+			return nil, err
+		}
+		if callEntity.Status != entity.CallStatusEnded {
+			return callEntity, nil
+		}
 	}
 
 	callEntity, err := s.calls.StartCall(ctx, workspaceID, initiatorID, entity.CallTypeMeeting, eventEntity.Title, eventEntity.ChannelID, entity.CallSettings{
@@ -397,31 +426,145 @@ func (s *Service) StartCallFromEvent(ctx context.Context, workspaceID, eventID, 
 	if err != nil {
 		return nil, err
 	}
-	updated, err := s.calendars.SetEventCallIDIfUnset(ctx, eventID, callEntity.ID)
-	if err != nil {
+	if err := s.calendars.LinkEventAndCall(ctx, eventID, callEntity.ID); err != nil {
 		return nil, err
 	}
-	if updated.CallID != nil && *updated.CallID != callEntity.ID {
-		return s.calls.GetCall(ctx, workspaceID, *updated.CallID, initiatorID)
+	scheduledCallID := eventID
+	callEntity.ScheduledCallID = &scheduledCallID
+	updated, err := s.calendars.GetEvent(ctx, eventID)
+	if err != nil {
+		return nil, err
 	}
 	s.publishEvent(ctx, event.TypeCalendarEventUpdated, *updated, initiatorID)
 	return callEntity, nil
 }
 
+func (s *Service) startCallFromEventTx(ctx context.Context, workspaceID, eventID, initiatorID uuid.UUID) (*entity.Call, error) {
+	var callEntity *entity.Call
+	err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
+		if scope.Calendars() == nil || scope.Calls() == nil {
+			return cerrors.Unavailable("calendar call transaction scope is not configured")
+		}
+		eventEntity, err := scope.Calendars().LockEventForStartCall(ctx, eventID)
+		if err != nil {
+			return err
+		}
+		if eventEntity.WorkspaceID != workspaceID {
+			return cerrors.NotFound("event not found")
+		}
+		if !canAccessEvent(eventEntity, initiatorID) {
+			return cerrors.Forbidden("you do not have access to this event")
+		}
+		if eventEntity.CallID != nil {
+			existing, err := scope.Calls().GetByID(ctx, *eventEntity.CallID)
+			if err != nil {
+				if appErr, ok := cerrors.AsAppError(err); !ok || appErr.Code != cerrors.CodeNotFound {
+					return err
+				}
+			} else if existing.Status != entity.CallStatusEnded {
+				callEntity = existing
+				return nil
+			}
+		}
+
+		now := time.Now().UTC()
+		scheduledCallID := eventEntity.ID
+		callEntity = &entity.Call{
+			ID:              id.New(),
+			WorkspaceID:     workspaceID,
+			ChannelID:       eventEntity.ChannelID,
+			Type:            entity.CallTypeMeeting,
+			Status:          entity.CallStatusRinging,
+			Title:           eventEntity.Title,
+			CreatedBy:       initiatorID,
+			ScheduledCallID: &scheduledCallID,
+			Settings: entity.CallSettings{
+				WaitingRoom:     false,
+				MuteOnJoin:      false,
+				Recording:       false,
+				ScreenSharing:   true,
+				Chat:            true,
+				BreakoutRooms:   false,
+				MaxParticipants: 500,
+			},
+			StartedAt: &now,
+			CreatedAt: now,
+		}
+		participant := &entity.CallParticipant{
+			ID:       id.New(),
+			CallID:   callEntity.ID,
+			UserID:   initiatorID,
+			Role:     entity.CallRoleHost,
+			Status:   entity.ParticipantStatusConnected,
+			JoinedAt: &now,
+		}
+		if err := scope.Calls().Create(ctx, callEntity); err != nil {
+			return err
+		}
+		if err := scope.Calls().AddParticipant(ctx, participant); err != nil {
+			return err
+		}
+		if err := scope.Calendars().LinkEventAndCall(ctx, eventEntity.ID, callEntity.ID); err != nil {
+			return err
+		}
+		eventEntity.CallID = &callEntity.ID
+		if err := s.enqueueTx(ctx, scope, event.TypeCallStarted, fmt.Sprintf("aloqa.ws.%s", workspaceID), workspaceID, channelIDOrNil(eventEntity.ChannelID), initiatorID, event.CallPayload{Call: callEntity}); err != nil {
+			return err
+		}
+		return s.enqueueTx(ctx, scope, event.TypeCalendarEventUpdated, calendarSubject(workspaceID), workspaceID, channelIDOrNil(eventEntity.ChannelID), initiatorID, event.CalendarEventPayload{Event: *eventEntity})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return callEntity, nil
+}
+
 func (s *Service) ListAndDispatchReminders(ctx context.Context, now time.Time) error {
-	targets, err := s.calendars.ListEventsForReminderFanout(ctx, 30*time.Second)
+	now = now.UTC()
+	if s.tx == nil {
+		return cerrors.Unavailable("calendar transaction manager is not configured")
+	}
+	return s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
+		if scope.Calendars() == nil {
+			return cerrors.Unavailable("calendar transaction scope is not configured")
+		}
+		return s.dispatchDueReminders(ctx, scope.Calendars(), now)
+	})
+}
+
+func (s *Service) dispatchDueReminders(ctx context.Context, calendars repository.CalendarRepository, now time.Time) error {
+	targets, err := calendars.ListDueReminderTargets(ctx, now, reminderEventLookaheadHorizon, reminderDispatchLimit)
 	if err != nil {
 		return err
 	}
-	s.pruneReminderDedupe(now)
 	for _, target := range targets {
-		key := fmt.Sprintf("%s:%s:%d:%s", target.Occurrence.ID, target.UserID, target.OffsetMinutes, target.Occurrence.InstanceAt.UTC().Format(time.RFC3339Nano))
-		if s.reminderSeen(key, now) {
-			continue
+		if target.ReminderID == uuid.Nil {
+			return cerrors.Internal("reminder target is missing reminder id", nil)
 		}
-		s.publishReminder(ctx, target)
+		payload, err := prepareReminderPayload(target, now)
+		if err != nil {
+			return err
+		}
+		if err := calendars.EnqueueReminderOutbox(ctx, target, payload, now); err != nil {
+			return err
+		}
+		if err := calendars.MarkReminderDispatched(ctx, target.ReminderID, target.Occurrence.InstanceAt, now); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func (s *Service) PublishPendingReminderOutbox(ctx context.Context) (processed, failed, dead int, err error) {
+	if s.calendars == nil {
+		return 0, 0, 0, cerrors.Unavailable("calendar repository is not configured")
+	}
+	return s.calendars.PublishReminderOutbox(ctx, reminderOutboxBatchSize, reminderOutboxMaxAttempts, func(ctx context.Context, msg entity.ReminderOutboxMessage) error {
+		if s.pubsub == nil {
+			return nil
+		}
+		return s.pubsub.Publish(ctx, userEventsSubject(msg.UserID), msg.PayloadJSON)
+	})
 }
 
 func (s *Service) requireWorkspaceMember(ctx context.Context, workspaceID, userID uuid.UUID) error {
@@ -494,6 +637,14 @@ func normalizeRecurrence(recurrence *entity.RecurrenceRule) *entity.RecurrenceRu
 	return &entity.RecurrenceRule{RRule: rrule, Exdates: recurrence.Exdates}
 }
 
+func normalizeOriginatorTZ(originatorTZ string) string {
+	originatorTZ = strings.TrimSpace(originatorTZ)
+	if originatorTZ == "" {
+		return "UTC"
+	}
+	return originatorTZ
+}
+
 func buildAttendees(eventID uuid.UUID, userIDs []uuid.UUID, emails []string, requiredUserIDs []uuid.UUID) []entity.EventAttendee {
 	required := make(map[uuid.UUID]struct{}, len(requiredUserIDs))
 	for _, userID := range requiredUserIDs {
@@ -555,7 +706,7 @@ func buildReminderRows(eventID, organizerID uuid.UUID, attendees []entity.EventA
 	seen := map[string]struct{}{}
 	for _, userID := range userIDs {
 		for _, reminder := range reminders {
-			if reminder.OffsetMinutes < 0 || reminder.OffsetMinutes > 10080 {
+			if reminder.OffsetMinutes < 0 || reminder.OffsetMinutes > maxReminderOffsetMinutes {
 				continue
 			}
 			if reminder.Channel != entity.ReminderChannelInApp && reminder.Channel != entity.ReminderChannelOS {
@@ -590,38 +741,87 @@ func canAccessEvent(eventEntity *entity.CalendarEvent, userID uuid.UUID) bool {
 	return false
 }
 
+func affectedCalendarUserIDs(eventEntity *entity.CalendarEvent, attendee entity.EventAttendee) []uuid.UUID {
+	seen := map[uuid.UUID]struct{}{}
+	add := func(userID uuid.UUID, out *[]uuid.UUID) {
+		if userID == uuid.Nil {
+			return
+		}
+		if _, ok := seen[userID]; ok {
+			return
+		}
+		seen[userID] = struct{}{}
+		*out = append(*out, userID)
+	}
+
+	userIDs := make([]uuid.UUID, 0, len(eventEntity.Attendees)+2)
+	add(eventEntity.OrganizerID, &userIDs)
+	if attendee.UserID != nil {
+		add(*attendee.UserID, &userIDs)
+	}
+	for _, eventAttendee := range eventEntity.Attendees {
+		if eventAttendee.UserID != nil {
+			add(*eventAttendee.UserID, &userIDs)
+		}
+	}
+	return userIDs
+}
+
+func channelIDOrNil(channelID *uuid.UUID) uuid.UUID {
+	if channelID == nil {
+		return uuid.Nil
+	}
+	return *channelID
+}
+
 func (s *Service) publishCalendar(ctx context.Context, eventType event.Type, calendarEntity entity.UserCalendar, userID uuid.UUID) {
-	s.publish(ctx, eventType, calendarSubject(calendarEntity.WorkspaceID), calendarEntity.WorkspaceID, uuid.Nil, userID, event.UserCalendarPayload{Calendar: calendarEntity})
+	_ = s.publish(ctx, eventType, calendarSubject(calendarEntity.WorkspaceID), calendarEntity.WorkspaceID, uuid.Nil, userID, event.UserCalendarPayload{Calendar: calendarEntity})
 }
 
 func (s *Service) publishEvent(ctx context.Context, eventType event.Type, calendarEvent entity.CalendarEvent, userID uuid.UUID) {
-	channelID := uuid.Nil
-	if calendarEvent.ChannelID != nil {
-		channelID = *calendarEvent.ChannelID
-	}
-	s.publish(ctx, eventType, calendarSubject(calendarEvent.WorkspaceID), calendarEvent.WorkspaceID, channelID, userID, event.CalendarEventPayload{Event: calendarEvent})
+	_ = s.publish(ctx, eventType, calendarSubject(calendarEvent.WorkspaceID), calendarEvent.WorkspaceID, channelIDOrNil(calendarEvent.ChannelID), userID, event.CalendarEventPayload{Event: calendarEvent})
 }
 
-func (s *Service) publishRsvp(ctx context.Context, workspaceID, eventID uuid.UUID, attendee entity.EventAttendee) {
-	payload := event.CalendarRsvpPayload{EventID: eventID, Attendee: attendee}
-	userID := uuid.Nil
-	if attendee.UserID != nil {
-		userID = *attendee.UserID
-	}
-	s.publish(ctx, event.TypeCalendarAttendeeRsvpUpdated, calendarSubject(workspaceID), workspaceID, uuid.Nil, userID, payload)
-	if attendee.UserID != nil {
-		s.publish(ctx, event.TypeCalendarAttendeeRsvpUpdated, userEventsSubject(workspaceID, *attendee.UserID), workspaceID, uuid.Nil, *attendee.UserID, payload)
+func (s *Service) publishRsvp(ctx context.Context, eventEntity *entity.CalendarEvent, attendee entity.EventAttendee) {
+	payload := event.CalendarRsvpPayload{EventID: eventEntity.ID, Attendee: attendee}
+	for _, userID := range affectedCalendarUserIDs(eventEntity, attendee) {
+		_ = s.publish(ctx, event.TypeCalendarAttendeeRsvpUpdated, userEventsSubject(userID), eventEntity.WorkspaceID, uuid.Nil, userID, payload)
 	}
 }
 
-func (s *Service) publishReminder(ctx context.Context, target entity.ReminderTarget) {
-	payload := event.CalendarEventPayload{Event: target.Occurrence.CalendarEvent}
-	s.publish(ctx, event.TypeCalendarEventReminderFired, userEventsSubject(target.Occurrence.WorkspaceID, target.UserID), target.Occurrence.WorkspaceID, uuid.Nil, target.UserID, payload)
+func prepareReminderPayload(target entity.ReminderTarget, timestamp time.Time) ([]byte, error) {
+	_, body, _, err := event.Prepare(userEventsSubject(target.UserID), event.Event{
+		Type:        event.TypeCalendarEventReminderFired,
+		WorkspaceID: target.Occurrence.WorkspaceID,
+		ChannelID:   uuid.Nil,
+		UserID:      target.UserID,
+		Timestamp:   timestamp.UTC(),
+		Payload:     event.CalendarEventPayload{Event: target.Occurrence.CalendarEvent},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("prepare reminder event: %w", err)
+	}
+	return body, nil
 }
 
-func (s *Service) publish(ctx context.Context, eventType event.Type, subject string, workspaceID, channelID, userID uuid.UUID, payload any) {
+func (s *Service) enqueueTx(ctx context.Context, scope txscope.Scope, eventType event.Type, subject string, workspaceID, channelID, userID uuid.UUID, payload any) error {
+	evt, body, _, err := event.Prepare(subject, event.Event{
+		Type:        eventType,
+		WorkspaceID: workspaceID,
+		ChannelID:   channelID,
+		UserID:      userID,
+		Timestamp:   time.Now().UTC(),
+		Payload:     payload,
+	})
+	if err != nil {
+		return fmt.Errorf("prepare calendar realtime event: %w", err)
+	}
+	return scope.EnqueueRealtime(ctx, evt, body)
+}
+
+func (s *Service) publish(ctx context.Context, eventType event.Type, subject string, workspaceID, channelID, userID uuid.UUID, payload any) error {
 	if s.pubsub == nil {
-		return
+		return nil
 	}
 	evt := event.Event{
 		ID:          id.New(),
@@ -635,37 +835,19 @@ func (s *Service) publish(ctx context.Context, eventType event.Type, subject str
 	data, err := json.Marshal(evt)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to marshal calendar event", "type", eventType, "error", err)
-		return
+		return fmt.Errorf("marshal calendar event: %w", err)
 	}
 	if err := s.pubsub.Publish(ctx, subject, data); err != nil {
 		slog.ErrorContext(ctx, "failed to publish calendar event", "type", eventType, "subject", subject, "error", err)
+		return fmt.Errorf("publish calendar event: %w", err)
 	}
+	return nil
 }
 
 func calendarSubject(workspaceID uuid.UUID) string {
 	return fmt.Sprintf("aloqa.ws.%s.calendar", workspaceID)
 }
 
-func userEventsSubject(workspaceID, userID uuid.UUID) string {
-	return fmt.Sprintf("aloqa.ws.%s.user.%s.events", workspaceID, userID)
-}
-
-func (s *Service) reminderSeen(key string, now time.Time) bool {
-	s.reminderMu.Lock()
-	defer s.reminderMu.Unlock()
-	if _, ok := s.reminderDedupe[key]; ok {
-		return true
-	}
-	s.reminderDedupe[key] = now
-	return false
-}
-
-func (s *Service) pruneReminderDedupe(now time.Time) {
-	s.reminderMu.Lock()
-	defer s.reminderMu.Unlock()
-	for key, seenAt := range s.reminderDedupe {
-		if now.Sub(seenAt) > 2*time.Hour {
-			delete(s.reminderDedupe, key)
-		}
-	}
+func userEventsSubject(userID uuid.UUID) string {
+	return fmt.Sprintf("aloqa.ws.%s.events", userID)
 }

@@ -75,12 +75,11 @@ const (
 )
 
 type EventReminder struct {
-	ID                    uuid.UUID       `json:"-"`
-	EventID               uuid.UUID       `json:"-"`
-	UserID                uuid.UUID       `json:"-"`
-	OffsetMinutes         int             `json:"offset_minutes"`
-	Channel               ReminderChannel `json:"channel"`
-	RemindersDispatchedAt *time.Time      `json:"-"`
+	ID            uuid.UUID       `json:"-"`
+	EventID       uuid.UUID       `json:"-"`
+	UserID        uuid.UUID       `json:"-"`
+	OffsetMinutes int             `json:"offset_minutes"`
+	Channel       ReminderChannel `json:"channel"`
 }
 
 type CalendarEvent struct {
@@ -93,6 +92,7 @@ type CalendarEvent struct {
 	Description     *string         `json:"description"`
 	Location        EventLocation   `json:"location"`
 	ScheduledAt     time.Time       `json:"scheduled_at"`
+	OriginatorTZ    string          `json:"originator_tz"`
 	DurationMinutes int             `json:"duration_minutes"`
 	AllDay          bool            `json:"all_day"`
 	Recurrence      *RecurrenceRule `json:"recurrence"`
@@ -119,7 +119,21 @@ type EventOverride struct {
 }
 
 type ReminderTarget struct {
+	ReminderID    uuid.UUID       `json:"-"`
 	Occurrence    EventOccurrence `json:"event"`
 	UserID        uuid.UUID       `json:"user_id"`
 	OffsetMinutes int             `json:"offset_minutes"`
+	Channel       ReminderChannel `json:"channel"`
+	FireAt        time.Time       `json:"fire_at"`
+}
+
+type ReminderOutboxMessage struct {
+	ID           uuid.UUID `json:"id"`
+	ReminderID   uuid.UUID `json:"reminder_id"`
+	EventID      uuid.UUID `json:"event_id"`
+	OccurrenceAt time.Time `json:"occurrence_at"`
+	UserID       uuid.UUID `json:"user_id"`
+	PayloadJSON  []byte    `json:"payload_json"`
+	EnqueuedAt   time.Time `json:"enqueued_at"`
+	Attempts     int       `json:"attempts"`
 }

@@ -371,6 +371,13 @@ func (h *Handler) authorizeSubscription(ctx context.Context, client *platformws.
 			return uuid.Nil, err
 		}
 		return workspaceID, nil
+	case strings.HasPrefix(room, "aloqa.ws.") && strings.HasSuffix(room, ".events") && !strings.Contains(room, ".user."):
+		rawUserID := strings.TrimSuffix(strings.TrimPrefix(room, "aloqa.ws."), ".events")
+		userID, err := uuid.Parse(rawUserID)
+		if err != nil || userID != client.UserID {
+			return uuid.Nil, errNotAllowed()
+		}
+		return uuid.Nil, nil
 	case strings.HasPrefix(room, "aloqa.ws.") && strings.HasSuffix(room, ".events") && strings.Contains(room, ".user."):
 		if h.chatSvc == nil {
 			return uuid.Nil, errNotAllowed()

@@ -56,6 +56,7 @@ type createEventRequest struct {
 	Description     *string                `json:"description"`
 	Location        eventLocationRequest   `json:"location"`
 	ScheduledAt     time.Time              `json:"scheduled_at"`
+	OriginatorTZ    string                 `json:"originator_tz"`
 	DurationMinutes int                    `json:"duration_minutes"`
 	AllDay          bool                   `json:"all_day"`
 	Recurrence      *recurrenceRequest     `json:"recurrence"`
@@ -333,6 +334,7 @@ func createEventInputFromRequest(req createEventRequest) (calendarservice.Create
 		Description:     req.Description,
 		Location:        entity.EventLocation{Type: req.Location.Type, Value: req.Location.Value},
 		ScheduledAt:     req.ScheduledAt,
+		OriginatorTZ:    req.OriginatorTZ,
 		DurationMinutes: req.DurationMinutes,
 		AllDay:          req.AllDay,
 		Recurrence:      recurrenceFromRequest(req.Recurrence),
@@ -400,6 +402,14 @@ func updateEventInputFromRaw(raw map[string]json.RawMessage) (calendarservice.Up
 			return input, cerrors.InvalidInput("invalid scheduled_at")
 		}
 		input.ScheduledAt = &scheduledAt
+	}
+	if value, ok := raw["originator_tz"]; ok {
+		var originatorTZ string
+		if err := json.Unmarshal(value, &originatorTZ); err != nil {
+			return input, cerrors.InvalidInput("invalid originator_tz")
+		}
+		input.OriginatorTZ = &originatorTZ
+		input.OriginatorTZSet = true
 	}
 	if value, ok := raw["duration_minutes"]; ok {
 		var duration int

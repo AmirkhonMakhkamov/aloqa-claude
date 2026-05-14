@@ -10,10 +10,10 @@ import (
 type GuestInviteStatus string
 
 const (
-	GuestInviteStatusActive   GuestInviteStatus = "active"
-	GuestInviteStatusUsed     GuestInviteStatus = "used"
-	GuestInviteStatusExpired  GuestInviteStatus = "expired"
-	GuestInviteStatusRevoked  GuestInviteStatus = "revoked"
+	GuestInviteStatusActive  GuestInviteStatus = "active"
+	GuestInviteStatusUsed    GuestInviteStatus = "used"
+	GuestInviteStatusExpired GuestInviteStatus = "expired"
+	GuestInviteStatusRevoked GuestInviteStatus = "revoked"
 )
 
 // GuestInvite is a time-limited, scope-limited invitation for external users.

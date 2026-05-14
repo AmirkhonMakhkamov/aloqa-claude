@@ -41,8 +41,8 @@ func (r *CallRepo) Create(ctx context.Context, call *entity.Call) error {
 	}
 
 	query := `
-		INSERT INTO calls (id, workspace_id, channel_id, type, status, title, created_by, settings, started_at, ended_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
+		INSERT INTO calls (id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`
 
 	_, err = r.db.Exec(ctx, query,
 		call.ID,
@@ -52,6 +52,7 @@ func (r *CallRepo) Create(ctx context.Context, call *entity.Call) error {
 		call.Status,
 		call.Title,
 		call.CreatedBy,
+		call.ScheduledCallID,
 		settingsJSON,
 		call.StartedAt,
 		call.EndedAt,
@@ -66,7 +67,7 @@ func (r *CallRepo) Create(ctx context.Context, call *entity.Call) error {
 
 func (r *CallRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Call, error) {
 	query := `
-		SELECT id, workspace_id, channel_id, type, status, title, created_by, settings, started_at, ended_at, created_at
+		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, created_at
 		FROM calls
 		WHERE id = $1`
 
@@ -81,6 +82,7 @@ func (r *CallRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Call, err
 		&call.Status,
 		&call.Title,
 		&call.CreatedBy,
+		&call.ScheduledCallID,
 		&settingsJSON,
 		&call.StartedAt,
 		&call.EndedAt,
@@ -102,7 +104,7 @@ func (r *CallRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Call, err
 
 func (r *CallRepo) ListActiveByWorkspace(ctx context.Context, workspaceID uuid.UUID) ([]entity.Call, error) {
 	query := `
-		SELECT id, workspace_id, channel_id, type, status, title, created_by, settings, started_at, ended_at, created_at
+		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, created_at
 		FROM calls
 		WHERE workspace_id = $1 AND status != 'ended'
 		ORDER BY created_at DESC`
@@ -126,6 +128,7 @@ func (r *CallRepo) ListActiveByWorkspace(ctx context.Context, workspaceID uuid.U
 			&call.Status,
 			&call.Title,
 			&call.CreatedBy,
+			&call.ScheduledCallID,
 			&settingsJSON,
 			&call.StartedAt,
 			&call.EndedAt,
@@ -156,7 +159,7 @@ func (r *CallRepo) ListRecentByWorkspace(ctx context.Context, workspaceID uuid.U
 	}
 
 	query := `
-		SELECT id, workspace_id, channel_id, type, status, title, created_by, settings, started_at, ended_at, created_at
+		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, created_at
 		FROM calls
 		WHERE workspace_id = $1`
 	args := []any{workspaceID}
@@ -188,6 +191,7 @@ func (r *CallRepo) ListRecentByWorkspace(ctx context.Context, workspaceID uuid.U
 			&call.Status,
 			&call.Title,
 			&call.CreatedBy,
+			&call.ScheduledCallID,
 			&settingsJSON,
 			&call.StartedAt,
 			&call.EndedAt,

@@ -8,30 +8,30 @@ import (
 
 // App represents a third-party application registered in the marketplace.
 type App struct {
-	ID          uuid.UUID         `json:"id"`
-	Name        string            `json:"name"`
-	Description string            `json:"description"`
-	Developer   string            `json:"developer"`
-	IconURL     string            `json:"icon_url,omitempty"`
-	WebhookURL  string            `json:"webhook_url"`
-	Permissions []string          `json:"permissions"`
-	SlashCommands []SlashCommand  `json:"slash_commands,omitempty"`
-	Status      string            `json:"status"` // active, suspended, review
+	ID            uuid.UUID      `json:"id"`
+	Name          string         `json:"name"`
+	Description   string         `json:"description"`
+	Developer     string         `json:"developer"`
+	IconURL       string         `json:"icon_url,omitempty"`
+	WebhookURL    string         `json:"webhook_url"`
+	Permissions   []string       `json:"permissions"`
+	SlashCommands []SlashCommand `json:"slash_commands,omitempty"`
+	Status        string         `json:"status"` // active, suspended, review
 }
 
 // SlashCommand defines a command that users can invoke in chat.
 type SlashCommand struct {
-	Command     string `json:"command"`     // e.g., "/poll"
+	Command     string `json:"command"` // e.g., "/poll"
 	Description string `json:"description"`
-	Usage       string `json:"usage"`       // e.g., "/poll <question>"
+	Usage       string `json:"usage"` // e.g., "/poll <question>"
 }
 
 // AppInstallation records which apps are installed in a workspace.
 type AppInstallation struct {
-	ID          uuid.UUID `json:"id"`
-	AppID       uuid.UUID `json:"app_id"`
-	WorkspaceID uuid.UUID `json:"workspace_id"`
-	InstalledBy uuid.UUID `json:"installed_by"`
+	ID          uuid.UUID      `json:"id"`
+	AppID       uuid.UUID      `json:"app_id"`
+	WorkspaceID uuid.UUID      `json:"workspace_id"`
+	InstalledBy uuid.UUID      `json:"installed_by"`
 	Config      map[string]any `json:"config,omitempty"`
 }
 

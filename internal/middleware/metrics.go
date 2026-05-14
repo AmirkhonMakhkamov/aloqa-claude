@@ -12,13 +12,13 @@ import (
 // RequestMetricsCollector aggregates HTTP request counts and latency for
 // Prometheus-style exposition. It is safe for concurrent use.
 type RequestMetricsCollector struct {
-	mu             sync.Mutex
-	statusCounts   map[int]int64
-	methodCounts   map[string]int64
-	bucketCounts   map[float64]int64 // upper bound (seconds) → cumulative count
-	latencySum     float64
-	latencyCount   int64
-	bucketBounds   []float64
+	mu           sync.Mutex
+	statusCounts map[int]int64
+	methodCounts map[string]int64
+	bucketCounts map[float64]int64 // upper bound (seconds) → cumulative count
+	latencySum   float64
+	latencyCount int64
+	bucketBounds []float64
 }
 
 // NewRequestMetricsCollector creates a collector with default histogram buckets.

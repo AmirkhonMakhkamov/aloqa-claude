@@ -37,10 +37,10 @@ type TranscriptSegment struct {
 
 // ExtractedTask represents an action item extracted from text.
 type ExtractedTask struct {
-	Description string     `json:"description"`
-	AssigneeHint string    `json:"assignee_hint,omitempty"` // Name mentioned in text
-	DueDate      string    `json:"due_date,omitempty"`      // Relative date from text
-	Priority     string    `json:"priority,omitempty"`      // high, medium, low
+	Description  string `json:"description"`
+	AssigneeHint string `json:"assignee_hint,omitempty"` // Name mentioned in text
+	DueDate      string `json:"due_date,omitempty"`      // Relative date from text
+	Priority     string `json:"priority,omitempty"`      // high, medium, low
 }
 
 // MeetingSummary contains an AI-generated meeting summary.

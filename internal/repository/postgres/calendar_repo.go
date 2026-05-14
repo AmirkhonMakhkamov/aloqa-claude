@@ -777,10 +777,41 @@ func (r *CalendarRepo) replaceAttendees(ctx context.Context, eventID uuid.UUID, 
 }
 
 func (r *CalendarRepo) replaceReminders(ctx context.Context, eventID uuid.UUID, reminders []entity.EventReminder) error {
-	if _, err := r.db.Exec(ctx, `DELETE FROM event_reminders WHERE event_id = $1`, eventID); err != nil {
-		return fmt.Errorf("postgres: replace event reminders delete: %w", err)
+	rows, err := r.db.Query(ctx, `
+		SELECT id, user_id, offset_minutes, channel
+		FROM event_reminders
+		WHERE event_id = $1`, eventID)
+	if err != nil {
+		return fmt.Errorf("postgres: load event reminders: %w", err)
 	}
-	for _, reminder := range reminders {
+
+	existing := map[reminderDefinitionKey]uuid.UUID{}
+	for rows.Next() {
+		var reminderID uuid.UUID
+		var key reminderDefinitionKey
+		if err := rows.Scan(&reminderID, &key.userID, &key.offsetMinutes, &key.channel); err != nil {
+			rows.Close()
+			return fmt.Errorf("postgres: load event reminders scan: %w", err)
+		}
+		existing[key] = reminderID
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("postgres: load event reminders rows: %w", err)
+	}
+	rows.Close()
+
+	removedReminderIDs, addedReminders := diffReminderDefinitions(existing, reminders)
+	if len(removedReminderIDs) > 0 {
+		if _, err := r.db.Exec(ctx, `
+			DELETE FROM event_reminders
+			WHERE event_id = $1
+			  AND id = ANY($2)`, eventID, removedReminderIDs); err != nil {
+			return fmt.Errorf("postgres: replace event reminders delete removed: %w", err)
+		}
+	}
+
+	for _, reminder := range addedReminders {
 		if reminder.UserID == uuid.Nil {
 			continue
 		}
@@ -797,6 +828,48 @@ func (r *CalendarRepo) replaceReminders(ctx context.Context, eventID uuid.UUID, 
 		}
 	}
 	return nil
+}
+
+type reminderDefinitionKey struct {
+	userID        uuid.UUID
+	offsetMinutes int
+	channel       entity.ReminderChannel
+}
+
+func diffReminderDefinitions(existing map[reminderDefinitionKey]uuid.UUID, reminders []entity.EventReminder) ([]uuid.UUID, []entity.EventReminder) {
+	desired := make(map[reminderDefinitionKey]entity.EventReminder, len(reminders))
+	orderedDesiredKeys := make([]reminderDefinitionKey, 0, len(reminders))
+	for _, reminder := range reminders {
+		if reminder.UserID == uuid.Nil {
+			continue
+		}
+		key := reminderDefinitionKey{
+			userID:        reminder.UserID,
+			offsetMinutes: reminder.OffsetMinutes,
+			channel:       reminder.Channel,
+		}
+		if _, ok := desired[key]; ok {
+			continue
+		}
+		desired[key] = reminder
+		orderedDesiredKeys = append(orderedDesiredKeys, key)
+	}
+
+	removedReminderIDs := make([]uuid.UUID, 0)
+	for key, reminderID := range existing {
+		if _, ok := desired[key]; !ok {
+			removedReminderIDs = append(removedReminderIDs, reminderID)
+		}
+	}
+
+	addedReminders := make([]entity.EventReminder, 0)
+	for _, key := range orderedDesiredKeys {
+		if _, ok := existing[key]; ok {
+			continue
+		}
+		addedReminders = append(addedReminders, desired[key])
+	}
+	return removedReminderIDs, addedReminders
 }
 
 func (r *CalendarRepo) hydrateEvents(ctx context.Context, events []*entity.CalendarEvent) error {

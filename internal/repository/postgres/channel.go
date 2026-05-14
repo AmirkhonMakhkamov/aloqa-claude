@@ -149,11 +149,28 @@ func (r *ChannelRepo) ListByWorkspace(ctx context.Context, workspaceID uuid.UUID
 }
 
 func (r *ChannelRepo) ListByUser(ctx context.Context, workspaceID, userID uuid.UUID) ([]entity.Channel, error) {
+	// Lazy DM visibility: hide DMs from a member if they did not initiate the
+	// conversation AND no non-deleted message has been posted yet. The creator
+	// always sees the channel (so they can come back to it from their own
+	// sidebar after abandoning); the recipient only sees it once a real
+	// message lands. Non-DM channels are unaffected.
 	query := `
 		SELECT c.id, c.workspace_id, c.name, c.topic, c.type, c.created_by, c.archived, c.created_at, c.updated_at
 		FROM channels c
 		INNER JOIN channel_members cm ON cm.channel_id = c.id
-		WHERE c.workspace_id = $1 AND cm.user_id = $2
+		WHERE c.workspace_id = $1
+		  AND cm.user_id = $2
+		  AND (
+		    c.type <> 'dm'
+		    OR c.created_by = $2
+		    OR EXISTS (
+		      SELECT 1
+		      FROM messages m
+		      WHERE m.channel_id = c.id
+		        AND m.deleted_at IS NULL
+		      LIMIT 1
+		    )
+		  )
 		ORDER BY c.name`
 
 	rows, err := r.db.Query(ctx, query, workspaceID, userID)

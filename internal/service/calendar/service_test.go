@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -170,6 +171,117 @@ func TestUpsertRsvpPublishesRsvpEvent(t *testing.T) {
 	}
 }
 
+func TestUpdateEventPreservesDispatchedReminderState(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	organizerID := uuid.New()
+	calendarID := uuid.New()
+	occurrenceAt := time.Date(2026, 5, 14, 15, 0, 0, 0, time.UTC)
+	dispatchedAt := time.Date(2026, 5, 14, 14, 50, 30, 0, time.UTC)
+	repo := &fakeCalendarRepo{}
+	svc := NewService(repo, fakeMembers{}, nil, noopPublisher{})
+
+	eventEntity, err := svc.CreateEvent(ctx, workspaceID, organizerID, CreateEventInput{
+		CalendarID:      calendarID,
+		Title:           "Planning",
+		Location:        entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+		ScheduledAt:     occurrenceAt,
+		DurationMinutes: 30,
+		Reminders: []entity.EventReminder{{
+			OffsetMinutes: 10,
+			Channel:       entity.ReminderChannelInApp,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreateEvent error = %v", err)
+	}
+	reminder := mustFindEventReminder(t, repo, eventEntity.ID, organizerID, 10, entity.ReminderChannelInApp)
+	dispatchKey := reminderDispatchMapKey(reminder.ID, occurrenceAt)
+	repo.dispatches = map[string]time.Time{dispatchKey: dispatchedAt}
+
+	title := "Planning v2"
+	if _, err := svc.UpdateEvent(ctx, workspaceID, eventEntity.ID, organizerID, UpdateEventInput{
+		Title:        &title,
+		RemindersSet: true,
+		Reminders: []entity.EventReminder{{
+			OffsetMinutes: 10,
+			Channel:       entity.ReminderChannelInApp,
+		}},
+	}); err != nil {
+		t.Fatalf("UpdateEvent error = %v", err)
+	}
+
+	if _, ok := repo.reminders[reminder.ID]; !ok {
+		t.Fatalf("stable reminder row %s was removed", reminder.ID)
+	}
+	gotDispatchedAt, ok := repo.dispatches[dispatchKey]
+	if !ok {
+		t.Fatalf("dispatch row for stable reminder %s was removed", reminder.ID)
+	}
+	if !gotDispatchedAt.Equal(dispatchedAt) {
+		t.Fatalf("dispatched_at = %s, want %s", gotDispatchedAt, dispatchedAt)
+	}
+}
+
+func TestUpdateEventCascadesDispatchOnReminderRemoval(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	organizerID := uuid.New()
+	calendarID := uuid.New()
+	occurrenceAt := time.Date(2026, 5, 14, 16, 0, 0, 0, time.UTC)
+	dispatchedAt := time.Date(2026, 5, 14, 15, 30, 0, 0, time.UTC)
+	repo := &fakeCalendarRepo{}
+	svc := NewService(repo, fakeMembers{}, nil, noopPublisher{})
+
+	eventEntity, err := svc.CreateEvent(ctx, workspaceID, organizerID, CreateEventInput{
+		CalendarID:      calendarID,
+		Title:           "Planning",
+		Location:        entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+		ScheduledAt:     occurrenceAt,
+		DurationMinutes: 30,
+		Reminders: []entity.EventReminder{
+			{OffsetMinutes: 10, Channel: entity.ReminderChannelInApp},
+			{OffsetMinutes: 30, Channel: entity.ReminderChannelInApp},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateEvent error = %v", err)
+	}
+	keptReminder := mustFindEventReminder(t, repo, eventEntity.ID, organizerID, 10, entity.ReminderChannelInApp)
+	removedReminder := mustFindEventReminder(t, repo, eventEntity.ID, organizerID, 30, entity.ReminderChannelInApp)
+	keptDispatchKey := reminderDispatchMapKey(keptReminder.ID, occurrenceAt)
+	removedDispatchKey := reminderDispatchMapKey(removedReminder.ID, occurrenceAt)
+	repo.dispatches = map[string]time.Time{
+		keptDispatchKey:    dispatchedAt,
+		removedDispatchKey: dispatchedAt.Add(-20 * time.Minute),
+	}
+
+	title := "Planning v2"
+	if _, err := svc.UpdateEvent(ctx, workspaceID, eventEntity.ID, organizerID, UpdateEventInput{
+		Title:        &title,
+		RemindersSet: true,
+		Reminders: []entity.EventReminder{{
+			OffsetMinutes: 10,
+			Channel:       entity.ReminderChannelInApp,
+		}},
+	}); err != nil {
+		t.Fatalf("UpdateEvent error = %v", err)
+	}
+
+	if _, ok := repo.reminders[keptReminder.ID]; !ok {
+		t.Fatalf("kept reminder row %s was removed", keptReminder.ID)
+	}
+	if gotDispatchedAt, ok := repo.dispatches[keptDispatchKey]; !ok || !gotDispatchedAt.Equal(dispatchedAt) {
+		t.Fatalf("kept dispatch row = %s, present %v; want %s", gotDispatchedAt, ok, dispatchedAt)
+	}
+	if _, ok := repo.reminders[removedReminder.ID]; ok {
+		t.Fatalf("removed reminder row %s is still present", removedReminder.ID)
+	}
+	if _, ok := repo.dispatches[removedDispatchKey]; ok {
+		t.Fatalf("dispatch row for removed reminder %s is still present", removedReminder.ID)
+	}
+}
+
 func TestListAndDispatchRemindersEnqueuesOutboxAndMarksDispatchedAtomically(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -178,7 +290,7 @@ func TestListAndDispatchRemindersEnqueuesOutboxAndMarksDispatchedAtomically(t *t
 	reminderID := uuid.New()
 	now := time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC)
 	target := reminderTarget(workspaceID, userID, eventID, reminderID, now, now.Add(10*time.Minute))
-	txManager := newCalendarReminderTxManager(&fakeCalendarRepo{reminders: []entity.ReminderTarget{target}})
+	txManager := newCalendarReminderTxManager(&fakeCalendarRepo{reminderTargets: []entity.ReminderTarget{target}})
 	pub := &capturingPublisher{}
 	svc := NewService(txManager.calendars.fakeCalendarRepo, fakeMembers{}, nil, pub)
 	svc.SetTransactionManager(txManager)
@@ -192,8 +304,8 @@ func TestListAndDispatchRemindersEnqueuesOutboxAndMarksDispatchedAtomically(t *t
 	if len(txManager.calendars.outbox) != 1 {
 		t.Fatalf("outbox rows = %d, want 1", len(txManager.calendars.outbox))
 	}
-	key := reminderDispatchKey{reminderID: reminderID, occurrenceAt: target.Occurrence.InstanceAt.UTC()}
-	if _, ok := txManager.calendars.dispatched[key]; !ok {
+	key := reminderDispatchMapKey(reminderID, target.Occurrence.InstanceAt)
+	if _, ok := txManager.calendars.dispatches[key]; !ok {
 		t.Fatalf("reminder occurrence was not marked dispatched")
 	}
 
@@ -233,8 +345,8 @@ func TestListAndDispatchRemindersRollsBackWhenOutboxInsertFails(t *testing.T) {
 	reminderID := uuid.New()
 	now := time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC)
 	repo := &fakeCalendarRepo{
-		reminders:  []entity.ReminderTarget{reminderTarget(workspaceID, userID, eventID, reminderID, now, now.Add(10*time.Minute))},
-		enqueueErr: errors.New("outbox insert failed"),
+		reminderTargets: []entity.ReminderTarget{reminderTarget(workspaceID, userID, eventID, reminderID, now, now.Add(10*time.Minute))},
+		enqueueErr:      errors.New("outbox insert failed"),
 	}
 	txManager := newCalendarReminderTxManager(repo)
 	pub := &capturingPublisher{}
@@ -250,8 +362,8 @@ func TestListAndDispatchRemindersRollsBackWhenOutboxInsertFails(t *testing.T) {
 	if len(txManager.calendars.outbox) != 0 {
 		t.Fatalf("outbox rows after rollback = %d, want 0", len(txManager.calendars.outbox))
 	}
-	if len(txManager.calendars.dispatched) != 0 {
-		t.Fatalf("dispatched rows after rollback = %d, want 0", len(txManager.calendars.dispatched))
+	if len(txManager.calendars.dispatches) != 0 {
+		t.Fatalf("dispatched rows after rollback = %d, want 0", len(txManager.calendars.dispatches))
 	}
 }
 
@@ -287,7 +399,7 @@ func TestListAndDispatchRemindersRecurringEventFiresEachOccurrence(t *testing.T)
 			},
 		})
 	}
-	txManager := newCalendarReminderTxManager(&fakeCalendarRepo{reminders: targets})
+	txManager := newCalendarReminderTxManager(&fakeCalendarRepo{reminderTargets: targets})
 	svc := NewService(txManager.calendars.fakeCalendarRepo, fakeMembers{}, nil, noopPublisher{})
 	svc.SetTransactionManager(txManager)
 
@@ -299,8 +411,8 @@ func TestListAndDispatchRemindersRecurringEventFiresEachOccurrence(t *testing.T)
 			t.Fatalf("outbox rows after day %d = %d, want %d", i+1, got, i+1)
 		}
 	}
-	if len(txManager.calendars.dispatched) != 3 {
-		t.Fatalf("dispatched occurrences = %d, want 3", len(txManager.calendars.dispatched))
+	if len(txManager.calendars.dispatches) != 3 {
+		t.Fatalf("dispatched occurrences = %d, want 3", len(txManager.calendars.dispatches))
 	}
 }
 
@@ -312,7 +424,7 @@ func TestListAndDispatchRemindersSkipsPastOccurrencesOutsideHorizon(t *testing.T
 	reminderID := uuid.New()
 	now := time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC)
 	target := reminderTarget(workspaceID, userID, eventID, reminderID, now.Add(-48*time.Hour), now.Add(-48*time.Hour))
-	txManager := newCalendarReminderTxManager(&fakeCalendarRepo{reminders: []entity.ReminderTarget{target}})
+	txManager := newCalendarReminderTxManager(&fakeCalendarRepo{reminderTargets: []entity.ReminderTarget{target}})
 	svc := NewService(txManager.calendars.fakeCalendarRepo, fakeMembers{}, nil, noopPublisher{})
 	svc.SetTransactionManager(txManager)
 
@@ -322,8 +434,8 @@ func TestListAndDispatchRemindersSkipsPastOccurrencesOutsideHorizon(t *testing.T
 	if len(txManager.calendars.outbox) != 0 {
 		t.Fatalf("outbox rows = %d, want 0", len(txManager.calendars.outbox))
 	}
-	if len(txManager.calendars.dispatched) != 0 {
-		t.Fatalf("dispatched rows = %d, want 0", len(txManager.calendars.dispatched))
+	if len(txManager.calendars.dispatches) != 0 {
+		t.Fatalf("dispatched rows = %d, want 0", len(txManager.calendars.dispatches))
 	}
 }
 
@@ -335,7 +447,7 @@ func TestListAndDispatchRemindersConcurrentWorkersDoNotDoubleDiscover(t *testing
 	reminderID := uuid.New()
 	now := time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC)
 	txManager := newCalendarReminderTxManager(&fakeCalendarRepo{
-		reminders: []entity.ReminderTarget{reminderTarget(workspaceID, userID, eventID, reminderID, now, now.Add(10*time.Minute))},
+		reminderTargets: []entity.ReminderTarget{reminderTarget(workspaceID, userID, eventID, reminderID, now, now.Add(10*time.Minute))},
 	})
 	svcA := NewService(txManager.calendars.fakeCalendarRepo, fakeMembers{}, nil, noopPublisher{})
 	svcA.SetTransactionManager(txManager)
@@ -360,8 +472,8 @@ func TestListAndDispatchRemindersConcurrentWorkersDoNotDoubleDiscover(t *testing
 	if len(txManager.calendars.outbox) != 1 {
 		t.Fatalf("outbox rows = %d, want 1", len(txManager.calendars.outbox))
 	}
-	if len(txManager.calendars.dispatched) != 1 {
-		t.Fatalf("dispatched rows = %d, want 1", len(txManager.calendars.dispatched))
+	if len(txManager.calendars.dispatches) != 1 {
+		t.Fatalf("dispatched rows = %d, want 1", len(txManager.calendars.dispatches))
 	}
 }
 
@@ -373,7 +485,7 @@ func TestListAndDispatchRemindersDiscoversLongOffsetEventWithinLookahead(t *test
 	reminderID := uuid.New()
 	now := time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC)
 	target := reminderTarget(workspaceID, userID, eventID, reminderID, now.Add(-48*time.Hour), now.Add(5*24*time.Hour))
-	txManager := newCalendarReminderTxManager(&fakeCalendarRepo{reminders: []entity.ReminderTarget{target}})
+	txManager := newCalendarReminderTxManager(&fakeCalendarRepo{reminderTargets: []entity.ReminderTarget{target}})
 	svc := NewService(txManager.calendars.fakeCalendarRepo, fakeMembers{}, nil, noopPublisher{})
 	svc.SetTransactionManager(txManager)
 
@@ -404,7 +516,7 @@ func TestListAndDispatchRemindersWaitsForLongOffsetFireTime(t *testing.T) {
 	occurrenceAt := start.Add(14 * 24 * time.Hour)
 	fireAt := occurrenceAt.Add(-time.Duration(maxReminderOffsetMinutes) * time.Minute)
 	target := reminderTarget(workspaceID, userID, eventID, reminderID, fireAt, occurrenceAt)
-	txManager := newCalendarReminderTxManager(&fakeCalendarRepo{reminders: []entity.ReminderTarget{target}})
+	txManager := newCalendarReminderTxManager(&fakeCalendarRepo{reminderTargets: []entity.ReminderTarget{target}})
 	svc := NewService(txManager.calendars.fakeCalendarRepo, fakeMembers{}, nil, noopPublisher{})
 	svc.SetTransactionManager(txManager)
 
@@ -524,18 +636,14 @@ type fakeCalendarRepo struct {
 	mu                  sync.Mutex
 	calendars           []entity.UserCalendar
 	events              map[uuid.UUID]*entity.CalendarEvent
-	reminders           []entity.ReminderTarget
-	dispatched          map[reminderDispatchKey]time.Time
+	reminders           map[uuid.UUID]entity.EventReminder
+	reminderTargets     []entity.ReminderTarget
+	dispatches          map[string]time.Time
 	outbox              []entity.ReminderOutboxMessage
 	publishedOutbox     map[uuid.UUID]time.Time
 	enqueueErr          error
 	lastReminderHorizon time.Duration
 	lastReminderLimit   int
-}
-
-type reminderDispatchKey struct {
-	reminderID   uuid.UUID
-	occurrenceAt time.Time
 }
 
 func reminderTarget(workspaceID, userID, eventID, reminderID uuid.UUID, fireAt, occurrenceAt time.Time) entity.ReminderTarget {
@@ -556,6 +664,21 @@ func reminderTarget(workspaceID, userID, eventID, reminderID uuid.UUID, fireAt, 
 			InstanceAt: occurrenceAt.UTC(),
 		},
 	}
+}
+
+func reminderDispatchMapKey(reminderID uuid.UUID, occurrenceAt time.Time) string {
+	return reminderID.String() + "|" + occurrenceAt.UTC().Format(time.RFC3339Nano)
+}
+
+func mustFindEventReminder(t *testing.T, repo *fakeCalendarRepo, eventID, userID uuid.UUID, offsetMinutes int, channel entity.ReminderChannel) entity.EventReminder {
+	t.Helper()
+	for _, reminder := range repo.reminders {
+		if reminder.EventID == eventID && reminder.UserID == userID && reminder.OffsetMinutes == offsetMinutes && reminder.Channel == channel {
+			return reminder
+		}
+	}
+	t.Fatalf("reminder not found for event=%s user=%s offset=%d channel=%s", eventID, userID, offsetMinutes, channel)
+	return entity.EventReminder{}
 }
 
 func (r *fakeCalendarRepo) ListUserCalendars(context.Context, uuid.UUID, uuid.UUID) ([]entity.UserCalendar, error) {
@@ -602,12 +725,12 @@ func (r *fakeCalendarRepo) ListDueReminderTargets(_ context.Context, now time.Ti
 	r.lastReminderHorizon = horizon
 	r.lastReminderLimit = limit
 	if limit <= 0 {
-		limit = len(r.reminders)
+		limit = len(r.reminderTargets)
 	}
 	windowStart := now.UTC().Add(-30 * time.Second)
 	windowEnd := now.UTC().Add(horizon)
 	var targets []entity.ReminderTarget
-	for _, reminder := range r.reminders {
+	for _, reminder := range r.reminderTargets {
 		if len(targets) >= limit {
 			break
 		}
@@ -617,9 +740,9 @@ func (r *fakeCalendarRepo) ListDueReminderTargets(_ context.Context, now time.Ti
 		if reminder.Occurrence.InstanceAt.Before(windowStart) || reminder.Occurrence.InstanceAt.After(windowEnd) {
 			continue
 		}
-		if r.dispatched != nil {
-			key := reminderDispatchKey{reminderID: reminder.ReminderID, occurrenceAt: reminder.Occurrence.InstanceAt.UTC()}
-			if _, ok := r.dispatched[key]; ok {
+		if r.dispatches != nil {
+			key := reminderDispatchMapKey(reminder.ReminderID, reminder.Occurrence.InstanceAt)
+			if _, ok := r.dispatches[key]; ok {
 				continue
 			}
 		}
@@ -647,10 +770,10 @@ func (r *fakeCalendarRepo) EnqueueReminderOutbox(_ context.Context, target entit
 func (r *fakeCalendarRepo) MarkReminderDispatched(_ context.Context, reminderID uuid.UUID, occurrenceAt, dispatchedAt time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.dispatched == nil {
-		r.dispatched = map[reminderDispatchKey]time.Time{}
+	if r.dispatches == nil {
+		r.dispatches = map[string]time.Time{}
 	}
-	r.dispatched[reminderDispatchKey{reminderID: reminderID, occurrenceAt: occurrenceAt.UTC()}] = dispatchedAt
+	r.dispatches[reminderDispatchMapKey(reminderID, occurrenceAt)] = dispatchedAt
 	return nil
 }
 
@@ -733,25 +856,118 @@ func (r *fakeCalendarRepo) GetEvent(_ context.Context, eventID uuid.UUID) (*enti
 	if eventEntity == nil {
 		return nil, cerrors.NotFound("event not found")
 	}
-	copy := *eventEntity
-	copy.Attendees = append([]entity.EventAttendee(nil), eventEntity.Attendees...)
-	copy.Reminders = append([]entity.EventReminder(nil), eventEntity.Reminders...)
-	return &copy, nil
+	copy := cloneCalendarEvent(eventEntity)
+	if r.reminders != nil {
+		copy.Reminders = r.eventReminders(eventID)
+	}
+	return copy, nil
 }
 func (r *fakeCalendarRepo) LockEventForStartCall(ctx context.Context, eventID uuid.UUID) (*entity.CalendarEvent, error) {
 	return r.GetEvent(ctx, eventID)
 }
-func (r *fakeCalendarRepo) CreateEvent(_ context.Context, eventEntity *entity.CalendarEvent) (*entity.CalendarEvent, error) {
+func (r *fakeCalendarRepo) CreateEvent(ctx context.Context, eventEntity *entity.CalendarEvent) (*entity.CalendarEvent, error) {
 	if r.events == nil {
 		r.events = map[uuid.UUID]*entity.CalendarEvent{}
 	}
-	r.events[eventEntity.ID] = eventEntity
-	return eventEntity, nil
+	stored := cloneCalendarEvent(eventEntity)
+	stored.Reminders = nil
+	r.events[eventEntity.ID] = stored
+	r.replaceEventReminders(eventEntity.ID, eventEntity.Reminders)
+	return r.GetEvent(ctx, eventEntity.ID)
 }
-func (r *fakeCalendarRepo) UpdateEvent(_ context.Context, eventEntity *entity.CalendarEvent) (*entity.CalendarEvent, error) {
-	r.events[eventEntity.ID] = eventEntity
-	return eventEntity, nil
+func (r *fakeCalendarRepo) UpdateEvent(ctx context.Context, eventEntity *entity.CalendarEvent) (*entity.CalendarEvent, error) {
+	if r.events == nil {
+		r.events = map[uuid.UUID]*entity.CalendarEvent{}
+	}
+	stored := cloneCalendarEvent(eventEntity)
+	stored.Reminders = nil
+	r.events[eventEntity.ID] = stored
+	r.replaceEventReminders(eventEntity.ID, eventEntity.Reminders)
+	return r.GetEvent(ctx, eventEntity.ID)
 }
+
+type fakeReminderDefinitionKey struct {
+	userID        uuid.UUID
+	offsetMinutes int
+	channel       entity.ReminderChannel
+}
+
+func (r *fakeCalendarRepo) replaceEventReminders(eventID uuid.UUID, reminders []entity.EventReminder) {
+	if r.reminders == nil {
+		r.reminders = map[uuid.UUID]entity.EventReminder{}
+	}
+	existing := map[fakeReminderDefinitionKey]uuid.UUID{}
+	for reminderID, reminder := range r.reminders {
+		if reminder.EventID != eventID || reminder.UserID == uuid.Nil {
+			continue
+		}
+		key := fakeReminderDefinitionKey{
+			userID:        reminder.UserID,
+			offsetMinutes: reminder.OffsetMinutes,
+			channel:       reminder.Channel,
+		}
+		if _, ok := existing[key]; !ok {
+			existing[key] = reminderID
+		}
+	}
+
+	desired := make(map[fakeReminderDefinitionKey]entity.EventReminder, len(reminders))
+	orderedDesiredKeys := make([]fakeReminderDefinitionKey, 0, len(reminders))
+	for _, reminder := range reminders {
+		if reminder.UserID == uuid.Nil {
+			continue
+		}
+		key := fakeReminderDefinitionKey{
+			userID:        reminder.UserID,
+			offsetMinutes: reminder.OffsetMinutes,
+			channel:       reminder.Channel,
+		}
+		if _, ok := desired[key]; ok {
+			continue
+		}
+		desired[key] = reminder
+		orderedDesiredKeys = append(orderedDesiredKeys, key)
+	}
+
+	for key, reminderID := range existing {
+		if _, ok := desired[key]; ok {
+			continue
+		}
+		delete(r.reminders, reminderID)
+		r.deleteReminderDispatches(reminderID)
+	}
+	for _, key := range orderedDesiredKeys {
+		if _, ok := existing[key]; ok {
+			continue
+		}
+		reminder := desired[key]
+		if reminder.ID == uuid.Nil {
+			reminder.ID = id.New()
+		}
+		reminder.EventID = eventID
+		r.reminders[reminder.ID] = reminder
+	}
+}
+
+func (r *fakeCalendarRepo) deleteReminderDispatches(reminderID uuid.UUID) {
+	prefix := reminderID.String() + "|"
+	for key := range r.dispatches {
+		if strings.HasPrefix(key, prefix) {
+			delete(r.dispatches, key)
+		}
+	}
+}
+
+func (r *fakeCalendarRepo) eventReminders(eventID uuid.UUID) []entity.EventReminder {
+	var reminders []entity.EventReminder
+	for _, reminder := range r.reminders {
+		if reminder.EventID == eventID {
+			reminders = append(reminders, reminder)
+		}
+	}
+	return reminders
+}
+
 func (r *fakeCalendarRepo) DeleteEvent(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 func (r *fakeCalendarRepo) SetEventCallIDIfUnset(_ context.Context, eventID, callID uuid.UUID) (*entity.CalendarEvent, error) {
 	eventEntity := r.events[eventID]
@@ -896,16 +1112,14 @@ type txCalendarRepo struct {
 func (r *txCalendarRepo) clone() *txCalendarRepo {
 	events := map[uuid.UUID]*entity.CalendarEvent{}
 	for eventID, eventEntity := range r.events {
-		copy := *eventEntity
-		copy.Attendees = append([]entity.EventAttendee(nil), eventEntity.Attendees...)
-		copy.Reminders = append([]entity.EventReminder(nil), eventEntity.Reminders...)
-		events[eventID] = &copy
+		events[eventID] = cloneCalendarEvent(eventEntity)
 	}
 	return &txCalendarRepo{fakeCalendarRepo: &fakeCalendarRepo{
 		calendars:           append([]entity.UserCalendar(nil), r.calendars...),
 		events:              events,
-		reminders:           append([]entity.ReminderTarget(nil), r.reminders...),
-		dispatched:          cloneReminderDispatchMap(r.dispatched),
+		reminders:           cloneEventReminderMap(r.reminders),
+		reminderTargets:     append([]entity.ReminderTarget(nil), r.reminderTargets...),
+		dispatches:          cloneReminderDispatchMap(r.dispatches),
 		outbox:              cloneReminderOutbox(r.outbox),
 		publishedOutbox:     cloneUUIDTimeMap(r.publishedOutbox),
 		enqueueErr:          r.enqueueErr,
@@ -1051,11 +1265,32 @@ func (s *fakeCalendarTxScope) EnqueueRealtime(_ context.Context, evt event.Event
 	return nil
 }
 
-func cloneReminderDispatchMap(in map[reminderDispatchKey]time.Time) map[reminderDispatchKey]time.Time {
+func cloneCalendarEvent(eventEntity *entity.CalendarEvent) *entity.CalendarEvent {
+	if eventEntity == nil {
+		return nil
+	}
+	copy := *eventEntity
+	copy.Attendees = append([]entity.EventAttendee(nil), eventEntity.Attendees...)
+	copy.Reminders = append([]entity.EventReminder(nil), eventEntity.Reminders...)
+	return &copy
+}
+
+func cloneEventReminderMap(in map[uuid.UUID]entity.EventReminder) map[uuid.UUID]entity.EventReminder {
 	if in == nil {
 		return nil
 	}
-	out := map[reminderDispatchKey]time.Time{}
+	out := map[uuid.UUID]entity.EventReminder{}
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneReminderDispatchMap(in map[string]time.Time) map[string]time.Time {
+	if in == nil {
+		return nil
+	}
+	out := map[string]time.Time{}
 	for key, value := range in {
 		out[key] = value
 	}

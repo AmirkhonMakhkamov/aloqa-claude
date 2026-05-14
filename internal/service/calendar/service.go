@@ -789,17 +789,6 @@ func (s *Service) publishRsvp(ctx context.Context, eventEntity *entity.CalendarE
 	}
 }
 
-func (s *Service) publishReminder(ctx context.Context, target entity.ReminderTarget) error {
-	payload, err := prepareReminderPayload(target, time.Now().UTC())
-	if err != nil {
-		return err
-	}
-	if s.pubsub == nil {
-		return nil
-	}
-	return s.pubsub.Publish(ctx, userEventsSubject(target.UserID), payload)
-}
-
 func prepareReminderPayload(target entity.ReminderTarget, timestamp time.Time) ([]byte, error) {
 	_, body, _, err := event.Prepare(userEventsSubject(target.UserID), event.Event{
 		Type:        event.TypeCalendarEventReminderFired,

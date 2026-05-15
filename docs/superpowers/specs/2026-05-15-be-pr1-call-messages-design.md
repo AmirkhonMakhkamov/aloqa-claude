@@ -47,7 +47,7 @@ CREATE TABLE call_messages (
 );
 
 CREATE INDEX idx_call_messages_call_id_id ON call_messages (call_id, id DESC);
-CREATE INDEX idx_call_messages_sender ON call_messages (sender_id);
+CREATE INDEX idx_call_messages_sender_id ON call_messages (sender_id);
 ```
 
 The composite `(call_id, id DESC)` index covers the dominant query (`WHERE call_id = $1 AND id < $cursor ORDER BY id DESC LIMIT $n`) and avoids same-timestamp tie-breaking issues because IDs are UUIDv7 and naturally time-ordered (`internal/pkg/id/id.go:5-10`).
@@ -97,7 +97,7 @@ func (s *Service) SetCallMessageRepo(repo CallMessageRepository) {
 }
 ```
 
-The `CallMessageRepository` interface lives in the call service package and declares the four repo methods above plus a `WithTx(pgx.Tx) CallMessageRepository` accessor so the service can run create/delete inside a tx for outbox atomicity.
+The `CallMessageRepository` interface lives in `internal/domain/repository/interfaces.go` (see the Repository section above) and has **no** `WithTx` method — tx binding is handled internally by the postgres `txScope` exactly like `CallRepo` (`internal/repository/postgres/tx.go:139`).
 
 `cmd/server/main.go` adds one line after `NewCallMessageRepo(pool)`:
 
@@ -105,7 +105,7 @@ The `CallMessageRepository` interface lives in the call service package and decl
 callSvc.SetCallMessageRepo(callMessageRepo)
 ```
 
-If `s.callMessages == nil` at request time, the handler returns `cerrors.Unavailable("call messaging not configured")` — same pattern as media plane absence.
+The `s.callMessages == nil` guard lives in the **service methods** (see access-control section below at `SendCallMessage` step 5 and `ListCallMessages`) — not in the handler. Same pattern as the media-plane absence check elsewhere in the call service.
 
 ### Transaction outbox plumbing
 
@@ -124,13 +124,28 @@ CallMessages() repository.CallMessageRepository
 
 (Slot in alphabetical order alongside `Calls()`, `Channels()`, `Messages()`.)
 
-**`internal/repository/postgres/tx.go`** — extend `txScope` to hold a `callMessages *CallMessageRepo` and bind it in `WithinTx` exactly like `scope.calls = m.calls.withTx(tx)` at line 139. Add the `CallMessages()` accessor on `txScope` returning `ts.callMessages`.
+**`internal/repository/postgres/tx.go`** — extend `txScope` struct (lines 60-75) with a `callMessages *CallMessageRepo` field, bind it in `WithinTx` exactly like `scope.calls = m.calls.withTx(tx)` at line 139, and add the `CallMessages()` accessor on `txScope` returning `ts.callMessages`.
+
+**`internal/platform/txscope/config.go`** — extend `TxManagerConfig` and `TxManager` to carry a `CallMessages repository.CallMessageRepository` field, mirroring the existing `Messages` / `Calls` slots. Without this, `m.callMessages.withTx(tx)` inside `WithinTx` would dereference nil.
+
+**`cmd/server/main.go`** — add three wiring lines:
+
+```go
+callMessageRepo := postgres.NewCallMessageRepo(pool)            // construct
+callSvc.SetCallMessageRepo(callMessageRepo)                     // attach to service
+txConfig.CallMessages = callMessageRepo                          // attach to tx manager
+```
+
+(The exact field name and order match the existing `MessageRepo` / `CallRepo` wiring in `main.go` — verify the existing pattern when implementing.)
 
 **Service `SendCallMessage` flow** mirrors `chat.Service.SendMessage` lines 674-707 verbatim — tx path when `s.tx != nil`, non-tx fallback otherwise:
 
 ```go
 if s.tx != nil {
     if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
+        if scope.CallMessages() == nil {
+            return cerrors.Unavailable("call message transaction scope is not configured")
+        }
         if err := scope.CallMessages().Create(ctx, msg); err != nil {
             return err
         }
@@ -165,12 +180,13 @@ Add payload types:
 
 ```go
 type CallMessagePayload struct {
+    CallID  uuid.UUID          `json:"call_id"`
     Message entity.CallMessage `json:"message"`
 }
 
 type CallMessageDeletedPayload struct {
-    MessageID uuid.UUID `json:"message_id"`
     CallID    uuid.UUID `json:"call_id"`
+    MessageID uuid.UUID `json:"message_id"`
 }
 ```
 

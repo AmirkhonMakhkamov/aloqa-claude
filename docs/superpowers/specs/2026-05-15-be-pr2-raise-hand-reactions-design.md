@@ -101,35 +101,61 @@ Without this case, the default fallthrough returns `DeliveryAtLeastOnce` + `Repl
 
 The service publishes directly via the existing call signaling pattern from `internal/service/call/service.go:1180-1199` (signaling events for `signal.offer` / `signal.answer` / `signal.candidate` are ephemeral and direct-published). This is the closer precedent than `typing.started` (which uses `hub.BroadcastToRoom` in the WS handler).
 
+**Real signatures, not invented** (verified against the repo):
+
+- `event.Prepare(subject string, evt event.Event) (event.Event, []byte, bool, error)` (`events.go:132`)
+- `event.Event.UserID` is `uuid.UUID`, not a pointer (`events.go:87`)
+- The existing `doPublish` (`service.go:1267-1287`) **does not call `event.Prepare`** — it marshals a raw `event.Event` straight to NATS, dropping `Version`/`DeliverySemantic`/`Replayable`/`Subject` from the wire. Using `doPublish` for these ephemeral events would therefore not deliver the spec's promised envelope metadata.
+
+To both keep the ephemeral semantics on the wire AND avoid touching `doPublish` (out of scope for this PR), this PR adds a small helper that mirrors `enqueueRealtimeTx` minus the outbox step:
+
 ```go
+// publishCallInteraction iterates current connected participants and
+// publishes the event to each user's signaling subject. event.Prepare
+// is called per recipient so the wire envelope carries the ephemeral
+// DeliverySemantic + Replayable=false declared in DefinitionForType.
 func (s *Service) publishCallInteraction(
     ctx context.Context,
     call *entity.Call,
-    eventType event.Type,
+    evtType event.Type,
     payload any,
 ) error {
-    // Resolve audience: current call participants.
     participants, err := s.calls.ListParticipants(ctx, call.ID)
-    if err != nil { return err }
-
+    if err != nil {
+        return err
+    }
     for _, p := range participants {
-        if p.Status != entity.ParticipantStatusConnected { continue }
-        evt := event.Prepare(event.Event{
-            Type:        eventType,
-            Subject:     fmt.Sprintf("aloqa.signal.%s", p.UserID),
+        if p.Status != entity.ParticipantStatusConnected {
+            continue
+        }
+        subject := fmt.Sprintf("aloqa.signal.%s", p.UserID)
+        _, body, _, err := event.Prepare(subject, event.Event{
+            Type:        evtType,
             WorkspaceID: call.WorkspaceID,
-            UserID:      &p.UserID,
+            UserID:      p.UserID, // value, not pointer
+            Timestamp:   time.Now(),
             Payload:     payload,
         })
-        if err := s.doPublish(ctx, evt); err != nil { return err }
+        if err != nil {
+            return err
+        }
+        if err := s.pubsub.Publish(ctx, subject, body); err != nil {
+            slog.ErrorContext(ctx, "failed to publish call interaction",
+                "type", evtType, "subject", subject, "error", err)
+        }
     }
     return nil
 }
 ```
 
-**`event.Prepare` is called explicitly** so the wire envelope carries `Version`, `Subject`, `DeliverySemantic`, and `Replayable`. The existing `doPublish` at `internal/service/call/service.go:1267-1287` marshals whatever is on `event.Event` — calling `Prepare` first fills the fields the spec relies on.
+Notes:
 
-Per-user subject (`aloqa.signal.<userID>`) is the existing pattern used for signaling and quality-adapted events; it is already in the WS subscription allow-list (`internal/handler/ws/handler.go:403-414`) and is self-only — no audience leak risk. Late joiners do **not** receive a snapshot of raised hands; they hear via voice or chat. This is acceptable for ephemeral state.
+- `event.Event.UserID` set to the **recipient's** user id is consistent with how signaling-target events fill the field at `service.go:1199` (`fromUser` becomes the event `UserID`). For hand/reaction events we want the recipient because the event is per-recipient; FE consumers read `payload.user_id` for the actor.
+- Subscriber WS hub auto-subscribes every connected client to `aloqa.signal.<userID>` at `internal/platform/ws/hub.go:138`, so the per-user fan-out reaches the right WS connection without any new subscribe flow.
+- The WS authorization allow-list at `internal/handler/ws/handler.go:433-438` enforces self-only subscription to `aloqa.signal.*` — no audience leak.
+- `realtime` outbox already excludes `aloqa.signal.*` from replay storage (`internal/repository/postgres/realtime.go:235`), so these ephemeral events do not accidentally enter the outbox path.
+
+The same helper handles all three events: `RaiseHand`/`LowerHand` pass `CallHandPayload`, `SendCallReaction` passes `CallReactionPayload`. Late joiners do **not** receive a snapshot of raised hands; they hear via voice or chat. This is acceptable for ephemeral state.
 
 ### HTTP handlers (`internal/handler/http/call_interactions.go`, new)
 
@@ -185,7 +211,7 @@ Hand-rolled fakes pattern (matches `service_test.go`).
 - SendCallReaction with empty emoji → `CodeInvalidInput`.
 - SendCallReaction with 33-byte emoji → `CodeInvalidInput`.
 - SendCallReaction with invalid UTF-8 bytes → `CodeInvalidInput`.
-- All three: ensure `event.Prepare` is called by asserting the captured event has `DeliverySemantic == DeliveryEphemeral` and `Replayable == false`.
+- All three: assert the **marshalled body** carries `delivery_semantic: "ephemeral"` and `replayable: false` (since `event.Prepare` populates those fields before `json.Marshal`). Tests inject a fake `pubsub` that captures the published `body []byte`, unmarshal it back into `event.Event`, and assert on the fields. This verifies `event.Prepare` was actually called per-recipient.
 
 ### HTTP (`internal/handler/http/call_interactions_test.go`)
 
@@ -198,9 +224,10 @@ Hand-rolled fakes pattern (matches `service_test.go`).
 
 ## Risks
 
-1. **N participants × N publishes** — a single reaction with 50 in-call participants does 50 NATS publishes. NATS handles this trivially; if it ever shows up in telemetry we can batch into a fan-out subject (`aloqa.call.<callID>`) in a follow-up.
+1. **N participants × N publishes** — a single reaction with 50 in-call participants does 50 NATS publishes plus 50 `event.Prepare` calls (each mints a fresh `event.ID` and `Timestamp`). NATS handles this trivially; if it ever shows up in telemetry we can batch into a fan-out subject (`aloqa.call.<callID>`) in a follow-up.
 2. **Race with LeaveCall** — caller can be removed between request and `GetParticipant`. Returns `CodeForbidden` and FE retries silently.
 3. **Ordering across recipients** — independent NATS publishes mean two participants may see reactions in slightly different orders. Acceptable for ephemeral floating-emoji UX.
+4. **Per-interaction `ListParticipants` DB read** — every hand-toggle/reaction triggers one repo query. At 5 reactions/sec/user on a 50-participant call, that's 250 reads/sec for the fan-out. Acceptable for the initial demo-day window; revisit if we add per-user-per-call rate-limiting (separate Jira).
 
 ## Out of scope (re-stated)
 

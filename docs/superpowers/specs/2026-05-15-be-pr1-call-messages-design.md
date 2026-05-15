@@ -54,32 +54,38 @@ The composite `(call_id, id DESC)` index covers the dominant query (`WHERE call_
 
 Down migration drops indexes + table. Last migration is `033`; `034` is the next number — confirmed in `migrations/` listing.
 
-### Repository (`internal/repository/postgres/call_message.go`, new)
+### Repository
 
-The repo follows the **postgres tx pattern used by `MessageRepo`** (`internal/repository/postgres/message.go`) and `CallRepo` (`internal/repository/postgres/call.go`): a `pool *pgxpool.Pool` plus a `db queryable` receiver method `withTx` so a service-provided `pgx.Tx` shadows the pool during a transaction.
+**Interface** (`internal/domain/repository/interfaces.go`, append next to `CallRepository` at line 207):
+
+```go
+type CallMessageRepository interface {
+    Create(ctx context.Context, msg *entity.CallMessage) error
+    ListByCall(ctx context.Context, callID uuid.UUID, p pagination.Params) ([]entity.CallMessage, error)
+    SoftDelete(ctx context.Context, id, callID uuid.UUID) error
+    GetByID(ctx context.Context, id uuid.UUID) (*entity.CallMessage, error)
+}
+```
+
+The interface lives in `internal/domain/repository/interfaces.go` to match `CallRepository`/`MessageRepository`/etc. and to avoid an import cycle with `txscope` (which imports `domain/repository`).
+
+**Postgres implementation** (`internal/repository/postgres/call_message.go`, new) follows the existing `CallRepo` pattern at `internal/repository/postgres/call.go:30`:
 
 ```go
 type CallMessageRepo struct {
     pool *pgxpool.Pool
-    db   queryable // shadowed inside withTx
+    db   queryable
 }
 
 func NewCallMessageRepo(pool *pgxpool.Pool) *CallMessageRepo { ... }
 
-// withTx returns a copy of the repo bound to the given tx.
+// withTx is unexported; called only from txScope.WithinTx (tx.go).
 func (r *CallMessageRepo) withTx(tx pgx.Tx) *CallMessageRepo { ... }
-
-func (r *CallMessageRepo) Create(ctx context.Context, msg *entity.CallMessage) error
-func (r *CallMessageRepo) ListByCall(
-    ctx context.Context,
-    callID uuid.UUID,
-    p pagination.Params, // uses internal/pkg/pagination — base64 UUID cursor
-) ([]entity.CallMessage, error)
-func (r *CallMessageRepo) SoftDelete(ctx context.Context, id, callID uuid.UUID) error
-func (r *CallMessageRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.CallMessage, error)
 ```
 
-`ListByCall` returns messages ordered by `id DESC` (UUIDv7 makes this chronological), filters `deleted_at IS NULL`, and uses `m.id < cursor` for pagination — exactly mirroring `MessageRepo.ListByChannel` at `internal/repository/postgres/message.go:141-175`. `pagination.Params` (`internal/pkg/pagination/pagination.go:36-53`) carries the opaque base64 UUID cursor and the limit, clamped at 100.
+The exported interface has no `WithTx` method — tx binding is wired in `internal/repository/postgres/tx.go` exactly like `scope.calls = m.calls.withTx(tx)` at line 139.
+
+`ListByCall` returns messages ordered by `id DESC` (UUIDv7 makes this chronological), filters `deleted_at IS NULL`, and uses `m.id < cursor` for pagination — exactly mirroring `MessageRepo.ListByChannel` at `internal/repository/postgres/message.go:141-175`. The repo fetches `limit+1` rows so the handler can detect `has_more`.
 
 ### Service wiring (`internal/service/call/service.go`)
 
@@ -103,52 +109,46 @@ If `s.callMessages == nil` at request time, the handler returns `cerrors.Unavail
 
 ### Transaction outbox plumbing
 
-Required for atomic "persist + enqueue WS event" semantics. Mirrors chat exactly (`internal/service/chat/service.go:674-688`).
+Required for atomic "persist + enqueue WS event" semantics. The whole flow mirrors chat at `internal/service/chat/service.go:674-707` and reuses the existing `enqueueRealtimeTx` helper at `internal/service/call/service.go:1249-1265` (the `enqueueParticipantEventTx` etc. already use it). Real signatures from the repo, not invented:
 
-**`internal/platform/txscope/interfaces.go`** — add accessor:
+- `txscope.Manager.WithinTx(ctx, fn func(ctx, scope) error) error` (`internal/platform/txscope/interfaces.go:28-30`)
+- `txscope.Scope.EnqueueRealtime(ctx, evt event.Event, body []byte) error` (`interfaces.go:25`)
+- `event.Prepare(subject string, evt event.Event) (event.Event, []byte, bool, error)` (`events.go:132`) — sets `Version`/`Subject`/`DeliverySemantic`/`Replayable` from `DefinitionForType` and marshals the body in one call.
+- `event.Event.UserID` is `uuid.UUID`, not a pointer (`events.go:87`).
+
+**`internal/platform/txscope/interfaces.go`** — add accessor to `Scope`:
 
 ```go
-type Scope interface {
-    Messages() chat.MessageRepository
-    Calls() call.CallRepository
-    CallMessages() call.CallMessageRepository // NEW
-    EnqueueRealtime(ctx, *realtime.Event) error
-    // ... existing methods
-}
+CallMessages() repository.CallMessageRepository
 ```
 
-**`internal/repository/postgres/tx.go`** — extend `txScope` (lines 60-75) to hold the call-message repo and bind it via `withTx` at lines 177-182:
+(Slot in alphabetical order alongside `Calls()`, `Channels()`, `Messages()`.)
+
+**`internal/repository/postgres/tx.go`** — extend `txScope` to hold a `callMessages *CallMessageRepo` and bind it in `WithinTx` exactly like `scope.calls = m.calls.withTx(tx)` at line 139. Add the `CallMessages()` accessor on `txScope` returning `ts.callMessages`.
+
+**Service `SendCallMessage` flow** mirrors `chat.Service.SendMessage` lines 674-707 verbatim — tx path when `s.tx != nil`, non-tx fallback otherwise:
 
 ```go
-type txScope struct {
-    messages      *MessageRepo
-    calls         *CallRepo
-    callMessages  *CallMessageRepo // NEW
-    // ...
-}
-
-// Inside withTx:
-ts.callMessages = ts.callMessages.withTx(tx)
-```
-
-**`internal/platform/txscope/config.go`** (`TxManagerConfig`) — register the repo so `txManager.Begin(ctx)` injects it.
-
-**Service Send call** (mirrors `chat/service.SendMessage:674-688`):
-
-```go
-err := s.tx.Run(ctx, func(scope txscope.Scope) error {
-    if err := scope.CallMessages().Create(ctx, msg); err != nil {
-        return err
+if s.tx != nil {
+    if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
+        if err := scope.CallMessages().Create(ctx, msg); err != nil {
+            return err
+        }
+        return s.enqueueCallMessageEventTx(ctx, scope, event.TypeCallMessageCreated, call, msg)
+    }); err != nil {
+        return nil, cerrors.Internal("failed to create call message", err)
     }
-    rtEvent := event.Prepare(event.Event{
-        Type: event.TypeCallMessageCreated,
-        ... payload ...
-    })
-    return scope.EnqueueRealtime(ctx, rtEvent)
-})
+} else {
+    if err := s.callMessages.Create(ctx, msg); err != nil {
+        return nil, cerrors.Internal("failed to create call message", err)
+    }
+    s.publishCallMessageEvent(ctx, event.TypeCallMessageCreated, call, msg)
+}
 ```
 
-`event.Prepare` (referenced at `internal/domain/event/events.go`) populates `Version`, `Subject`, `DeliverySemantic`, and `Replayable` from `DefinitionForType` before the event hits the outbox.
+The new `enqueueCallMessageEventTx` and `publishCallMessageEvent` helpers slot beside `enqueueCallEventTx`/`publishCallEvent` at `service.go:1207-1265` and reuse the same `enqueueRealtimeTx`/`doPublish` plumbing. Subject is `fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID)` for consistency with the other call events.
+
+`DefinitionForType` does **not** require a new explicit case — the default branch (`events.go:121-126`) already returns `DeliveryAtLeastOnce + Replayable: true`, which is correct for persisted call messages. Adding an explicit case would be redundant.
 
 ### Event types (`internal/domain/event/events.go`)
 
@@ -174,16 +174,7 @@ type CallMessageDeletedPayload struct {
 }
 ```
 
-Extend `DefinitionForType` (`events.go:107-127`) with an explicit case for the new types:
-
-```go
-case TypeCallMessageCreated, TypeCallMessageDeleted:
-    return Definition{
-        DeliverySemantic: DeliveryAtLeastOnce,
-        Replayable:       true,
-        Subject:          subjectForWorkspace(workspaceID),
-    }
-```
+No `DefinitionForType` case needed — the default branch (`events.go:121-126`) already returns `DeliveryAtLeastOnce + Replayable: true`. See the outbox plumbing section above for the publish flow.
 
 Subject is `aloqa.ws.<workspaceID>` to match the existing `call.*` events at `service.go:1213`. This is the same audience as `call.participant.joined` — workspace members can subscribe, but the events only carry call metadata they already see in `GetCall`. Tight call-scoping is unnecessary for persisted messages because `ListCallMessages` is the source of truth and is itself access-gated.
 
@@ -216,11 +207,13 @@ Request body for POST:
 { "body": "<1..2000 chars after trim>" }
 ```
 
-Response shapes serialize the entity directly (JSON tags above):
+Response shapes:
 
-- POST → 201 + `CallMessage`
-- GET → 200 + `{ "messages": [...], "next_cursor": "<base64 UUID>" | null }`
+- POST → 201 + `CallMessage` (entity serialized directly via JSON tags)
+- GET → 200 + `pagination.Page[CallMessage]` (canonical shape `{ items, next_cursor, has_more }`, matching chat's `buildMessagePage` at `chat/service.go:1529-1546`)
 - DELETE → 204
+
+Cursor format is base64-encoded UUID via `pagination.EncodeCursor` / `DecodeCursor` (`internal/pkg/pagination/pagination.go:37-54`). The handler decodes the `?cursor=` query param to a `uuid.UUID`, builds `pagination.Params{Cursor, Limit}`, calls `s.calls.ListCallMessages`, and a small `buildCallMessagePage(items, limit)` helper assembles the response (fetches `limit+1`, trims, encodes last item's ID).
 
 ### Service surface (`internal/service/call/message.go`, new)
 
@@ -245,16 +238,19 @@ func (s *Service) DeleteCallMessage(
 
 Access checks reuse existing helpers:
 
+`requireCallAccess` returns `(*entity.Call, error)` — the call is captured for downstream `Settings.Chat` / `Status` checks (`service.go:199-220`).
+
 - `SendCallMessage`:
-  1. `requireCallAccess(ctx, workspaceID, callID, senderID)` (`service.go:199-220`) — workspace + channel boundary.
+  1. `call, err := s.requireCallAccess(ctx, workspaceID, callID, senderID)` — workspace + channel boundary.
   2. `GetParticipant(ctx, callID, senderID)` must exist with `Status == ParticipantStatusConnected`. If missing → `cerrors.Forbidden("not in call")`.
   3. If `call.Settings.Chat == false` → `cerrors.Forbidden("call chat is disabled")`.
   4. If `call.Status == CallStatusEnded` → `cerrors.Forbidden("call is not active")` (matches `breakout.go:124` precedent).
-- `ListCallMessages`: `requireCallAccess` only. Even disconnected workspace members can fetch the transcript via `CallEndedSummary`.
+  5. Nil-check `s.callMessages == nil` (service-layer) → `cerrors.Unavailable("call messaging is not configured")`. The handler does not need its own guard.
+- `ListCallMessages`: `requireCallAccess` only. Even disconnected workspace members can fetch the transcript via `CallEndedSummary`. Same `s.callMessages == nil` guard.
 - `DeleteCallMessage`:
   1. `requireCallAccess`.
   2. Fetch message; if `msg.SenderID != requesterID`, require host/co-host via `requireHostOrCoHost(ctx, callID, requesterID)` (`breakout.go:383`).
-  3. Soft-delete + emit `call.message.deleted`.
+  3. Soft-delete + emit `call.message.deleted` through the same tx-or-fallback flow as Send.
 
 Errors use stable English messages (`cerrors.Forbidden(msg)` takes a single message; `internal/pkg/cerrors/errors.go:80-82`). Tests assert on `cerrors.AsAppError(err)` code + message text — no structured `reason` field is added.
 
@@ -308,6 +304,7 @@ Standard handler tests using `httptest`:
 1. **Outbox replay duplication** — `at_least_once` semantics means FE may receive duplicate `call.message.created` for a single send. FE PR4 dedupes by `message.id`. Documented but not enforced here.
 2. **Same-timestamp ordering** — handled by UUIDv7 + `id DESC` ordering; the composite index `(call_id, id DESC)` covers the query.
 3. **Migration ordering** — must apply 034 after 033 cleanly. No schema dependencies beyond `calls(id)` and `users(id)`.
+4. **Route auto-exposure under `/api/v1/personal/...`** — `mountSharedScopedRoutes` is shared between workspace and personal scopes; the new `/messages` routes inherit both mounts. Intentional — personal-scope calls (1:1 between two users not in a workspace) also benefit from in-call chat. Tests cover both mount points.
 
 ## Open question for FE PR4 (ALOQA-211)
 

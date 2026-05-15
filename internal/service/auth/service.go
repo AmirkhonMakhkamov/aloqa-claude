@@ -648,10 +648,20 @@ func (s *Service) ValidateToken(tokenString string) (uuid.UUID, string, error) {
 	return claims.UserID, claims.SessionID, nil
 }
 
-// Logout revokes a single session.
-func (s *Service) Logout(ctx context.Context, sessionID string) error {
-	if err := s.sessions.Revoke(ctx, sessionID); err != nil {
-		slog.ErrorContext(ctx, "failed to revoke session", "session_id", sessionID, "error", err)
+// LogoutSessionForUser revokes a session by id, but only if it belongs to
+// userID. Returns NotFound if the target session does not exist or belongs
+// to a different user — UUID unpredictability is not an authorization
+// boundary.
+func (s *Service) LogoutSessionForUser(ctx context.Context, userID, targetSessionID string) error {
+	ok, err := s.sessions.SessionBelongsToUser(ctx, userID, targetSessionID)
+	if err != nil {
+		return cerrors.Internal("session ownership check failed", err)
+	}
+	if !ok {
+		return cerrors.NotFound("session not found")
+	}
+	if err := s.sessions.Revoke(ctx, targetSessionID); err != nil {
+		slog.ErrorContext(ctx, "failed to revoke session", "session_id", targetSessionID, "error", err)
 		return cerrors.Internal("failed to revoke session", err)
 	}
 	return nil
@@ -662,6 +672,17 @@ func (s *Service) LogoutAll(ctx context.Context, userID string) error {
 	if err := s.sessions.RevokeAllUserSessions(ctx, userID); err != nil {
 		slog.ErrorContext(ctx, "failed to revoke all sessions", "user_id", userID, "error", err)
 		return cerrors.Internal("failed to revoke sessions", err)
+	}
+	return nil
+}
+
+// LogoutOthers revokes every session for the user except keepSessionID.
+// Returns a non-nil error if ANY target session fails to revoke — the
+// HTTP layer must NOT report 204 in that case.
+func (s *Service) LogoutOthers(ctx context.Context, userID, keepSessionID string) error {
+	if err := s.sessions.RevokeAllUserSessionsExcept(ctx, userID, keepSessionID); err != nil {
+		slog.ErrorContext(ctx, "failed to revoke other sessions", "user_id", userID, "error", err)
+		return cerrors.Internal("failed to revoke other sessions", err)
 	}
 	return nil
 }

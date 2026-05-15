@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -380,6 +381,23 @@ func (sm *SessionManager) Revoke(ctx context.Context, sessionID string) error {
 	return nil
 }
 
+func (sm *SessionManager) SessionBelongsToUser(ctx context.Context, userID, sessionID string) (bool, error) {
+	ctx, cancel := sm.operationCtx(ctx)
+	defer cancel()
+	data, err := sm.rdb.Get(ctx, sessionKey(sessionID)).Result()
+	if err == redis.Nil {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("lookup session for ownership check: %w", err)
+	}
+	var storable sessionStorable
+	if err := json.Unmarshal([]byte(data), &storable); err != nil {
+		return false, fmt.Errorf("unmarshal session: %w", err)
+	}
+	return storable.UserID == userID, nil
+}
+
 // RevokeAllUserSessions revokes every session for a given user.
 func (sm *SessionManager) RevokeAllUserSessions(ctx context.Context, userID string) error {
 	ctx, cancel := sm.operationCtx(ctx)
@@ -406,6 +424,41 @@ func (sm *SessionManager) RevokeAllUserSessions(ctx context.Context, userID stri
 	}
 
 	slog.InfoContext(ctx, "all sessions revoked", "user_id", userID, "count", len(sessionIDs))
+	return nil
+}
+
+// RevokeAllUserSessionsExcept revokes every session for userID except keepSessionID.
+// Per-session Revoke errors are collected and returned as a joined error; the
+// outer call's caller can decide how to surface partial failure.
+//
+// IMPORTANT: the inner Revoke calls use context.WithoutCancel(ctx) so that an
+// HTTP client disconnect mid-loop does not silently abort revocation. "Sign
+// out all other devices" is a security action — partial silent survival of
+// sessions due to a transient disconnect would be a regression. Logs and
+// metrics still use the original ctx for request-scoped fields.
+func (sm *SessionManager) RevokeAllUserSessionsExcept(ctx context.Context, userID, keepSessionID string) error {
+	listCtx, cancel := sm.operationCtx(ctx)
+	sessionIDs, err := sm.rdb.SMembers(listCtx, userSessionsKey(userID)).Result()
+	cancel()
+	if err != nil {
+		return fmt.Errorf("list user sessions: %w", err)
+	}
+	revokeCtx := context.WithoutCancel(ctx)
+	var errs []error
+	for _, sid := range sessionIDs {
+		if sid == keepSessionID {
+			continue
+		}
+		if revokeErr := sm.Revoke(revokeCtx, sid); revokeErr != nil {
+			slog.WarnContext(ctx, "failed to revoke session during others revocation",
+				"session_id", sid, "user_id", userID, "error", revokeErr)
+			errs = append(errs, fmt.Errorf("revoke %s: %w", sid, revokeErr))
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	slog.InfoContext(ctx, "other sessions revoked", "user_id", userID, "kept_session_id", keepSessionID)
 	return nil
 }
 

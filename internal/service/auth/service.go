@@ -26,15 +26,20 @@ import (
 
 // Service handles authentication, registration, and token management.
 type Service struct {
-	users      repository.UserRepository
-	workspaces repository.WorkspaceRepository
-	sessions   *SessionManager
-	jwtSecret  []byte
-	accessTTL  time.Duration
-	refreshTTL time.Duration
-	search     interface {
+	users         repository.UserRepository
+	workspaces    repository.WorkspaceRepository
+	sessions      *SessionManager
+	jwtSecret     []byte
+	accessTTL     time.Duration
+	refreshTTL    time.Duration
+	newUserSeeder NewUserSeeder
+	search        interface {
 		IndexUser(ctx context.Context, workspaceID, userID uuid.UUID, displayName, email string, createdAt, updatedAt time.Time) error
 	}
+}
+
+type NewUserSeeder interface {
+	SeedNewUser(ctx context.Context, user *entity.User) error
 }
 
 // NewService creates a new auth service with Redis-backed session management.
@@ -57,6 +62,13 @@ func NewService(
 		refreshTTL: refreshTTL,
 		search:     search,
 	}
+}
+
+func (s *Service) SetNewUserSeeder(seeder NewUserSeeder) {
+	if s == nil {
+		return
+	}
+	s.newUserSeeder = seeder
 }
 
 func (s *Service) SetSessionNotifier(notifier SessionEventNotifier) {
@@ -232,6 +244,12 @@ func (s *Service) Register(ctx context.Context, email, password, displayName str
 	if err := s.users.Create(ctx, user); err != nil {
 		slog.ErrorContext(ctx, "failed to create user", "error", err)
 		return nil, cerrors.Internal("failed to create user", err)
+	}
+
+	if s.newUserSeeder != nil {
+		if err := s.newUserSeeder.SeedNewUser(ctx, user); err != nil {
+			slog.ErrorContext(ctx, "failed to seed demo workspace for new user", "user_id", user.ID, "error", err)
+		}
 	}
 
 	slog.InfoContext(ctx, "user registered", "user_id", user.ID)

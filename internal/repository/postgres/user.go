@@ -124,6 +124,52 @@ func (r *UserRepo) GetByEmail(ctx context.Context, email string) (*entity.User, 
 	return user, nil
 }
 
+func (r *UserRepo) ListActiveExcept(ctx context.Context, excludedID uuid.UUID, limit int) ([]entity.User, error) {
+	if limit <= 0 {
+		return []entity.User{}, nil
+	}
+	if limit > 50 {
+		limit = 50
+	}
+
+	query := `
+		SELECT id, email, display_name, avatar_url, password_hash, status, locale, created_at, updated_at
+		FROM users
+		WHERE id <> $1 AND status = $2
+		ORDER BY created_at ASC
+		LIMIT $3`
+
+	rows, err := r.db.Query(ctx, query, excludedID, entity.UserStatusActive, limit)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list active users except: %w", err)
+	}
+	defer rows.Close()
+
+	users := make([]entity.User, 0, limit)
+	for rows.Next() {
+		var user entity.User
+		if err := rows.Scan(
+			&user.ID,
+			&user.Email,
+			&user.DisplayName,
+			&user.AvatarURL,
+			&user.PasswordHash,
+			&user.Status,
+			&user.Locale,
+			&user.CreatedAt,
+			&user.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("postgres: list active users except scan: %w", err)
+		}
+		users = append(users, user)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list active users except rows: %w", err)
+	}
+
+	return users, nil
+}
+
 func (r *UserRepo) Update(ctx context.Context, user *entity.User) error {
 	query := `
 		UPDATE users

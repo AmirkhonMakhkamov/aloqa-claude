@@ -15,6 +15,7 @@ type Scope interface {
 	Channels() repository.ChannelRepository
 	ChannelGrants() repository.ChannelAccessGrantRepository
 	Calls() repository.CallRepository
+	CallMessages() repository.CallMessageRepository
 	Calendars() repository.CalendarRepository
 	Recordings() repository.RecordingRepository
 	Invites() repository.GuestInviteRepository

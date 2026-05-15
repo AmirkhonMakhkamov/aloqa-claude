@@ -181,6 +181,7 @@ func run() error {
 	channelRepo := postgres.NewChannelRepo(pool)
 	messageRepo := postgres.NewMessageRepo(pool)
 	callRepo := postgres.NewCallRepo(pool)
+	callMessageRepo := postgres.NewCallMessageRepo(pool)
 	breakoutRoomRepo := postgres.NewBreakoutRoomRepo(pool)
 	recordingRepo := postgres.NewRecordingRepo(pool)
 	auditRepo := postgres.NewAuditRepo(pool)
@@ -260,6 +261,7 @@ func run() error {
 		Channels:            channelRepo,
 		ChannelGrants:       channelAccessGrantRepo,
 		Calls:               callRepo,
+		CallMessages:        callMessageRepo,
 		Calendars:           calendarRepo,
 		Recordings:          recordingRepo,
 		Invites:             guestInviteRepo,
@@ -367,6 +369,7 @@ func run() error {
 		},
 	}, guestAccessChecker, collaborationAccessChecker)
 	callSvc.SetMediaControlPlane(mediaOpsSvc)
+	callSvc.SetCallMessageRepo(callMessageRepo)
 	callSvc.SetTransactionManager(txManager)
 	calendarSvc := calendarsvc.NewService(calendarRepo, workspaceRepo, callSvc, realtimePublisher)
 	calendarSvc.SetTransactionManager(txManager)

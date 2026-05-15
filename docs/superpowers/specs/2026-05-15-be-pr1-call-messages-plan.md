@@ -11,7 +11,7 @@
 
 ### Step 1 — Migration + domain entity + repo interface
 
-**Create:** `migrations/034_call_messages.sql` (up) and `migrations/down/034_call_messages.sql` (down) per spec §"Migration".
+**Create:** `migrations/034_call_messages.sql` (up) and `migrations/down/034_call_messages.down.sql` (down) per spec §"Migration". Filename convention verified from `migrations/down/033_event_reminders_definition_constraint.down.sql` — the `.down.sql` suffix is required.
 
 **Create:** `internal/domain/entity/call_message.go`:
 
@@ -65,26 +65,29 @@ type CallMessageRepository interface {
 
 **Modify:** `internal/platform/txscope/interfaces.go` — add `CallMessages() repository.CallMessageRepository` to `Scope` (alphabetical, after `Calls()`).
 
-**Modify:** `internal/platform/txscope/config.go` — add `CallMessages repository.CallMessageRepository` field to `TxManagerConfig` (alphabetical) and to the `txManager` struct that holds it.
+**Modify:** `internal/repository/postgres/tx.go` (all txscope plumbing lives in this single file, NOT `internal/platform/txscope/config.go`):
 
-**Modify:** `internal/repository/postgres/tx.go`:
-
-- Add `callMessages *CallMessageRepo` field to `txScope` (line 60-75 area).
+- Add `CallMessages *CallMessageRepo` field to `TxManagerConfig` struct (line 23 area). Type is the **concrete postgres pointer**, not the interface — matches the existing `Messages *MessageRepo` / `Calls *CallRepo` fields verbatim.
+- Add `callMessages *CallMessageRepo` field to the `TxManager` struct that holds the bound repos.
+- Add `callMessages *CallMessageRepo` field to `txScope`.
 - Inside `WithinTx`, after `scope.calls = m.calls.withTx(tx)` (line 139), add `scope.callMessages = m.callMessages.withTx(tx)`.
-- Add `func (s *txScope) CallMessages() repository.CallMessageRepository { return s.callMessages }`.
-- Bind `m.callMessages` from `TxManagerConfig.CallMessages` in `NewTxManager`.
+- Add accessor `func (s *txScope) CallMessages() repository.CallMessageRepository { return s.callMessages }`.
+- In `NewTxManager`, bind `m.callMessages = cfg.CallMessages`.
 
-**Modify:** `cmd/server/main.go`:
+**Modify:** `cmd/server/main.go` — `TxManagerConfig` is constructed inline at line 256 (no `txConfig` variable):
 
-```go
-callMessageRepo := postgres.NewCallMessageRepo(pool)
-callSvc.SetCallMessageRepo(callMessageRepo) // method added in Step 5
-txConfig.CallMessages = callMessageRepo
-```
+1. Add `callMessageRepo := postgres.NewCallMessageRepo(pool)` near `messageRepo := postgres.NewMessageRepo(pool)` at line 182-183.
+2. Inside the `postgres.TxManagerConfig{...}` struct literal at line 256, add `CallMessages: callMessageRepo,` alphabetically (after `Calls` if present).
+3. After `callSvc` is constructed at line 349 (`callSvc := call.NewService(...)`), add `callSvc.SetCallMessageRepo(callMessageRepo)`.
 
-Insert near existing `messageRepo`/`callRepo` construction lines.
+**Modify existing test fakes** — adding `CallMessages()` to the `Scope` interface forces every fake scope to implement it. Patch:
 
-**Commit:** `feat(call-messages): txscope wiring`
+- `internal/service/chat/service_test.go:663` (`fakeChatTxScope`) — add `func (s *fakeChatTxScope) CallMessages() repository.CallMessageRepository { return nil }`.
+- `internal/service/calendar/service_test.go:1244` (`fakeCalendarTxScope`) — same.
+
+Without these patches `go test ./...` fails with "missing method" errors.
+
+**Commit:** `feat(call-messages): txscope wiring + fake scope patches`
 
 ### Step 4 — Domain event types + payloads
 
@@ -215,7 +218,7 @@ The block is mounted under both workspace and personal scope via `mountSharedSco
 
 ### Step 8 — Repo tests
 
-**Create:** `internal/repository/postgres/call_message_test.go` using the standard postgres test harness (matches `message_test.go` / `call_test.go`):
+**Create:** `internal/repository/postgres/call_message_test.go` using the postgres test harness pattern from `calendar_repo_test.go` and `search_test.go` (the only two postgres `*_test.go` files in the repo). Tests are gated by `ALOQA_POSTGRES_TEST_DSN` env var — skip with `t.Skip` if unset, matching the existing pattern.
 
 - Round-trip Create → GetByID.
 - ListByCall newest-first, excludes soft-deleted.
@@ -257,11 +260,15 @@ Run: `go test ./internal/handler/http/... -run CallMessage`
 
 ### Step 11 — Full verify
 
+The repo's canonical gate uses Make:
+
 ```bash
-go vet ./...
-go test ./... -timeout 60s
+make lint    # golangci-lint run ./...
+make test    # go test -race -count=1 ./...
 go build ./cmd/server
 ```
+
+If `ALOQA_POSTGRES_TEST_DSN` is unset, postgres-tier tests skip (covered by Step 8). Race-detected + count=1 catches the data-race / flake risks the plain `go test` misses.
 
 Fix any failures and commit: `chore(call-messages): verify gate fixes`
 
@@ -284,7 +291,7 @@ Tests added: <count>
 | Repo | after Step 8 | `go test ./internal/repository/postgres/... -run CallMessage` |
 | Service | after Step 9 | `go test ./internal/service/call/... -run CallMessage` |
 | HTTP | after Step 10 | `go test ./internal/handler/http/... -run CallMessage` |
-| Full | after Step 11 | `go vet ./... && go test ./... && go build ./cmd/server` |
+| Full | after Step 11 | `make lint && make test && go build ./cmd/server` |
 
 ## Out of scope (re-stated)
 

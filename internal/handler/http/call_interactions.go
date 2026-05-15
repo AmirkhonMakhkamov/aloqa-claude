@@ -1,7 +1,10 @@
 package http
 
 import (
+	"bytes"
+	"io"
 	"net/http"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
@@ -55,7 +58,7 @@ func (h *CallHandler) SendCallReaction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req callReactionRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeCallReactionRequest(r, &req); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -66,4 +69,16 @@ func (h *CallHandler) SendCallReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func decodeCallReactionRequest(r *http.Request, req *callReactionRequest) error {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return cerrors.InvalidInput("invalid request body")
+	}
+	if !utf8.Valid(body) {
+		return cerrors.InvalidInput("invalid request body")
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	return decodeJSON(r, req)
 }

@@ -477,7 +477,7 @@ func (s *Service) filterAbandonedRecipientDMs(ctx context.Context, userID uuid.U
 			out = append(out, ch)
 			continue
 		}
-		msgs, err := s.messages.ListByChannel(ctx, ch.ID, pagination.Params{Limit: 1})
+		hasActiveMessage, err := s.messages.HasActiveMessage(ctx, ch.ID)
 		if err != nil {
 			// Fail open — surface the channel rather than hide a real DM. The
 			// concrete error is already logged by the caller's request log.
@@ -485,7 +485,7 @@ func (s *Service) filterAbandonedRecipientDMs(ctx context.Context, userID uuid.U
 			out = append(out, ch)
 			continue
 		}
-		if len(msgs) == 0 {
+		if !hasActiveMessage {
 			continue
 		}
 		out = append(out, ch)
@@ -735,6 +735,7 @@ func (s *Service) GetMessages(ctx context.Context, channelID, userID uuid.UUID, 
 		return pagination.Page[entity.Message]{}, cerrors.Internal("failed to list messages", err)
 	}
 
+	redactDeletedMessages(items)
 	return buildMessagePage(items, p.Limit), nil
 }
 
@@ -769,6 +770,7 @@ func (s *Service) GetThreadReplies(ctx context.Context, parentID, userID uuid.UU
 		return pagination.Page[entity.Message]{}, cerrors.Internal("failed to list thread replies", err)
 	}
 
+	redactDeletedMessages(items)
 	return buildMessagePage(items, p.Limit), nil
 }
 
@@ -854,7 +856,8 @@ func (s *Service) DeleteMessage(ctx context.Context, messageID, userID uuid.UUID
 			if err != nil {
 				return err
 			}
-			msg = deletedMsg
+			tombstone := redactDeletedMessage(*deletedMsg)
+			msg = &tombstone
 			if workspaceID != uuid.Nil {
 				if err := s.enqueueMessageDeleteSearchTx(ctx, scope, workspaceID, messageID); err != nil {
 					return err
@@ -884,7 +887,8 @@ func (s *Service) DeleteMessage(ctx context.Context, messageID, userID uuid.UUID
 			slog.ErrorContext(ctx, "failed to reload deleted message", "message_id", messageID, "error", err)
 			return cerrors.Internal("failed to delete message", err)
 		}
-		msg = deletedMsg
+		tombstone := redactDeletedMessage(*deletedMsg)
+		msg = &tombstone
 
 		s.enqueueSearch(ctx, "delete message from search", func() error {
 			if workspaceID == uuid.Nil {
@@ -1535,6 +1539,28 @@ func (s *Service) ensureChannelAccessGrant(ctx context.Context, channelID, works
 		return cerrors.Internal("failed to create collaboration access", err)
 	}
 	return nil
+}
+
+func redactDeletedMessages(items []entity.Message) {
+	for i := range items {
+		items[i] = redactDeletedMessage(items[i])
+	}
+}
+
+func redactDeletedMessage(msg entity.Message) entity.Message {
+	if msg.DeletedAt == nil {
+		return msg
+	}
+
+	msg.Content = ""
+	msg.Edited = false
+	msg.EditedAt = nil
+	msg.Pinned = false
+	msg.PinnedBy = nil
+	msg.PinnedAt = nil
+	msg.Reactions = nil
+	msg.Attachments = nil
+	return msg
 }
 
 // buildMessagePage constructs a pagination.Page from a message slice fetched with limit+1.

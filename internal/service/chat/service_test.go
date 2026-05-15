@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -332,6 +333,184 @@ func TestEditAndDeleteRequireParticipateAccess(t *testing.T) {
 	}
 }
 
+func TestGetMessagesReturnsDeletedTombstoneWithoutContent(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	userID := uuid.New()
+	messageID := uuid.New()
+	deletedAt := time.Now().UTC()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePublic},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, userID}: {ChannelID: channelID, UserID: userID},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	messages := &fakeMessageRepo{
+		messages: map[uuid.UUID]*entity.Message{
+			messageID: {
+				ID:        messageID,
+				ChannelID: channelID,
+				UserID:    userID,
+				Content:   "secret deleted text",
+				CreatedAt: deletedAt.Add(-time.Minute),
+				UpdatedAt: deletedAt,
+				DeletedAt: &deletedAt,
+				Edited:    true,
+				EditedAt:  &deletedAt,
+				Pinned:    true,
+				PinnedBy:  &userID,
+				PinnedAt:  &deletedAt,
+			},
+		},
+	}
+	svc := NewService(channels, messages, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+
+	page, err := svc.GetMessages(ctx, channelID, userID, pagination.Params{Limit: 10})
+	if err != nil {
+		t.Fatalf("GetMessages returned error: %v", err)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(page.Items))
+	}
+	got := page.Items[0]
+	if got.DeletedAt == nil {
+		t.Fatalf("DeletedAt = nil, want tombstone timestamp")
+	}
+	if got.Content != "" {
+		t.Fatalf("Content = %q, want redacted empty content", got.Content)
+	}
+	if got.Edited || got.EditedAt != nil || got.Pinned || got.PinnedBy != nil || got.PinnedAt != nil {
+		t.Fatalf("deleted metadata was not redacted: %+v", got)
+	}
+}
+
+func TestDeleteMessagePublishesRedactedTombstone(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	userID := uuid.New()
+	messageID := uuid.New()
+	now := time.Now().UTC()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePublic},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, userID}: {ChannelID: channelID, UserID: userID},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	messages := &fakeMessageRepo{
+		messages: map[uuid.UUID]*entity.Message{
+			messageID: {
+				ID:        messageID,
+				ChannelID: channelID,
+				UserID:    userID,
+				Content:   "secret deleted text",
+				CreatedAt: now,
+				UpdatedAt: now,
+				Edited:    true,
+				EditedAt:  &now,
+				Pinned:    true,
+				PinnedBy:  &userID,
+				PinnedAt:  &now,
+			},
+		},
+	}
+	publisher := &recordingPublisher{}
+	svc := NewService(channels, messages, workspaces, nil, publisher, nil, nil, nil, nil)
+
+	if err := svc.DeleteMessage(ctx, messageID, userID); err != nil {
+		t.Fatalf("DeleteMessage returned error: %v", err)
+	}
+	if len(publisher.events) != 1 {
+		t.Fatalf("published events = %d, want 1", len(publisher.events))
+	}
+
+	var envelope struct {
+		Type    eventpkg.Type `json:"type"`
+		Payload struct {
+			Message entity.Message `json:"message"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(publisher.events[0], &envelope); err != nil {
+		t.Fatalf("unmarshal event: %v", err)
+	}
+	if envelope.Type != eventpkg.TypeMessageDeleted {
+		t.Fatalf("event type = %s, want %s", envelope.Type, eventpkg.TypeMessageDeleted)
+	}
+	got := envelope.Payload.Message
+	if got.ID != messageID || got.DeletedAt == nil {
+		t.Fatalf("event message = %+v, want deleted tombstone for %s", got, messageID)
+	}
+	if got.Content != "" {
+		t.Fatalf("event content = %q, want redacted empty content", got.Content)
+	}
+	if got.Edited || got.EditedAt != nil || got.Pinned || got.PinnedBy != nil || got.PinnedAt != nil {
+		t.Fatalf("event deleted metadata was not redacted: %+v", got)
+	}
+}
+
+func TestListChannelsHidesRecipientDMWithOnlyDeletedMessages(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	creatorID := uuid.New()
+	recipientID := uuid.New()
+	messageID := uuid.New()
+	deletedAt := time.Now().UTC()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {
+				ID:          channelID,
+				WorkspaceID: workspaceID,
+				Type:        entity.ChannelTypeDM,
+				CreatedBy:   creatorID,
+			},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, creatorID}:   {ChannelID: channelID, UserID: creatorID},
+			{channelID, recipientID}: {ChannelID: channelID, UserID: recipientID},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, recipientID}: {WorkspaceID: workspaceID, UserID: recipientID, Role: entity.WorkspaceRoleMember},
+	}}
+	messages := &fakeMessageRepo{
+		messages: map[uuid.UUID]*entity.Message{
+			messageID: {
+				ID:        messageID,
+				ChannelID: channelID,
+				UserID:    creatorID,
+				Content:   "deleted only",
+				CreatedAt: deletedAt,
+				UpdatedAt: deletedAt,
+				DeletedAt: &deletedAt,
+			},
+		},
+	}
+	svc := NewService(channels, messages, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+
+	got, err := svc.ListChannels(ctx, workspaceID, recipientID)
+	if err != nil {
+		t.Fatalf("ListChannels returned error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("channels = %+v, want recipient-side deleted-only DM hidden", got)
+	}
+}
+
 func TestJoinAndLeaveChannelUseTransactionalEventEnqueue(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -383,6 +562,16 @@ func TestJoinAndLeaveChannelUseTransactionalEventEnqueue(t *testing.T) {
 type noopPublisher struct{}
 
 func (noopPublisher) Publish(context.Context, string, []byte) error { return nil }
+
+type recordingPublisher struct {
+	events [][]byte
+}
+
+func (p *recordingPublisher) Publish(_ context.Context, _ string, data []byte) error {
+	copied := append([]byte(nil), data...)
+	p.events = append(p.events, copied)
+	return nil
+}
 
 type fakeWorkspaceRepo struct {
 	members map[[2]uuid.UUID]*entity.WorkspaceMember
@@ -586,10 +775,33 @@ func (r *fakeMessageRepo) ListByChannel(_ context.Context, channelID uuid.UUID, 
 func (r *fakeMessageRepo) ListThreadReplies(context.Context, uuid.UUID, pagination.Params) ([]entity.Message, error) {
 	return nil, nil
 }
+func (r *fakeMessageRepo) HasActiveMessage(_ context.Context, channelID uuid.UUID) (bool, error) {
+	for _, msg := range r.messages {
+		if msg.ChannelID == channelID && msg.DeletedAt == nil {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 func (r *fakeMessageRepo) Update(context.Context, *entity.Message) error   { return nil }
-func (r *fakeMessageRepo) SoftDelete(context.Context, uuid.UUID) error     { return nil }
 func (r *fakeMessageRepo) Pin(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 func (r *fakeMessageRepo) Unpin(context.Context, uuid.UUID) error          { return nil }
+func (r *fakeMessageRepo) SoftDelete(_ context.Context, id uuid.UUID) error {
+	msg := r.messages[id]
+	if msg == nil {
+		return cerrors.NotFound("message not found")
+	}
+	now := time.Now().UTC()
+	msg.Content = ""
+	msg.Edited = false
+	msg.EditedAt = nil
+	msg.Pinned = false
+	msg.PinnedBy = nil
+	msg.PinnedAt = nil
+	msg.UpdatedAt = now
+	msg.DeletedAt = &now
+	return nil
+}
 func (r *fakeMessageRepo) ListPinned(context.Context, uuid.UUID) ([]entity.Message, error) {
 	return nil, nil
 }

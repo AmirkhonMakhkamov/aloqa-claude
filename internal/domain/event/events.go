@@ -46,6 +46,8 @@ const (
 	TypeCallParticipantLeft    Type = "call.participant.left"
 	TypeCallParticipantUpdated Type = "call.participant.updated"
 	TypeCallQualityAdapted     Type = "call.quality.adapted"
+	TypeCallMessageCreated     Type = "call.message.created"
+	TypeCallMessageDeleted     Type = "call.message.deleted"
 
 	// Waiting room events.
 	TypeWaitingRoomJoined   Type = "waiting_room.joined"
@@ -195,6 +197,16 @@ type PresencePayload struct {
 
 type CallPayload struct {
 	Call *entity.Call `json:"call"`
+}
+
+type CallMessagePayload struct {
+	CallID  uuid.UUID          `json:"call_id"`
+	Message entity.CallMessage `json:"message"`
+}
+
+type CallMessageDeletedPayload struct {
+	CallID    uuid.UUID `json:"call_id"`
+	MessageID uuid.UUID `json:"message_id"`
 }
 
 type CallParticipantPayload struct {

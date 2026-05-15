@@ -47,6 +47,7 @@ type recentCallRepository interface {
 // Service handles call lifecycle, participant management, and WebRTC signaling.
 type Service struct {
 	calls         repository.CallRepository
+	callMessages  repository.CallMessageRepository
 	breakoutRooms repository.BreakoutRoomRepository
 	channels      repository.ChannelRepository
 	members       repository.WorkspaceRepository
@@ -108,6 +109,10 @@ func NewService(
 
 func (s *Service) SetMediaControlPlane(control MediaControlPlane) {
 	s.control = control
+}
+
+func (s *Service) SetCallMessageRepo(repo repository.CallMessageRepository) {
+	s.callMessages = repo
 }
 
 func (s *Service) SetTransactionManager(manager txscope.Manager) {
@@ -1227,6 +1232,16 @@ func (s *Service) publishParticipantEvent(ctx context.Context, evtType event.Typ
 	})
 }
 
+func (s *Service) publishCallMessageEvent(ctx context.Context, evtType event.Type, call *entity.Call, msg *entity.CallMessage) {
+	channelID := uuid.Nil
+	if call.ChannelID != nil {
+		channelID = *call.ChannelID
+	}
+	subject := fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID)
+	payload := callMessagePayloadFor(evtType, call, msg)
+	s.doPublish(ctx, evtType, subject, call.WorkspaceID, channelID, msg.SenderID, payload)
+}
+
 func (s *Service) enqueueCallEventTx(ctx context.Context, scope txscope.Scope, evtType event.Type, call *entity.Call, userID uuid.UUID) error {
 	channelID := uuid.Nil
 	if call != nil && call.ChannelID != nil {
@@ -1244,6 +1259,23 @@ func (s *Service) enqueueParticipantEventTx(ctx context.Context, scope txscope.S
 		CallID:      call.ID,
 		Participant: p,
 	})
+}
+
+func (s *Service) enqueueCallMessageEventTx(ctx context.Context, scope txscope.Scope, evtType event.Type, call *entity.Call, msg *entity.CallMessage) error {
+	channelID := uuid.Nil
+	if call.ChannelID != nil {
+		channelID = *call.ChannelID
+	}
+	subject := fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID)
+	payload := callMessagePayloadFor(evtType, call, msg)
+	return s.enqueueRealtimeTx(ctx, scope, evtType, subject, call.WorkspaceID, channelID, msg.SenderID, payload)
+}
+
+func callMessagePayloadFor(evtType event.Type, call *entity.Call, msg *entity.CallMessage) any {
+	if evtType == event.TypeCallMessageDeleted {
+		return event.CallMessageDeletedPayload{CallID: call.ID, MessageID: msg.ID}
+	}
+	return event.CallMessagePayload{CallID: call.ID, Message: *msg}
 }
 
 func (s *Service) enqueueRealtimeTx(ctx context.Context, scope txscope.Scope, evtType event.Type, subject string, workspaceID, channelID, userID uuid.UUID, payload any) error {

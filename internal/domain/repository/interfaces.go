@@ -88,6 +88,7 @@ type MessageRepository interface {
 	GetByID(ctx context.Context, id uuid.UUID) (*entity.Message, error)
 	ListByChannel(ctx context.Context, channelID uuid.UUID, p pagination.Params) ([]entity.Message, error)
 	ListThreadReplies(ctx context.Context, parentID uuid.UUID, p pagination.Params) ([]entity.Message, error)
+	HasActiveMessage(ctx context.Context, channelID uuid.UUID) (bool, error)
 	Update(ctx context.Context, msg *entity.Message) error
 	SoftDelete(ctx context.Context, id uuid.UUID) error
 

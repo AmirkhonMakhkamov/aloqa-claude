@@ -434,6 +434,9 @@ func (r *fakeMessageRepo) ListByChannel(context.Context, uuid.UUID, pagination.P
 func (r *fakeMessageRepo) ListThreadReplies(context.Context, uuid.UUID, pagination.Params) ([]entity.Message, error) {
 	return nil, nil
 }
+func (r *fakeMessageRepo) HasActiveMessage(context.Context, uuid.UUID) (bool, error) {
+	return false, nil
+}
 func (r *fakeMessageRepo) Update(context.Context, *entity.Message) error { return nil }
 func (r *fakeMessageRepo) SoftDelete(context.Context, uuid.UUID) error   { return nil }
 func (r *fakeMessageRepo) Pin(context.Context, uuid.UUID, uuid.UUID) error {

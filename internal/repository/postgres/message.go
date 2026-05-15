@@ -155,7 +155,7 @@ func (r *MessageRepo) ListByChannel(ctx context.Context, channelID uuid.UUID, p 
 				u.id, u.email, u.display_name, u.avatar_url, u.status
 			FROM messages m
 			LEFT JOIN users u ON u.id = m.user_id
-			WHERE m.channel_id = $1 AND m.id < $2 AND m.deleted_at IS NULL
+			WHERE m.channel_id = $1 AND m.id < $2
 			ORDER BY m.id DESC
 			LIMIT $3`
 		rows, err = r.db.Query(ctx, query, channelID, p.Cursor, p.Limit+1)
@@ -168,7 +168,7 @@ func (r *MessageRepo) ListByChannel(ctx context.Context, channelID uuid.UUID, p 
 				u.id, u.email, u.display_name, u.avatar_url, u.status
 			FROM messages m
 			LEFT JOIN users u ON u.id = m.user_id
-			WHERE m.channel_id = $1 AND m.deleted_at IS NULL
+			WHERE m.channel_id = $1
 			ORDER BY m.id DESC
 			LIMIT $2`
 		rows, err = r.db.Query(ctx, query, channelID, p.Limit+1)
@@ -234,6 +234,21 @@ func (r *MessageRepo) ListByChannel(ctx context.Context, channelID uuid.UUID, p 
 	return messages, nil
 }
 
+func (r *MessageRepo) HasActiveMessage(ctx context.Context, channelID uuid.UUID) (bool, error) {
+	query := `
+		SELECT EXISTS(
+			SELECT 1
+			FROM messages
+			WHERE channel_id = $1 AND deleted_at IS NULL
+		)`
+
+	var exists bool
+	if err := r.db.QueryRow(ctx, query, channelID).Scan(&exists); err != nil {
+		return false, fmt.Errorf("postgres: probe active message: %w", err)
+	}
+	return exists, nil
+}
+
 func (r *MessageRepo) ListThreadReplies(ctx context.Context, parentID uuid.UUID, p pagination.Params) ([]entity.Message, error) {
 	p.Normalize()
 
@@ -251,7 +266,7 @@ func (r *MessageRepo) ListThreadReplies(ctx context.Context, parentID uuid.UUID,
 				u.id, u.email, u.display_name, u.avatar_url, u.status
 			FROM messages m
 			LEFT JOIN users u ON u.id = m.user_id
-			WHERE m.parent_id = $1 AND m.id < $2 AND m.deleted_at IS NULL
+			WHERE m.parent_id = $1 AND m.id < $2
 			ORDER BY m.id DESC
 			LIMIT $3`
 		rows, err = r.db.Query(ctx, query, parentID, p.Cursor, p.Limit+1)
@@ -264,7 +279,7 @@ func (r *MessageRepo) ListThreadReplies(ctx context.Context, parentID uuid.UUID,
 				u.id, u.email, u.display_name, u.avatar_url, u.status
 			FROM messages m
 			LEFT JOIN users u ON u.id = m.user_id
-			WHERE m.parent_id = $1 AND m.deleted_at IS NULL
+			WHERE m.parent_id = $1
 			ORDER BY m.id DESC
 			LIMIT $2`
 		rows, err = r.db.Query(ctx, query, parentID, p.Limit+1)
@@ -356,7 +371,14 @@ func (r *MessageRepo) SoftDelete(ctx context.Context, id uuid.UUID) error {
 	now := time.Now().UTC()
 	query := `
 		UPDATE messages
-		SET deleted_at = $2
+		SET content = '',
+			edited = false,
+			edited_at = NULL,
+			pinned = false,
+			pinned_by = NULL,
+			pinned_at = NULL,
+			updated_at = $2,
+			deleted_at = $2
 		WHERE id = $1 AND deleted_at IS NULL`
 
 	tag, err := r.db.Exec(ctx, query, id, now)

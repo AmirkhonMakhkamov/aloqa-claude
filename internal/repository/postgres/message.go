@@ -155,7 +155,7 @@ func (r *MessageRepo) ListByChannel(ctx context.Context, channelID uuid.UUID, p 
 				u.id, u.email, u.display_name, u.avatar_url, u.status
 			FROM messages m
 			LEFT JOIN users u ON u.id = m.user_id
-			WHERE m.channel_id = $1 AND m.id < $2 AND m.deleted_at IS NULL
+			WHERE m.channel_id = $1 AND m.id < $2
 			ORDER BY m.id DESC
 			LIMIT $3`
 		rows, err = r.db.Query(ctx, query, channelID, p.Cursor, p.Limit+1)
@@ -168,7 +168,7 @@ func (r *MessageRepo) ListByChannel(ctx context.Context, channelID uuid.UUID, p 
 				u.id, u.email, u.display_name, u.avatar_url, u.status
 			FROM messages m
 			LEFT JOIN users u ON u.id = m.user_id
-			WHERE m.channel_id = $1 AND m.deleted_at IS NULL
+			WHERE m.channel_id = $1
 			ORDER BY m.id DESC
 			LIMIT $2`
 		rows, err = r.db.Query(ctx, query, channelID, p.Limit+1)
@@ -251,7 +251,7 @@ func (r *MessageRepo) ListThreadReplies(ctx context.Context, parentID uuid.UUID,
 				u.id, u.email, u.display_name, u.avatar_url, u.status
 			FROM messages m
 			LEFT JOIN users u ON u.id = m.user_id
-			WHERE m.parent_id = $1 AND m.id < $2 AND m.deleted_at IS NULL
+			WHERE m.parent_id = $1 AND m.id < $2
 			ORDER BY m.id DESC
 			LIMIT $3`
 		rows, err = r.db.Query(ctx, query, parentID, p.Cursor, p.Limit+1)
@@ -264,7 +264,7 @@ func (r *MessageRepo) ListThreadReplies(ctx context.Context, parentID uuid.UUID,
 				u.id, u.email, u.display_name, u.avatar_url, u.status
 			FROM messages m
 			LEFT JOIN users u ON u.id = m.user_id
-			WHERE m.parent_id = $1 AND m.deleted_at IS NULL
+			WHERE m.parent_id = $1
 			ORDER BY m.id DESC
 			LIMIT $2`
 		rows, err = r.db.Query(ctx, query, parentID, p.Limit+1)

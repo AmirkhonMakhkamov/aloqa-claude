@@ -850,6 +850,11 @@ func (s *Service) DeleteMessage(ctx context.Context, messageID, userID uuid.UUID
 			if err := scope.Messages().SoftDelete(ctx, messageID); err != nil {
 				return err
 			}
+			deletedMsg, err := scope.Messages().GetByID(ctx, messageID)
+			if err != nil {
+				return err
+			}
+			msg = deletedMsg
 			if workspaceID != uuid.Nil {
 				if err := s.enqueueMessageDeleteSearchTx(ctx, scope, workspaceID, messageID); err != nil {
 					return err
@@ -874,6 +879,12 @@ func (s *Service) DeleteMessage(ctx context.Context, messageID, userID uuid.UUID
 			slog.ErrorContext(ctx, "failed to soft-delete message", "message_id", messageID, "error", err)
 			return cerrors.Internal("failed to delete message", err)
 		}
+		deletedMsg, err := s.messages.GetByID(ctx, messageID)
+		if err != nil {
+			slog.ErrorContext(ctx, "failed to reload deleted message", "message_id", messageID, "error", err)
+			return cerrors.Internal("failed to delete message", err)
+		}
+		msg = deletedMsg
 
 		s.enqueueSearch(ctx, "delete message from search", func() error {
 			if workspaceID == uuid.Nil {

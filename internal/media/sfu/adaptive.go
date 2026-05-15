@@ -323,7 +323,7 @@ func (c *AdaptiveController) rawDecision(st *adaptiveState, sample NetworkSample
 		reasons = append(reasons, "audio priority: preserving speech intelligibility")
 	}
 
-	quality := QualityHigh
+	var quality QualityLayer
 	bw := int(math.Round(st.bandwidthKbps))
 	switch {
 	case bw > 0 && bw < c.options.CriticalLayerKbps:

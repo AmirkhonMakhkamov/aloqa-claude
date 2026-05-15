@@ -96,6 +96,7 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 			r.Use(middleware.Auth(deps.Validator))
 			r.Post("/logout", deps.Auth.Logout)
 			r.Post("/logout-all", deps.Auth.LogoutAll)
+			r.Post("/logout-others", deps.Auth.LogoutOthers)
 			r.Get("/sessions", deps.Auth.ListSessions)
 		})
 	})

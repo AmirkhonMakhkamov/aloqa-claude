@@ -187,10 +187,14 @@ func NewSFU(cfg Config) (*SFU, error) {
 	// Configure the setting engine for port binding.
 	se := webrtc.SettingEngine{}
 	if cfg.PortMin > 0 && cfg.PortMax > 0 {
-		se.SetEphemeralUDPPortRange(cfg.PortMin, cfg.PortMax)
+		if err := se.SetEphemeralUDPPortRange(cfg.PortMin, cfg.PortMax); err != nil {
+			return nil, fmt.Errorf("set UDP port range: %w", err)
+		}
 		slog.Info("SFU configured with UDP port range", "min", cfg.PortMin, "max", cfg.PortMax)
 	} else if cfg.ListenPort > 0 {
-		se.SetEphemeralUDPPortRange(uint16(cfg.ListenPort), uint16(cfg.ListenPort))
+		if err := se.SetEphemeralUDPPortRange(uint16(cfg.ListenPort), uint16(cfg.ListenPort)); err != nil {
+			return nil, fmt.Errorf("set UDP listen port: %w", err)
+		}
 		slog.Info("SFU configured with fixed UDP port", "port", cfg.ListenPort)
 	}
 

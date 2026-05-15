@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/google/uuid"
-	"nhooyr.io/websocket"
 
 	"aloqa/internal/domain/event"
 	"aloqa/internal/middleware"
@@ -68,7 +68,7 @@ func NewHandler(
 }
 
 // normalizeOriginPatterns converts full-URL origins ("http://localhost:3000")
-// into host patterns ("localhost:3000") expected by nhooyr/websocket.
+// into host patterns ("localhost:3000") expected by coder/websocket.
 // The library matches OriginPatterns against r.Header.Get("Origin")'s host
 // using filepath.Match, so leaving the scheme in front would never match.
 // Accepts either form so a config value like CORS_ALLOWED_ORIGINS can be

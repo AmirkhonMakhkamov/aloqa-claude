@@ -1,3 +1,4 @@
+//nolint:staticcheck // nhooyr.io/websocket is the current project dependency.
 package ws
 
 import (

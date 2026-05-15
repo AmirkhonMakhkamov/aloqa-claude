@@ -118,17 +118,26 @@ func (s *Service) SendCallReaction(ctx context.Context, workspaceID, callID, use
 }
 
 // requireActiveInCallParticipant resolves the call, ensures it is active,
-// and ensures the caller is connected.
+// and ensures the caller is connected. Matches breakout precedent at
+// internal/service/call/breakout.go:123-152 — `Status != CallStatusActive`
+// (rejects both `ringing` and `ended`) and distinguishes NotFound from
+// Internal errors.
 func (s *Service) requireActiveInCallParticipant(ctx context.Context, workspaceID, callID, userID uuid.UUID) (*entity.Call, error) {
     call, err := s.requireCallAccess(ctx, workspaceID, callID, userID)
     if err != nil {
         return nil, err
     }
-    if call.Status == entity.CallStatusEnded {
+    if call.Status != entity.CallStatusActive {
         return nil, cerrors.Forbidden("call is not active")
     }
     participant, err := s.calls.GetParticipant(ctx, callID, userID)
-    if err != nil || participant.Status != entity.ParticipantStatusConnected {
+    if err != nil {
+        if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+            return nil, cerrors.Forbidden("not in call")
+        }
+        return nil, cerrors.Internal("failed to load participant", err)
+    }
+    if participant.Status != entity.ParticipantStatusConnected {
         return nil, cerrors.Forbidden("not in call")
     }
     return call, nil
@@ -169,35 +178,39 @@ func (s *Service) publishCallInteraction(
                 "type", evtType, "subject", subject, "error", err)
         }
     }
-    _ = json.Marshal // silence unused-import if json gets dropped during edits
     return nil
 }
 ```
 
-(Remove the dead `_ = json.Marshal` line once compile is verified — it's a marker for the implementer to confirm no JSON marshalling slipped in outside `event.Prepare`.)
+No JSON-marshal calls outside `event.Prepare` — that helper already does the JSON encoding (`events.go:146`).
 
 **Commit:** `feat(calls): hand raise + reaction service methods`
 
 ### Step 3 — HTTP handlers + router
 
-**Create:** `internal/handler/http/call_interactions.go`:
+**Create:** `internal/handler/http/call_interactions.go`. Important: `reactionRequest` already exists at `internal/handler/http/message.go:187` (same `package http`) — use **`callReactionRequest`** to avoid redeclaration. The error helper is `writeErr`, not `writeError` (see `response.go:42`). UUID parsing uses `id.Parse(chi.URLParam(...))`, the same pattern as `call.go:62`:
 
 ```go
-type reactionRequest struct {
+type callReactionRequest struct {
     Emoji string `json:"emoji"`
 }
 
 func (h *CallHandler) RaiseHand(w http.ResponseWriter, r *http.Request) {
     ws := middleware.WorkspaceIDFromContext(r.Context())
-    callID := chi.URLParam(r, "callID") // parse via uuid.Parse, 400 on error
+    callID, err := id.Parse(chi.URLParam(r, "callID"))
+    if err != nil {
+        writeErr(w, cerrors.InvalidInput("invalid call id"))
+        return
+    }
     userID := middleware.UserIDFromContext(r.Context())
     if err := h.svc.RaiseHand(r.Context(), ws, callID, userID); err != nil {
-        writeError(w, err); return
+        writeErr(w, err)
+        return
     }
     w.WriteHeader(http.StatusNoContent)
 }
 // LowerHand mirrors RaiseHand.
-// SendCallReaction decodes JSON, calls h.svc.SendCallReaction, returns 204.
+// SendCallReaction decodes callReactionRequest, calls h.svc.SendCallReaction, returns 204.
 ```
 
 **Modify:** `internal/handler/http/router.go` — inside `r.Route("/{callID}", ...)` (around line 275-282):
@@ -214,19 +227,15 @@ The existing global `httprate.LimitByIP` (line 70) applies automatically. No per
 
 ### Step 4 — Service tests
 
-**Create:** `internal/service/call/interactions_test.go`. Use the existing fakes from `service_test.go` plus a small `capturingPubSub` (mirror `internal/service/calendar/service_test.go:1330-1340` `capturingPublisher`):
+**Create:** `internal/service/call/interactions_test.go`. The existing **`capturingPublisher`** at `internal/service/call/service_test.go:572` is already in the call package — reuse it directly. Its current `Publish(_, subject, _)` ignores the body, so extend it (or add a sibling `capturingPublisherWithBody`) that retains `subject + body` per call:
 
 ```go
-type capturingPubSub struct {
-    published []capturedMessage
-}
-type capturedMessage struct {
+// Either extend service_test.go:572 in-place (add a Body capture field) or
+// add a new type next to it that records both fields. Keep both call-package
+// helpers in service_test.go to share state across this test file.
+type capturedPublish struct {
     subject string
     body    []byte
-}
-func (p *capturingPubSub) Publish(ctx context.Context, subject string, data []byte) error {
-    p.published = append(p.published, capturedMessage{subject, append([]byte(nil), data...)})
-    return nil
 }
 ```
 

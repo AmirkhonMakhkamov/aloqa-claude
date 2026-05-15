@@ -50,11 +50,12 @@ Access checks (all three):
 Reaction emoji validation reuses the same logic as `chat.Service.AddReaction` (`chat/service.go:904-917`):
 
 ```go
-emoji = strings.TrimSpace(emoji)
 if emoji == "" || len(emoji) > 32 || !utf8.ValidString(emoji) {
     return cerrors.InvalidInput("invalid emoji")
 }
 ```
+
+(No `TrimSpace` — exact parity with `chat.Service.validateEmoji` at `chat/service.go:904-917`.)
 
 No rate-limit enforcement at the service layer. Rate-limiting is deferred to a follow-up ticket because the existing router only has `httprate.LimitByIP` (`router.go:70,86`); a per-user-per-call limiter is not in the codebase and inventing one is out of scope for this PR. The handler may still apply the existing `httprate.LimitByIP` middleware to the new routes — this prevents one IP from flooding, even if it does not enforce per-user fairness.
 

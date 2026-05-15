@@ -36,6 +36,7 @@ import (
 	"aloqa/internal/service/call"
 	"aloqa/internal/service/chat"
 	"aloqa/internal/service/collaboration"
+	demosvc "aloqa/internal/service/demo"
 	"aloqa/internal/service/file"
 	"aloqa/internal/service/guest"
 	"aloqa/internal/service/mediaops"
@@ -369,6 +370,7 @@ func run() error {
 	callSvc.SetTransactionManager(txManager)
 	calendarSvc := calendarsvc.NewService(calendarRepo, workspaceRepo, callSvc, realtimePublisher)
 	calendarSvc.SetTransactionManager(txManager)
+	authSvc.SetNewUserSeeder(demosvc.NewService(userRepo, workspaceRepo, channelRepo, calendarSvc))
 	mediaOpsSvc.SetEventPublisher(realtimePublisher)
 	mediaOpsSvc.SetRelayTransport(ps)
 	presenceSvc := presence.NewService(rdb,

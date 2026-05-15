@@ -236,9 +236,46 @@ func TestListWorkspacesEnsuresPersonalWorkspace(t *testing.T) {
 	}
 }
 
+func TestRegisterRunsNewUserSeeder(t *testing.T) {
+	ctx := context.Background()
+	users := &fakeUserRepo{
+		users: map[uuid.UUID]*entity.User{},
+	}
+	workspaces := &fakeWorkspaceRepo{
+		workspaces: map[uuid.UUID]*entity.Workspace{},
+		bySlug:     map[string]*entity.Workspace{},
+		members:    map[[2]uuid.UUID]*entity.WorkspaceMember{},
+	}
+	seeder := &fakeNewUserSeeder{}
+	svc := NewService(users, workspaces, nil, []byte("01234567890123456789012345678901"), time.Minute, time.Hour, nil)
+	svc.SetNewUserSeeder(seeder)
+
+	user, err := svc.Register(ctx, "new@example.com", "Password1!", "New User")
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if !seeder.called {
+		t.Fatalf("new user seeder was not called")
+	}
+	if seeder.userID != user.ID {
+		t.Fatalf("seeded user ID = %s, want %s", seeder.userID, user.ID)
+	}
+}
+
 func hasCode(err error, code cerrors.Code) bool {
 	appErr, ok := cerrors.AsAppError(err)
 	return ok && appErr.Code == code
+}
+
+type fakeNewUserSeeder struct {
+	called bool
+	userID uuid.UUID
+}
+
+func (s *fakeNewUserSeeder) SeedNewUser(_ context.Context, user *entity.User) error {
+	s.called = true
+	s.userID = user.ID
+	return nil
 }
 
 type fakeUserRepo struct {

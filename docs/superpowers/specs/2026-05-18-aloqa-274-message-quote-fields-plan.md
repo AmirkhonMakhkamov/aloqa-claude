@@ -93,8 +93,24 @@ Commit: `feat(api): QuotedSnapshotInput handler + ParsedQuotedSnapshotInput serv
 2. **`DeleteMessage`** (`internal/service/chat/service.go:857`) extension per spec §4.6:
    - Replace `scope.Messages().SoftDelete(ctx, messageID)` with `scope.Messages().SoftDeleteWithCascade(ctx, messageID)`. Capture `affectedQuoteRows`.
    - Existing `s.enqueueEventTx(ctx, scope, event.TypeMessageDeleted, ...)` call stays unchanged.
-   - For each `rowID` in `affectedQuoteRows`: `scope.Messages().GetByID(ctx, rowID)` → `s.enqueueEventTx(ctx, scope, event.TypeMessageUpdated, fmt.Sprintf("aloqa.chat.%s", updated.ChannelID), updated.WorkspaceID, updated.ChannelID, userID, event.MessagePayload{Message: updated})`.
-   - **Non-tx fallback path** (the `else` branch using `publishEvent` directly): replicate the cascade event emission via `s.publishEvent(...)` for each affected row.
+   - For each `rowID` in `affectedQuoteRows`:
+     ```go
+     updated, err := scope.Messages().GetByID(ctx, rowID)
+     if err != nil { return err }
+     if updated == nil { continue }
+     // entity.Message does NOT carry WorkspaceID — must fetch it from the channel.
+     // Cascade rows can live in DIFFERENT channels (popular message quoted in many),
+     // so we fetch per-row, not once for the deleted message's channel.
+     ch, err := scope.Channels().GetByID(ctx, updated.ChannelID)
+     if err != nil { return err }
+     if ch == nil { continue }
+     scopeKey := fmt.Sprintf("aloqa.chat.%s", updated.ChannelID)
+     if err := s.enqueueEventTx(ctx, scope, event.TypeMessageUpdated, scopeKey,
+         ch.WorkspaceID, updated.ChannelID, userID,
+         event.MessagePayload{Message: updated}); err != nil { return err }
+     ```
+   - **Non-tx fallback path** (the `else` branch using `publishEvent` directly): replicate the cascade event emission via `s.publishEvent(...)` for each affected row, with the same per-row channel lookup.
+   - Per-row channel fetch is necessary because `entity.Message.WorkspaceID` does NOT exist (the field lives on Channel); fetching N additional rows for popular-message cascade is acceptable for MVP — if perf becomes an issue, follow-up can batch via a single `SELECT m.id, m.channel_id, c.workspace_id FROM messages m JOIN channels c ON c.id = m.channel_id WHERE m.id = ANY($1)`.
 3. Service tests `internal/service/chat/service_test.go`:
    - U1-U8, U11 per spec §7.
    - Mock the messages repo to return predetermined `affectedQuoteRows` and assert events enqueued correctly.

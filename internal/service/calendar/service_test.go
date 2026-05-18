@@ -1049,7 +1049,7 @@ func TestMoveEventOccurrence_InstanceAlreadyExdated_BadRequest(t *testing.T) {
 		InstanceAt: exdated, Scope: MoveScopeThis,
 		NewScheduledAt: exdated.Add(24 * time.Hour),
 	})
-	assertInvalidInput(t, err, "INVALID_INSTANCE")
+	assertInvalidInput(t, err, "INVALID_INSTANCE_EXDATED")
 }
 
 func TestMoveEventOccurrence_ConcurrentUpdate_Conflict_409(t *testing.T) {
@@ -1222,7 +1222,7 @@ func TestMoveEventOccurrence_Recurring_ThisAndFollowing_FirstOccurrenceAlreadyEx
 		InstanceAt: start, Scope: MoveScopeThisAndFollowing,
 		NewScheduledAt: start.Add(time.Hour),
 	})
-	assertInvalidInput(t, err, "INVALID_INSTANCE")
+	assertInvalidInput(t, err, "INVALID_INSTANCE_EXDATED")
 }
 
 func TestMoveEventOccurrence_RealtimePublishedCorrectly(t *testing.T) {

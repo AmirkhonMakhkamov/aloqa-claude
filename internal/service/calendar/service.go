@@ -540,6 +540,11 @@ func (s *Service) moveOccurrenceThis(ctx context.Context, existing *entity.Calen
 	if s.tx == nil {
 		return nil, cerrors.Unavailable("transaction manager required for scope=this")
 	}
+	for _, ex := range existing.Recurrence.Exdates {
+		if ex.UTC().Equal(input.InstanceAt.UTC()) {
+			return nil, cerrors.InvalidInput("INVALID_INSTANCE_EXDATED: instance_at was already moved or cancelled in a prior scope=this move")
+		}
+	}
 	loc := recurrenceLocation(existing.OriginatorTZ)
 	ok, err := calrrule.IsMember(existing.Recurrence.RRule, existing.ScheduledAt.In(loc), input.InstanceAt.UTC(), existing.Recurrence.Exdates)
 	if err != nil {
@@ -582,6 +587,11 @@ func (s *Service) moveOccurrenceThis(ctx context.Context, existing *entity.Calen
 }
 
 func (s *Service) moveOccurrenceThisAndFollowing(ctx context.Context, existing *entity.CalendarEvent, input MoveOccurrenceInput) (*MoveOccurrenceResult, error) {
+	for _, ex := range existing.Recurrence.Exdates {
+		if ex.UTC().Equal(input.InstanceAt.UTC()) {
+			return nil, cerrors.InvalidInput("INVALID_INSTANCE_EXDATED: instance_at was already moved or cancelled in a prior scope=this move")
+		}
+	}
 	loc := recurrenceLocation(existing.OriginatorTZ)
 	ok, err := calrrule.IsMember(existing.Recurrence.RRule, existing.ScheduledAt.In(loc), input.InstanceAt.UTC(), existing.Recurrence.Exdates)
 	if err != nil {

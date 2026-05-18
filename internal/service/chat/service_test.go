@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -255,6 +256,161 @@ func TestCollaboratorCanSendWithSharedAccessPolicy(t *testing.T) {
 	}
 }
 
+func TestSendMessageForwardedFromValidationAndPersistence(t *testing.T) {
+	tests := []struct {
+		name                string
+		content             string
+		forwardedFrom       json.RawMessage
+		wantErrCode         cerrors.Code
+		wantErrMessage      string
+		wantForwardedFrom   json.RawMessage
+		wantCreatedMessages int
+	}{
+		{
+			name:                "content only stores null forwarded_from",
+			content:             "hi",
+			wantCreatedMessages: 1,
+		},
+		{
+			name:                "forward with comment stores forwarded_from",
+			content:             "comment",
+			forwardedFrom:       json.RawMessage(`{"message_id":"m1","snapshot":{"content":"original"}}`),
+			wantForwardedFrom:   json.RawMessage(`{"message_id":"m1","snapshot":{"content":"original"}}`),
+			wantCreatedMessages: 1,
+		},
+		{
+			name:                "commentless forward is accepted",
+			content:             "",
+			forwardedFrom:       json.RawMessage(`{"message_id":"m1"}`),
+			wantForwardedFrom:   json.RawMessage(`{"message_id":"m1"}`),
+			wantCreatedMessages: 1,
+		},
+		{
+			name:           "empty content without forward rejected",
+			content:        "",
+			wantErrCode:    cerrors.CodeInvalidInput,
+			wantErrMessage: "content is required",
+		},
+		{
+			name:           "oversize content rejected",
+			content:        strings.Repeat("a", 40001),
+			wantErrCode:    cerrors.CodeInvalidInput,
+			wantErrMessage: "content must be at most 40000 characters",
+		},
+		{
+			name:           "invalid forwarded_from rejected",
+			content:        "comment",
+			forwardedFrom:  json.RawMessage(`not json`),
+			wantErrCode:    cerrors.CodeInvalidInput,
+			wantErrMessage: "forwarded_from must be valid JSON",
+		},
+		{
+			name:                "json scalar forwarded_from is accepted",
+			content:             "comment",
+			forwardedFrom:       json.RawMessage(`"a string"`),
+			wantForwardedFrom:   json.RawMessage(`"a string"`),
+			wantCreatedMessages: 1,
+		},
+		{
+			name:                "empty object forwarded_from is accepted",
+			content:             "comment",
+			forwardedFrom:       json.RawMessage(`{}`),
+			wantForwardedFrom:   json.RawMessage(`{}`),
+			wantCreatedMessages: 1,
+		},
+		{
+			name:                "multibyte content at rune limit accepted",
+			content:             strings.Repeat("я", 40000),
+			wantCreatedMessages: 1,
+		},
+		{
+			name:           "multibyte content over rune limit rejected",
+			content:        strings.Repeat("я", 40001),
+			wantErrCode:    cerrors.CodeInvalidInput,
+			wantErrMessage: "content must be at most 40000 characters",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			workspaceID := uuid.New()
+			channelID := uuid.New()
+			userID := uuid.New()
+			channels := &fakeChannelRepo{
+				channels: map[uuid.UUID]*entity.Channel{
+					channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePublic},
+				},
+				members: map[[2]uuid.UUID]*entity.ChannelMember{
+					{channelID, userID}: {ChannelID: channelID, UserID: userID},
+				},
+			}
+			workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+				{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+			}}
+			messages := &fakeMessageRepo{messages: map[uuid.UUID]*entity.Message{}}
+			svc := NewService(channels, messages, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+
+			msg, err := svc.SendMessage(ctx, channelID, userID, SendMessageInput{
+				Content:       tt.content,
+				ForwardedFrom: tt.forwardedFrom,
+			})
+			if tt.wantErrCode != "" {
+				if !hasCode(err, tt.wantErrCode) {
+					t.Fatalf("SendMessage error = %v, want code %s", err, tt.wantErrCode)
+				}
+				if err.Error() != string(tt.wantErrCode)+": "+tt.wantErrMessage {
+					t.Fatalf("SendMessage error = %q, want message %q", err.Error(), tt.wantErrMessage)
+				}
+				if len(messages.messages) != 0 {
+					t.Fatalf("created %d messages on invalid input, want 0", len(messages.messages))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("SendMessage returned error: %v", err)
+			}
+			if len(messages.messages) != tt.wantCreatedMessages {
+				t.Fatalf("created %d messages, want %d", len(messages.messages), tt.wantCreatedMessages)
+			}
+			if msg.Content != tt.content {
+				t.Fatalf("content = %q, want %q", msg.Content, tt.content)
+			}
+			if string(msg.ForwardedFrom) != string(tt.wantForwardedFrom) {
+				t.Fatalf("forwarded_from = %s, want %s", msg.ForwardedFrom, tt.wantForwardedFrom)
+			}
+		})
+	}
+}
+
+func TestEditMessageRejectsEmptyContent(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	userID := uuid.New()
+	messageID := uuid.New()
+	now := time.Now().UTC()
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePublic},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, userID}: {ChannelID: channelID, UserID: userID},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	messages := &fakeMessageRepo{messages: map[uuid.UUID]*entity.Message{
+		messageID: {ID: messageID, ChannelID: channelID, UserID: userID, Content: "hello", CreatedAt: now, UpdatedAt: now},
+	}}
+	svc := NewService(channels, messages, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+
+	if _, err := svc.EditMessage(ctx, messageID, userID, ""); err == nil {
+		t.Fatalf("EditMessage empty content returned nil error, want validation error")
+	}
+}
+
 func TestGuestCanReactWithSharedAccessPolicy(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -367,6 +523,9 @@ func TestGetMessagesReturnsDeletedTombstoneWithoutContent(t *testing.T) {
 				Pinned:    true,
 				PinnedBy:  &userID,
 				PinnedAt:  &deletedAt,
+				ForwardedFrom: json.RawMessage(
+					`{"message_id":"source","snapshot":{"content":"secret snapshot"}}`,
+				),
 			},
 		},
 	}
@@ -385,6 +544,9 @@ func TestGetMessagesReturnsDeletedTombstoneWithoutContent(t *testing.T) {
 	}
 	if got.Content != "" {
 		t.Fatalf("Content = %q, want redacted empty content", got.Content)
+	}
+	if got.ForwardedFrom != nil {
+		t.Fatalf("ForwardedFrom = %s, want nil after deleted tombstone redaction", got.ForwardedFrom)
 	}
 	if got.Edited || got.EditedAt != nil || got.Pinned || got.PinnedBy != nil || got.PinnedAt != nil {
 		t.Fatalf("deleted metadata was not redacted: %+v", got)
@@ -424,6 +586,9 @@ func TestDeleteMessagePublishesRedactedTombstone(t *testing.T) {
 				Pinned:    true,
 				PinnedBy:  &userID,
 				PinnedAt:  &now,
+				ForwardedFrom: json.RawMessage(
+					`{"message_id":"source","snapshot":{"content":"secret snapshot"}}`,
+				),
 			},
 		},
 	}
@@ -455,6 +620,9 @@ func TestDeleteMessagePublishesRedactedTombstone(t *testing.T) {
 	}
 	if got.Content != "" {
 		t.Fatalf("event content = %q, want redacted empty content", got.Content)
+	}
+	if got.ForwardedFrom != nil {
+		t.Fatalf("event forwarded_from = %s, want nil after delete", got.ForwardedFrom)
 	}
 	if got.Edited || got.EditedAt != nil || got.Pinned || got.PinnedBy != nil || got.PinnedAt != nil {
 		t.Fatalf("event deleted metadata was not redacted: %+v", got)
@@ -798,6 +966,7 @@ func (r *fakeMessageRepo) SoftDelete(_ context.Context, id uuid.UUID) error {
 	msg.Pinned = false
 	msg.PinnedBy = nil
 	msg.PinnedAt = nil
+	msg.ForwardedFrom = nil
 	msg.UpdatedAt = now
 	msg.DeletedAt = &now
 	return nil

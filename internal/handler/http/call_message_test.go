@@ -191,8 +191,7 @@ func newCallMessageHTTPFixture() callMessageHTTPFixture {
 }
 
 func (f callMessageHTTPFixture) serve(method, path, body string) *httptest.ResponseRecorder {
-	var reader *strings.Reader
-	reader = strings.NewReader(body)
+	reader := strings.NewReader(body)
 	req := httptest.NewRequest(method, path, reader)
 	req.Header.Set("Content-Type", "application/json")
 	res := httptest.NewRecorder()

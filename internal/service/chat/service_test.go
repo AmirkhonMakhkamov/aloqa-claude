@@ -194,7 +194,7 @@ func TestGuestCanSendAndTrackUnreadWithSharedAccessPolicy(t *testing.T) {
 	svc.SetAccessPolicy(accesspolicy.NewChecker(workspaces, channels, guests, nil))
 	svc.SetChannelAccessStates(readStates)
 
-	if _, err := svc.SendMessage(ctx, channelID, guestID, "hi team", nil); err != nil {
+	if _, err := svc.SendMessage(ctx, channelID, guestID, SendMessageInput{Content: "hi team"}); err != nil {
 		t.Fatalf("SendMessage guest returned error: %v", err)
 	}
 
@@ -246,7 +246,7 @@ func TestCollaboratorCanSendWithSharedAccessPolicy(t *testing.T) {
 		decision: collabaccess.Decision{Managed: true, Allowed: true},
 	}))
 
-	msg, err := svc.SendMessage(ctx, channelID, remoteUserID, "from remote", nil)
+	msg, err := svc.SendMessage(ctx, channelID, remoteUserID, SendMessageInput{Content: "from remote"})
 	if err != nil {
 		t.Fatalf("SendMessage collaborator returned error: %v", err)
 	}

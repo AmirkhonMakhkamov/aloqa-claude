@@ -232,8 +232,16 @@ type CreateChannelInput struct {
 	Topic string `validate:"max=250"`
 }
 
-// SendMessageInput validates message content.
+// SendMessageInput validates message creation parameters. Content validation is
+// conditional in SendMessage because comment-less forwards may be empty.
 type SendMessageInput struct {
+	Content       string
+	ParentID      *uuid.UUID
+	ForwardedFrom json.RawMessage
+}
+
+// EditMessageInput preserves the legacy content validation tag for edit flows.
+type EditMessageInput struct {
 	Content string `validate:"required,min=1,max=40000"`
 }
 
@@ -625,12 +633,23 @@ func (s *Service) LeaveChannel(ctx context.Context, channelID, userID uuid.UUID)
 func (s *Service) SendMessage(
 	ctx context.Context,
 	channelID, userID uuid.UUID,
-	content string,
-	parentID *uuid.UUID,
+	input SendMessageInput,
 ) (*entity.Message, error) {
-	input := SendMessageInput{Content: content}
 	if err := validate.Struct(input); err != nil {
 		return nil, err
+	}
+	contentLen := utf8.RuneCountInString(input.Content)
+	if len(input.ForwardedFrom) == 0 && contentLen < 1 {
+		return nil, cerrors.InvalidInput("content is required")
+	}
+	if contentLen > 40000 {
+		return nil, cerrors.InvalidInput("content must be at most 40000 characters")
+	}
+	if len(input.ForwardedFrom) > 0 {
+		var probe interface{}
+		if err := json.Unmarshal(input.ForwardedFrom, &probe); err != nil {
+			return nil, cerrors.InvalidInput("forwarded_from must be valid JSON")
+		}
 	}
 
 	// Verify channel exists.
@@ -645,13 +664,13 @@ func (s *Service) SendMessage(
 	}
 
 	// If replying to a thread, verify parent message exists in the same channel.
-	if parentID != nil {
-		parent, err := s.messages.GetByID(ctx, *parentID)
+	if input.ParentID != nil {
+		parent, err := s.messages.GetByID(ctx, *input.ParentID)
 		if err != nil {
 			if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
 				return nil, cerrors.NotFound("parent message not found")
 			}
-			slog.ErrorContext(ctx, "failed to get parent message", "parent_id", *parentID, "error", err)
+			slog.ErrorContext(ctx, "failed to get parent message", "parent_id", *input.ParentID, "error", err)
 			return nil, cerrors.Internal("failed to get parent message", err)
 		}
 		if parent.ChannelID != channelID {
@@ -661,14 +680,15 @@ func (s *Service) SendMessage(
 
 	now := time.Now()
 	msg := &entity.Message{
-		ID:        id.New(),
-		ChannelID: channelID,
-		UserID:    userID,
-		ParentID:  parentID,
-		Content:   content,
-		Type:      entity.MessageTypeText,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:            id.New(),
+		ChannelID:     channelID,
+		UserID:        userID,
+		ParentID:      input.ParentID,
+		Content:       input.Content,
+		Type:          entity.MessageTypeText,
+		ForwardedFrom: input.ForwardedFrom,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 
 	if s.tx != nil {
@@ -776,7 +796,7 @@ func (s *Service) GetThreadReplies(ctx context.Context, parentID, userID uuid.UU
 
 // EditMessage updates message content after verifying ownership.
 func (s *Service) EditMessage(ctx context.Context, messageID, userID uuid.UUID, content string) (*entity.Message, error) {
-	input := SendMessageInput{Content: content}
+	input := EditMessageInput{Content: content}
 	if err := validate.Struct(input); err != nil {
 		return nil, err
 	}
@@ -1558,6 +1578,7 @@ func redactDeletedMessage(msg entity.Message) entity.Message {
 	msg.Pinned = false
 	msg.PinnedBy = nil
 	msg.PinnedAt = nil
+	msg.ForwardedFrom = nil
 	msg.Reactions = nil
 	msg.Attachments = nil
 	return msg

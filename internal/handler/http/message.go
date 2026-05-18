@@ -1,6 +1,7 @@
 package http
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 
@@ -23,8 +24,9 @@ func NewMessageHandler(svc *chat.Service) *MessageHandler {
 }
 
 type sendMessageRequest struct {
-	Content  string  `json:"content"`
-	ParentID *string `json:"parent_id,omitempty"`
+	Content       string          `json:"content"`
+	ParentID      *string         `json:"parent_id,omitempty"`
+	ForwardedFrom json.RawMessage `json:"forwarded_from,omitempty"`
 }
 
 func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
@@ -52,7 +54,11 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 
 	userID := middleware.UserIDFromContext(r.Context())
 
-	msg, err := h.svc.SendMessage(r.Context(), channelID, userID, req.Content, parentID)
+	msg, err := h.svc.SendMessage(r.Context(), channelID, userID, chat.SendMessageInput{
+		Content:       req.Content,
+		ParentID:      parentID,
+		ForwardedFrom: req.ForwardedFrom,
+	})
 	if err != nil {
 		writeErr(w, err)
 		return

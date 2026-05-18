@@ -49,6 +49,7 @@ func TestMessageRepoSoftDeleteClearsForwardedFrom(t *testing.T) {
 
 func TestMessageForwardedFromMigrationUpDownIdempotent(t *testing.T) {
 	ctx, pool := setupMessageRepoPostgresTest(t)
+	env := setupMessageRepoTestEnv(t, ctx, pool)
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin migration test tx: %v", err)
@@ -59,17 +60,66 @@ func TestMessageForwardedFromMigrationUpDownIdempotent(t *testing.T) {
 
 	up := readRepoRootFile(t, "migrations/035_messages_forward_from.sql")
 	down := readRepoRootFile(t, "migrations/down/035_messages_forward_from.down.sql")
+	if _, err := tx.Exec(ctx, down); err != nil {
+		t.Fatalf("reset migration down: %v", err)
+	}
+	if messageRepoColumnExists(ctx, t, tx, "forwarded_from") {
+		t.Fatalf("forwarded_from column exists before migration up")
+	}
+
+	existingMessageID := messageRepoTestUUID(2)
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO messages (id, channel_id, user_id, content, type, created_at, updated_at)
+		VALUES ($1, $2, $3, 'existing message', 'text', $4, $4)`,
+		existingMessageID,
+		env.channelID,
+		env.userID,
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("insert existing pre-migration message: %v", err)
+	}
+
 	if _, err := tx.Exec(ctx, up); err != nil {
 		t.Fatalf("apply migration up: %v", err)
 	}
 	if !messageRepoColumnExists(ctx, t, tx, "forwarded_from") {
 		t.Fatalf("forwarded_from column does not exist after up migration")
 	}
+	var (
+		content       string
+		messageType   entity.MessageType
+		forwardedFrom json.RawMessage
+	)
+	if err := tx.QueryRow(ctx, `
+		SELECT content, type, forwarded_from
+		FROM messages
+		WHERE id = $1`,
+		existingMessageID,
+	).Scan(&content, &messageType, &forwardedFrom); err != nil {
+		t.Fatalf("query existing message after migration up: %v", err)
+	}
+	if content != "existing message" || messageType != entity.MessageTypeText {
+		t.Fatalf("existing message after up = content %q type %q, want original values", content, messageType)
+	}
+	if forwardedFrom != nil {
+		t.Fatalf("forwarded_from for existing row = %s, want NULL", forwardedFrom)
+	}
 	if _, err := tx.Exec(ctx, down); err != nil {
 		t.Fatalf("apply migration down: %v", err)
 	}
 	if messageRepoColumnExists(ctx, t, tx, "forwarded_from") {
 		t.Fatalf("forwarded_from column still exists after down migration")
+	}
+	if err := tx.QueryRow(ctx, `
+		SELECT content, type
+		FROM messages
+		WHERE id = $1`,
+		existingMessageID,
+	).Scan(&content, &messageType); err != nil {
+		t.Fatalf("query existing message after migration down: %v", err)
+	}
+	if content != "existing message" || messageType != entity.MessageTypeText {
+		t.Fatalf("existing message after down = content %q type %q, want original values", content, messageType)
 	}
 	if _, err := tx.Exec(ctx, up); err != nil {
 		t.Fatalf("reapply migration up: %v", err)

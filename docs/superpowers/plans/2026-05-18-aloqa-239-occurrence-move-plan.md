@@ -794,16 +794,38 @@ func deriveDuration(existing *entity.CalendarEvent, input MoveOccurrenceInput) i
 }
 
 // moveOccurrenceAll updates the event's scheduled_at (and optionally duration) in place.
-// Uses UpdateEventTx so that ExpectedUpdatedAt optimistic locking is honoured (R2/M2).
-// scope=all does not require a transaction manager — it uses s.tx only when non-nil,
-// falling back to a no-op scope wrapper when nil.
+// When ExpectedUpdatedAt is nil, calls the non-tx UpdateEvent (best-effort write).
+// When non-nil, wraps in WithinTx + UpdateEventTx so the optimistic lock is honoured
+// inside a single transaction and a 409 surfaces cleanly (R2/M2 v2).
 func (s *Service) moveOccurrenceAll(ctx context.Context, existing *entity.CalendarEvent, input MoveOccurrenceInput) (*MoveOccurrenceResult, error) {
     existing.ScheduledAt = input.NewScheduledAt.UTC()
     existing.DurationMinutes = deriveDuration(existing, input)
     existing.UpdatedAt = time.Now().UTC()
-    updated, err := s.calendars.UpdateEventTx(ctx, existing, input.ExpectedUpdatedAt)
-    if err != nil {
-        return nil, err
+
+    var updated *entity.CalendarEvent
+    if input.ExpectedUpdatedAt == nil {
+        u, err := s.calendars.UpdateEvent(ctx, existing)
+        if err != nil {
+            return nil, err
+        }
+        updated = u
+    } else {
+        if s.tx == nil {
+            return nil, cerrors.Unavailable("transaction manager not configured")
+        }
+        if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
+            if scope.Calendars() == nil {
+                return cerrors.Unavailable("calendars repository not bound to tx")
+            }
+            u, err := scope.Calendars().UpdateEventTx(ctx, existing, input.ExpectedUpdatedAt)
+            if err != nil {
+                return err
+            }
+            updated = u
+            return nil
+        }); err != nil {
+            return nil, err
+        }
     }
     s.publishEvent(ctx, event.TypeCalendarEventUpdated, *updated, existing.OrganizerID)
     return &MoveOccurrenceResult{Updated: updated}, nil
@@ -819,9 +841,11 @@ Stub the other two methods returning `cerrors.Unavailable("not yet implemented")
 
 ## Task 5a — `CreateEventTx` / `UpdateEventTx` — tx-aware repository methods
 
-**Files:** MODIFY `internal/domain/repository/interfaces.go`, MODIFY `internal/repository/postgres/calendar_repo.go`, MODIFY `internal/service/calendar/service_test.go`
+**Files:** MODIFY `internal/domain/repository/interfaces.go`, MODIFY `internal/repository/postgres/calendar_repo.go`, MODIFY `internal/repository/postgres/calendar_repo_test.go`, MODIFY `internal/service/calendar/service_test.go`
 
 **Goal**: Add `CreateEventTx` and `UpdateEventTx` to `CalendarRepository` so that callers inside `txscope.Manager.WithinTx` use the outer transaction's connection (`r.db`) directly rather than opening a nested `pool.BeginTx` (which would break atomicity). `UpdateEventTx` supports optional optimistic concurrency via `expectedUpdatedAt`.
+
+**Concurrency token precision contract (R3 new)**: `ExpectedUpdatedAt` is compared with `updated_at` via exact SQL `AND updated_at = $N` (microsecond precision in Postgres). The HTTP layer accepts RFC3339Nano (full nanosecond fidelity) — clients are expected to round-trip the exact `event.updated_at` they received from the previous GET or mutation response. The 409 test (`TestUpdateEventTx_StaleExpected_ReturnsConflict`) deliberately constructs a stale token by `Add(-time.Second)` — any sub-second mismatch is treated as stale on purpose. A future iteration may switch to opaque versioning (`int64` etag), but for v1 the timestamp policy is **exact equality, RFC3339Nano on the wire**.
 
 ### Step 1 — Failing tests
 
@@ -896,67 +920,135 @@ func TestUpdateEventTx_OptimisticLock_Conflict(t *testing.T) {
 }
 ```
 
-**Postgres-level integration tests** (R2/B1): Add to `internal/repository/postgres/calendar_repo_test.go` (or create `calendar_repo_tx_test.go` in the same package if the existing test file is too large). These require a live test database via `testcontainers-go` or the project's existing postgres test harness — use whichever pattern the existing `calendar_repo_test.go` uses.
+**Postgres-level integration tests** (R2/B1, R3/B1 v2): Add to `internal/repository/postgres/calendar_repo_test.go`. Reuse the existing harness present in that file: `setupCalendarRepoPostgresTest(t) (ctx, *pgxpool.Pool)`, `setupCalendarTestEnv(t, ctx, pool) calendarRepoTestEnv`, `newCalendarRepoTestEvent(env, title, reminders) *entity.CalendarEvent`, and `NewCalendarRepo(pool)`. The harness honours `ALOQA_POSTGRES_TEST_DSN` and skips when unset.
+
+Five tests, exactly:
 
 ```go
-// +build integration
+func TestCreateEventTx_InsertsEvent(t *testing.T) {
+    ctx, pool := setupCalendarRepoPostgresTest(t)
+    defer pool.Close()
+    env := setupCalendarTestEnv(t, ctx, pool)
+    repo := NewCalendarRepo(pool)
 
-func TestCalendarRepo_CreateEventTx_InsertsRow(t *testing.T) {
-    ctx := context.Background()
-    repo, cleanup := newTestCalendarRepo(t)
-    defer cleanup()
+    tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+    if err != nil {
+        t.Fatalf("BeginTx: %v", err)
+    }
+    defer func() { _ = tx.Rollback(ctx) }()
+    txRepo := repo.withTx(tx)
 
-    ws := seedWorkspace(t, ctx, repo)
-    org := seedUser(t, ctx, repo)
-    ev := buildTestEvent(ws.ID, org.ID)
-
-    got, err := repo.CreateEventTx(ctx, ev)
+    ev := newCalendarRepoTestEvent(env, "tx-create", nil)
+    inserted, err := txRepo.CreateEventTx(ctx, ev)
     if err != nil {
         t.Fatalf("CreateEventTx: %v", err)
     }
-    if got.ID != ev.ID {
-        t.Fatalf("ID mismatch: %v vs %v", got.ID, ev.ID)
+    if inserted.ID != ev.ID {
+        t.Fatalf("ID=%v want=%v", inserted.ID, ev.ID)
+    }
+    if err := tx.Commit(ctx); err != nil {
+        t.Fatalf("Commit: %v", err)
     }
     fetched, err := repo.GetEvent(ctx, ev.ID)
     if err != nil {
-        t.Fatalf("GetEvent: %v", err)
+        t.Fatalf("GetEvent after commit: %v", err)
     }
-    if fetched.Title != ev.Title {
-        t.Fatalf("Title=%q want=%q", fetched.Title, ev.Title)
+    if fetched.Title != "tx-create" {
+        t.Fatalf("Title=%q want=tx-create", fetched.Title)
     }
 }
 
-func TestCalendarRepo_UpdateEventTx_UpdatesRow(t *testing.T) {
-    ctx := context.Background()
-    repo, cleanup := newTestCalendarRepo(t)
-    defer cleanup()
+func TestUpdateEventTx_NilExpected_UpdatesEvent(t *testing.T) {
+    ctx, pool := setupCalendarRepoPostgresTest(t)
+    defer pool.Close()
+    env := setupCalendarTestEnv(t, ctx, pool)
+    repo := NewCalendarRepo(pool)
 
-    ws := seedWorkspace(t, ctx, repo)
-    org := seedUser(t, ctx, repo)
-    ev := seedEvent(t, ctx, repo, ws.ID, org.ID)
+    // Seed via the non-tx path (its own internal BeginTx).
+    seed := newCalendarRepoTestEvent(env, "seed", nil)
+    if _, err := repo.CreateEvent(ctx, seed); err != nil {
+        t.Fatalf("seed CreateEvent: %v", err)
+    }
 
-    ev.Title = "Updated Title"
-    got, err := repo.UpdateEventTx(ctx, ev, nil)
+    // Update inside an outer tx with nil expected → no lock check.
+    tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
     if err != nil {
-        t.Fatalf("UpdateEventTx: %v", err)
+        t.Fatalf("BeginTx: %v", err)
     }
-    if got.Title != "Updated Title" {
-        t.Fatalf("Title=%q want=%q", got.Title, "Updated Title")
+    defer func() { _ = tx.Rollback(ctx) }()
+    txRepo := repo.withTx(tx)
+
+    seed.Title = "updated-nil"
+    seed.UpdatedAt = time.Now().UTC()
+    got, err := txRepo.UpdateEventTx(ctx, seed, nil)
+    if err != nil {
+        t.Fatalf("UpdateEventTx nil-expected: %v", err)
+    }
+    if got.Title != "updated-nil" {
+        t.Fatalf("Title=%q want=updated-nil", got.Title)
+    }
+    if err := tx.Commit(ctx); err != nil {
+        t.Fatalf("Commit: %v", err)
     }
 }
 
-func TestCalendarRepo_UpdateEventTx_OptimisticLock_Conflict(t *testing.T) {
-    ctx := context.Background()
-    repo, cleanup := newTestCalendarRepo(t)
-    defer cleanup()
+func TestUpdateEventTx_MatchingExpected_UpdatesEvent(t *testing.T) {
+    ctx, pool := setupCalendarRepoPostgresTest(t)
+    defer pool.Close()
+    env := setupCalendarTestEnv(t, ctx, pool)
+    repo := NewCalendarRepo(pool)
 
-    ws := seedWorkspace(t, ctx, repo)
-    org := seedUser(t, ctx, repo)
-    ev := seedEvent(t, ctx, repo, ws.ID, org.ID)
+    seed := newCalendarRepoTestEvent(env, "seed", nil)
+    inserted, err := repo.CreateEvent(ctx, seed)
+    if err != nil {
+        t.Fatalf("seed: %v", err)
+    }
+    expected := inserted.UpdatedAt // exact stored value
 
-    stale := ev.UpdatedAt.Add(-time.Second)
-    ev.Title = "Should Fail"
-    _, err := repo.UpdateEventTx(ctx, ev, &stale)
+    tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+    if err != nil {
+        t.Fatalf("BeginTx: %v", err)
+    }
+    defer func() { _ = tx.Rollback(ctx) }()
+    txRepo := repo.withTx(tx)
+
+    inserted.Title = "matching-token"
+    inserted.UpdatedAt = time.Now().UTC()
+    got, err := txRepo.UpdateEventTx(ctx, inserted, &expected)
+    if err != nil {
+        t.Fatalf("UpdateEventTx matching-expected: %v", err)
+    }
+    if got.Title != "matching-token" {
+        t.Fatalf("Title=%q want=matching-token", got.Title)
+    }
+    if err := tx.Commit(ctx); err != nil {
+        t.Fatalf("Commit: %v", err)
+    }
+}
+
+func TestUpdateEventTx_StaleExpected_ReturnsConflict(t *testing.T) {
+    ctx, pool := setupCalendarRepoPostgresTest(t)
+    defer pool.Close()
+    env := setupCalendarTestEnv(t, ctx, pool)
+    repo := NewCalendarRepo(pool)
+
+    seed := newCalendarRepoTestEvent(env, "seed", nil)
+    inserted, err := repo.CreateEvent(ctx, seed)
+    if err != nil {
+        t.Fatalf("seed: %v", err)
+    }
+    stale := inserted.UpdatedAt.Add(-time.Second) // wrong token
+
+    tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+    if err != nil {
+        t.Fatalf("BeginTx: %v", err)
+    }
+    defer func() { _ = tx.Rollback(ctx) }()
+    txRepo := repo.withTx(tx)
+
+    inserted.Title = "should-fail"
+    inserted.UpdatedAt = time.Now().UTC()
+    _, err = txRepo.UpdateEventTx(ctx, inserted, &stale)
     if err == nil {
         t.Fatal("expected conflict error")
     }
@@ -969,43 +1061,62 @@ func TestCalendarRepo_UpdateEventTx_OptimisticLock_Conflict(t *testing.T) {
     }
 }
 
-func TestCalendarRepo_UpdateEventTx_CorrectTimestamp_Succeeds(t *testing.T) {
-    ctx := context.Background()
-    repo, cleanup := newTestCalendarRepo(t)
-    defer cleanup()
+// TestUpdateEventTx_PropagatesOuterTx exercises the exact boundary
+// TxManager.WithinTx creates: an outer pool.BeginTx → repo.withTx(tx).
+// Uncommitted writes inside the outer tx MUST be invisible to a fresh
+// pool connection until Commit succeeds, and the inserted row MUST become
+// visible after Commit. Verifying both halves proves that updateEventRowTx
+// truly uses r.db (the outer tx) and not r.pool.
+func TestUpdateEventTx_PropagatesOuterTx(t *testing.T) {
+    ctx, pool := setupCalendarRepoPostgresTest(t)
+    defer pool.Close()
+    env := setupCalendarTestEnv(t, ctx, pool)
+    repo := NewCalendarRepo(pool)
 
-    ws := seedWorkspace(t, ctx, repo)
-    org := seedUser(t, ctx, repo)
-    ev := seedEvent(t, ctx, repo, ws.ID, org.ID)
-
-    correctAt := ev.UpdatedAt
-    ev.Title = "Should Succeed"
-    got, err := repo.UpdateEventTx(ctx, ev, &correctAt)
+    seed := newCalendarRepoTestEvent(env, "seed", nil)
+    inserted, err := repo.CreateEvent(ctx, seed)
     if err != nil {
-        t.Fatalf("UpdateEventTx with correct timestamp: %v", err)
+        t.Fatalf("seed: %v", err)
     }
-    if got.Title != "Should Succeed" {
-        t.Fatalf("Title=%q want=%q", got.Title, "Should Succeed")
-    }
-}
 
-func TestCalendarRepo_UpdateEventTx_NotFound_ReturnsNotFound(t *testing.T) {
-    ctx := context.Background()
-    repo, cleanup := newTestCalendarRepo(t)
-    defer cleanup()
-
-    ghost := buildTestEvent(uuid.New(), uuid.New()) // never inserted
-    ghost.ID = uuid.New()
-    _, err := repo.UpdateEventTx(ctx, ghost, nil)
-    if err == nil {
-        t.Fatal("expected not-found error")
+    tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+    if err != nil {
+        t.Fatalf("BeginTx: %v", err)
     }
-    ae, ok := cerrors.AsAppError(err)
-    if !ok || ae.Code != cerrors.CodeNotFound {
-        t.Fatalf("want NotFound, got %v", err)
+    defer func() { _ = tx.Rollback(ctx) }()
+    txRepo := repo.withTx(tx)
+
+    inserted.Title = "outer-tx-mutate"
+    inserted.UpdatedAt = time.Now().UTC()
+    if _, err := txRepo.UpdateEventTx(ctx, inserted, nil); err != nil {
+        t.Fatalf("UpdateEventTx: %v", err)
+    }
+
+    // Read from a NEW pool connection: must still see the OLD title (uncommitted).
+    snapshot, err := repo.GetEvent(ctx, inserted.ID)
+    if err != nil {
+        t.Fatalf("GetEvent pre-commit: %v", err)
+    }
+    if snapshot.Title != "seed" {
+        t.Fatalf("pre-commit Title=%q want=seed (outer tx leaked)", snapshot.Title)
+    }
+
+    if err := tx.Commit(ctx); err != nil {
+        t.Fatalf("Commit: %v", err)
+    }
+
+    // After commit the new title is visible.
+    after, err := repo.GetEvent(ctx, inserted.ID)
+    if err != nil {
+        t.Fatalf("GetEvent post-commit: %v", err)
+    }
+    if after.Title != "outer-tx-mutate" {
+        t.Fatalf("post-commit Title=%q want=outer-tx-mutate", after.Title)
     }
 }
 ```
+
+Imports to add to `calendar_repo_test.go`: `"strings"`, `"github.com/jackc/pgx/v5"`, and `"aloqa/internal/pkg/cerrors"`.
 
 ### Step 2 — Implementation
 
@@ -1752,7 +1863,7 @@ func TestMoveOccurrenceHandler_400InvalidScope(t *testing.T) {
     }
 }
 
-func TestMoveOccurrenceHandler_400MissingFields(t *testing.T) {
+func TestMoveOccurrenceHandler_400MissingInstanceAt(t *testing.T) {
     f := newCalendarHTTPFixture()
     eventID := uuid.New()
     now := time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
@@ -1761,19 +1872,32 @@ func TestMoveOccurrenceHandler_400MissingFields(t *testing.T) {
         Title: "X", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
         ScheduledAt: now, DurationMinutes: 30,
     }
-    // Missing both instance_at and new_scheduled_at — handler must reject with 400
-    // and the error body must identify the missing field.
-    res := f.serve(eventID, `{"scope":"all"}`)
+    res := f.serve(eventID, `{"scope":"all","new_scheduled_at":"2026-05-05T10:00:00Z"}`)
     if res.Code != http.StatusBadRequest {
         t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
     }
     _, msg := decodeErrBody(t, res)
-    if msg == "" {
-        t.Fatal("expected non-empty error message identifying missing field")
+    if !strings.Contains(msg, "instance_at") {
+        t.Fatalf("message=%q must name the missing field instance_at", msg)
     }
-    // At minimum the message must name the field or the constraint violated.
-    if !strings.Contains(msg, "instance_at") && !strings.Contains(msg, "required") {
-        t.Fatalf("message=%q does not identify missing instance_at", msg)
+}
+
+func TestMoveOccurrenceHandler_400MissingNewScheduledAt(t *testing.T) {
+    f := newCalendarHTTPFixture()
+    eventID := uuid.New()
+    now := time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
+    f.repo.events[eventID] = &entity.CalendarEvent{
+        ID: eventID, WorkspaceID: f.wsID, OrganizerID: f.userID,
+        Title: "X", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+        ScheduledAt: now, DurationMinutes: 30,
+    }
+    res := f.serve(eventID, `{"scope":"all","instance_at":"2026-05-03T10:00:00Z"}`)
+    if res.Code != http.StatusBadRequest {
+        t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+    }
+    _, msg := decodeErrBody(t, res)
+    if !strings.Contains(msg, "new_scheduled_at") {
+        t.Fatalf("message=%q must name the missing field new_scheduled_at", msg)
     }
 }
 
@@ -1821,10 +1945,15 @@ func TestMoveOccurrenceHandler_403NonOrganizer(t *testing.T) {
     }
 }
 
-func TestMoveOccurrenceHandler_409ConcurrentUpdate(t *testing.T) {
-    // R2/M3: real 409 test using stale expected_updated_at through the repo,
-    // not a fake tx manager short-circuit. Uses scope=all (no tx manager needed).
-    f := newCalendarHTTPFixture()
+func TestMoveOccurrenceHandler_409ConcurrentUpdate_WithToken(t *testing.T) {
+    // R3/M3: verifies the full JSON → decode → service → UpdateEventTx → 409
+    // chain. After R2/M2, scope=all with non-nil ExpectedUpdatedAt routes
+    // through WithinTx → UpdateEventTx, so the fixture MUST wire
+    // fakeMoveCalHTTPTxManager (which actually invokes fn, not short-circuits)
+    // and the fake repo MUST return Conflict ONLY on stale token. If the field
+    // were silently dropped during JSON decode or service dispatch, the fake
+    // repo would receive nil and succeed — the assertion below would fail.
+    f := newCalendarHTTPFixture() // wires fakeMoveCalHTTPTxManager into svc.tx
     eventID := uuid.New()
     storedAt := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
     f.repo.events[eventID] = &entity.CalendarEvent{
@@ -1843,11 +1972,45 @@ func TestMoveOccurrenceHandler_409ConcurrentUpdate(t *testing.T) {
     if !strings.Contains(msg, "CONCURRENT_UPDATE") {
         t.Fatalf("message=%q missing CONCURRENT_UPDATE", msg)
     }
+    // Sanity: also verify the fake repo's UpdateEventTx was invoked with a
+    // non-nil expected_updated_at matching the JSON-supplied value, proving
+    // the token threaded all the way through.
+    if !f.repo.lastUpdateTxCalled {
+        t.Fatal("UpdateEventTx not invoked — token was dropped before reaching repo")
+    }
+    if f.repo.lastUpdateTxExpected == nil {
+        t.Fatal("UpdateEventTx received nil expected_updated_at — token was dropped")
+    }
 }
+
+// fakeMoveCalHTTPTxManager satisfies txscope.Manager. WithinTx ACTUALLY invokes
+// fn with a scope wrapping the fake repo — NOT a short-circuit. This is the
+// minimum required to verify that scope=all + non-nil ExpectedUpdatedAt
+// reaches UpdateEventTx in the repo (R3/M3).
+type fakeMoveCalHTTPTxManager struct {
+    repo *fakeMoveCalendarRepo
+}
+
+func (m *fakeMoveCalHTTPTxManager) WithinTx(ctx context.Context, fn func(ctx context.Context, scope txscope.Scope) error) error {
+    return fn(ctx, &fakeMoveCalHTTPScope{calendars: m.repo})
+}
+
+type fakeMoveCalHTTPScope struct{ calendars *fakeMoveCalendarRepo }
+
+func (s *fakeMoveCalHTTPScope) Calendars() repository.CalendarRepository { return s.calendars }
+func (s *fakeMoveCalHTTPScope) Calls() repository.CallRepository         { return nil }
 
 // fakeMoveCalendarRepo satisfies repository.CalendarRepository.
 // GetEvent, CreateEvent, UpdateEvent, CreateEventTx, UpdateEventTx have real behaviour.
+// UpdateEventTx returns cerrors.Conflict("CONCURRENT_UPDATE: ...") ONLY when
+// expectedUpdatedAt is non-nil AND does not equal the stored UpdatedAt.
+// Records the last call's expected token in lastUpdateTxExpected for assertions.
 // All other methods are stubs returning zero values.
+type fakeMoveCalendarRepo struct {
+    events               map[uuid.UUID]*entity.CalendarEvent
+    lastUpdateTxCalled   bool
+    lastUpdateTxExpected *time.Time
+}
 // (full method stubs follow the pattern of fakeCalendarRepo in service_test.go)
 ```
 
@@ -2185,6 +2348,22 @@ Fix any findings (lint, vet, formatting). If changes required:
 3. **`OccurrenceIndex` for COUNT series**: Approximated via `opt.Count - len(remaining) + 1`. Used only in diagnostics/logs; callers do not depend on it for correctness.
 
 4. **`notify` flag** (mentioned in spec §4.5 prose): Not present in the §4.2 request schema. Out of scope this iteration.
+
+5. **Concurrency token precision (R3)**: `ExpectedUpdatedAt` uses exact RFC3339Nano equality. Clients must round-trip the `updated_at` from the previous response without truncation. Future iteration may switch to opaque integer etag versioning.
+
+---
+
+## Codex Plan Review R3 — applied
+
+All 5 findings from the R3 review (2026-05-18) have been incorporated into the plan above. R3 was the FOURTH iteration (after R1 → v2, R2 → v3, and a partial v3 reassembly that left some claims unbacked). Summary:
+
+| ID | Severity | Finding | Resolution |
+|---|---|---|---|
+| B1 | BLOCKING | R2/B1 partially fixed: postgres tests used non-existent helpers (`newTestCalendarRepo`, `seedWorkspace`, `seedEvent`, `buildTestEvent`); Task 5a Files list omitted `calendar_repo_test.go`; test names did not match the applied-table claims | Task 5a Files block now includes `internal/repository/postgres/calendar_repo_test.go`. Five postgres tests rewritten verbatim using actual helpers: `setupCalendarRepoPostgresTest`, `setupCalendarTestEnv`, `newCalendarRepoTestEvent`, `NewCalendarRepo(pool)`. Test names exactly match the claimed set: `TestCreateEventTx_InsertsEvent`, `TestUpdateEventTx_NilExpected_UpdatesEvent`, `TestUpdateEventTx_MatchingExpected_UpdatesEvent`, `TestUpdateEventTx_StaleExpected_ReturnsConflict`, `TestUpdateEventTx_PropagatesOuterTx`. `PropagatesOuterTx` uses `pool.BeginTx → repo.withTx(tx)` + asserts pre-commit invisibility on a fresh pool connection AND post-commit visibility |
+| M2 | MAJOR | R2/M2 was FALSE: `moveOccurrenceAll` always called `UpdateEventTx` (no nil/non-nil branching); claimed matching/stale tests absent | `moveOccurrenceAll` rewritten with explicit branch: `ExpectedUpdatedAt == nil` → `s.calendars.UpdateEvent(ctx, existing)`; non-nil → `s.tx.WithinTx(ctx, fn)` + `scope.Calendars().UpdateEventTx(ctx, existing, input.ExpectedUpdatedAt)`. `publishEvent` fires only after the tx commits successfully |
+| M3 | MAJOR | R2/M3 partially fixed: test had stale token in JSON but used wrong name and did not exercise tx path; no `fakeMoveCalHTTPTxManager` in plan | Test renamed `TestMoveOccurrenceHandler_409ConcurrentUpdate_WithToken`. Comment rewritten to document the post-M2 routing (scope=all + non-nil token DOES require tx). Added `fakeMoveCalHTTPTxManager` and `fakeMoveCalHTTPScope` types — `WithinTx` actually invokes fn with a scope wrapping the fake repo. Added `fakeMoveCalendarRepo` instrumentation (`lastUpdateTxCalled`, `lastUpdateTxExpected`) so the test can ALSO assert the token reached the repo, not just that 409 was returned |
+| M4 | MINOR | R2/M4 mostly fixed but missing-field test allowed generic "required" via `!Contains(msg, "instance_at") && Contains(msg, "required")` permissive branch | Split into two tests: `TestMoveOccurrenceHandler_400MissingInstanceAt` asserts body contains `instance_at`; `TestMoveOccurrenceHandler_400MissingNewScheduledAt` asserts body contains `new_scheduled_at`. No generic fallback |
+| New | MAJOR | Optimistic concurrency had no precision policy or regression test for sub-second mismatch (RFC3339 seconds vs RFC3339Nano) | Added explicit "Concurrency token precision contract" to Task 5a goal section. Policy: exact RFC3339Nano equality on the wire; SQL `AND updated_at = $N` (postgres microsecond precision). Stale-token test uses `Add(-time.Second)` to encode the intent that ANY mismatch is treated as stale. Future iteration may switch to opaque etag |
 
 ---
 

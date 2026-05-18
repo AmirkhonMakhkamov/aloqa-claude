@@ -1,22 +1,25 @@
-# ALOQA-257 — BE: `forwarded_from` + `attachment_ids` on Message
+# ALOQA-257 — BE: `forwarded_from` JSONB on Message (R2)
 
-**Status:** Spec
+**Status:** Spec R2 (rewritten after schema-constraint review)
 **Date:** 2026-05-18
 **Repo:** aloqa-claude (backend)
-**Parent FE ticket:** ALOQA-175 in `aloqa-frontend`. See FE spec at `aloqa-frontend/docs/superpowers/specs/2026-05-18-aloqa-175-forward-message-design.md` §4 for the canonical contract.
-**Profile:** `pr-sync --codex-led`. Claude (architect) writes spec + plan; Codex gpt-5.5 high handles implement → review → fix → PR → merge.
+**Parent FE ticket:** ALOQA-175 in `aloqa-frontend`. See FE spec at `aloqa-frontend/docs/superpowers/specs/2026-05-18-aloqa-175-forward-message-design.md` §4 for the contract.
+**Profile:** `pr-sync --codex-led`.
+**Scope cut from R1:** `attachment_ids` removed from MVP. R1 review uncovered a `UNIQUE` constraint on `attachments.storage_path` (migration 010) that blocks the duplicate-row approach. Cross-channel attachment download lives in follow-up ticket **ALOQA-262**.
 
 ---
 
 ## 1. Goal
 
-Extend the backend message domain + POST handler so the FE can publish forwarded messages and re-reference existing attachments in a new message without re-uploading the blobs.
+Add a single optional field on `POST /api/v1/workspaces/{wsId}/channels/{chId}/messages` (and on the `Message` entity returned everywhere):
 
-Two **optional** request fields on `POST /api/v1/workspaces/{wsId}/channels/{chId}/messages`:
-- `forwarded_from` (JSONB) — full self-contained snapshot of the original message (root, after FE-side collapse). Persisted verbatim, returned verbatim. No structural validation beyond JSON shape.
-- `attachment_ids` (`text[]`) — list of pre-existing `attachments.id` values to associate with the new message. Backend creates one `message_attachments` row per id (or, depending on existing schema, copies the rows with the new `message_id`). **Validated** for existence and read-permission ownership.
+- `forwarded_from` (JSONB) — full self-contained snapshot of the original message (root, after FE-side collapse). Persisted verbatim, returned verbatim. Server does NOT parse the internal shape — FE owns it per ALOQA-175 §12.5 and [[aloqa_backend_changes_allowed]].
 
-Both fields are also added to the `Message` entity returned by all read endpoints + realtime broadcast (`message.created` event). When absent, the response shape is byte-identical to today's (omitempty / NULL).
+When absent the response shape is byte-identical to today's (omitempty / NULL).
+
+**Out of scope (filed as ALOQA-262):** attachment re-reference on forwarded messages. FE renders attachment chips visually from `forwarded_from.snapshot.attachments`; download of those chips falls back to the existing `/attachments/{id}` endpoint, which gates on source-channel membership. A forward from a private channel into a DM will show the chip but the recipient sees a 403 on download. Known UX limitation, acceptable for MVP.
+
+**Out of scope (legacy validation):** the existing `content min=1` rule is preserved as a default but **conditionally relaxed** when `forwarded_from` is set, so a comment-less forward (`content=""`) is accepted. This is the only validator change required.
 
 This PR is **backend-only**. No FE code touched here.
 
@@ -26,29 +29,7 @@ This PR is **backend-only**. No FE code touched here.
 
 ### Existing Message entity (`internal/domain/entity/message.go`)
 
-```go
-type Message struct {
-    ID         uuid.UUID
-    ChannelID  uuid.UUID
-    UserID     uuid.UUID
-    ParentID   *uuid.UUID
-    Content    string
-    Type       string
-    Edited     bool
-    EditedAt   *time.Time
-    Pinned     bool
-    PinnedBy   *uuid.UUID
-    PinnedAt   *time.Time
-    CreatedAt  time.Time
-    UpdatedAt  time.Time
-    DeletedAt  *time.Time
-    // Aggregated (loaded by repo):
-    ReplyCount *int
-    Reactions  []Reaction
-    Attachments []Attachment
-    User       *User
-}
-```
+Existing fields: `ID`, `ChannelID`, `UserID`, `ParentID`, `Content`, `Type`, `Edited`, `EditedAt`, `Pinned`, `PinnedBy`, `PinnedAt`, `CreatedAt`, `UpdatedAt`, `DeletedAt`, plus aggregations (`ReplyCount`, `Reactions`, `Attachments`, `User`).
 
 ### Existing POST handler request (`internal/handler/http/message.go:25-28`)
 
@@ -58,6 +39,8 @@ type sendMessageRequest struct {
     ParentID *string `json:"parent_id,omitempty"`
 }
 ```
+
+The handler calls `decodeJSON(r, &req)` (line 38) and **does not call `validate.Struct` itself** — validation runs at the service layer where `validate.Struct(input)` is invoked (`internal/service/chat/service.go:632` and similar at L248, L318). Adding `validate` tags to the service input struct is sufficient to enforce the rule on every send path. **Do NOT add a handler-level `validate.Struct` call** — it would double-validate and could change error shapes.
 
 ### Service `SendMessage` signature (`internal/service/chat/service.go:625-630`)
 
@@ -70,51 +53,42 @@ func (s *Service) SendMessage(
 ) (*entity.Message, error)
 ```
 
-### Repository `Create` (`internal/repository/postgres/message.go:38-64`)
-
-INSERTs into `messages` with 14 columns currently. Migration tool: golang-migrate SQL files in `migrations/NNN_<name>.sql`. Next migration is `035`.
-
-### Attachments (`internal/domain/entity/message.go:48-57`)
+### Service `SendMessageInput` (`internal/service/chat/service.go:236-238`)
 
 ```go
-type Attachment struct {
-    ID          uuid.UUID
-    MessageID   uuid.UUID  // owning message
-    FileName    string
-    FileSize    int64
-    MimeType    string
-    StoragePath string
-    URL         string
-    CreatedAt   time.Time
+type SendMessageInput struct {
+    Content string `validate:"required,min=1,max=40000"`
 }
 ```
 
-Current attachment lifecycle: client uploads → server creates row in `attachments` table linked to the *creating* message via `message_id`. There is NO pre-upload-with-orphan-attachment endpoint today.
+Currently used at L632 via `validate.Struct(input)`. Extension below.
 
-**This means `attachment_ids` semantics must be one of:**
-- **(A) Reference-only:** new message has its own row in a join table `message_attachments(message_id, attachment_id)`; original attachment row stays linked to original message; FE renders snapshot.
-- **(B) Duplicate row:** copy the attachment row with a new `message_id`, keeping the same `storage_path`. The blob is shared by both rows; on storage-delete cascade only the last-referenced row deletes the blob.
+### Repository `Create` (`internal/repository/postgres/message.go:38-64`)
 
-The FE spec §4 says: *"backend creates `message_attachments` rows for each `attachment_id` pointing at existing blob refs"* — favouring option (A).
+INSERTs into `messages`. Migration tool: golang-migrate SQL files in `migrations/NNN_<name>.sql`. Next free migration: **`035`**.
 
-**However** the current schema has no `message_attachments` table — attachments have a direct `message_id` FK. Option (A) would require introducing the join table (large migration, touches all existing data). Option (B) is mechanically simpler: copy row with new `message_id`, share `storage_path`.
+### Existing access policy
 
-**Decision: option (B) — duplicate row.** Rationale: (1) no schema overhaul of the existing `attachments` table; (2) per-message attachments stay queryable via the same `WHERE message_id = ?` pattern; (3) storage cost: only metadata duplicates, blobs shared via `storage_path`; (4) on delete: storage GC must count distinct `storage_path` references before unlinking the blob (existing GC behaviour likely already does this; verify).
+`internal/service/chat/service.go` already exposes:
+- `requireMessageAccess(ctx, messageID, userID)` — proper capability check.
+- `GetAccessibleChannel(ctx, channelID, userID)` — public/private/grant-aware.
+
+Per FE spec §12.5 we do NOT need to verify the source message of `forwarded_from.snapshot.message_id` — backend trusts FE. Only the TARGET channel access is enforced (existing behaviour, unchanged).
 
 ---
 
-## 3. Schema changes
+## 3. Schema change
 
-### Migration `035_messages_forward_attachment.sql`
+### Migration `035_messages_forward_from.sql`
 
 ```sql
 BEGIN;
 
--- ALOQA-257: forward message support
+-- ALOQA-257: forward message support — persist forwarded_from snapshot JSON
 ALTER TABLE messages
-    ADD COLUMN forwarded_from jsonb DEFAULT NULL;
+    ADD COLUMN IF NOT EXISTS forwarded_from jsonb DEFAULT NULL;
 
--- Index for "messages forwarded from <message_id>" lookup (optional but cheap)
+-- Reverse lookup index: "all forwards of message X". Cheap to maintain, useful for moderation.
 CREATE INDEX IF NOT EXISTS idx_messages_forwarded_from_message_id
     ON messages ((forwarded_from->>'message_id'))
     WHERE forwarded_from IS NOT NULL;
@@ -122,7 +96,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_forwarded_from_message_id
 COMMIT;
 ```
 
-Down migration `down/035_messages_forward_attachment.down.sql`:
+Down migration `migrations/down/035_messages_forward_from.down.sql`:
 
 ```sql
 BEGIN;
@@ -131,7 +105,7 @@ ALTER TABLE messages DROP COLUMN IF EXISTS forwarded_from;
 COMMIT;
 ```
 
-**No new columns for `attachment_ids`** — the field is INPUT-only. Server processes it by `SELECT` from `attachments`, then `INSERT` duplicated rows. The persisted state is the `attachments` table; the request field is not stored beyond the side effect.
+Both `ADD COLUMN` and `CREATE INDEX` use `IF NOT EXISTS` so the up migration is **idempotent** (rerun safe).
 
 ---
 
@@ -139,90 +113,100 @@ COMMIT;
 
 ### 4.1 Entity (`internal/domain/entity/message.go`)
 
-Add to `Message`:
+Add one field to `Message`:
 
 ```go
-// JSON-typed forwarded-from envelope. Stored verbatim, returned verbatim.
-// Server does not parse the internal structure — FE owns the schema.
+// JSON-typed forwarded-from envelope. Persisted verbatim in the messages.forwarded_from
+// jsonb column, returned verbatim. Server does not parse the internal structure — FE owns
+// the schema per ALOQA-175 spec §4.
 ForwardedFrom json.RawMessage `json:"forwarded_from,omitempty" db:"forwarded_from"`
 ```
 
-`omitempty` ensures the response omits the field when NULL.
+`omitempty` ensures the response omits the field when NULL — required for §8.5 backward compatibility.
 
 ### 4.2 HTTP handler request (`internal/handler/http/message.go:25-28`)
 
 ```go
 type sendMessageRequest struct {
-    Content       string          `json:"content" validate:"required,min=1,max=40000"`
+    Content       string          `json:"content"`
     ParentID      *string         `json:"parent_id,omitempty"`
     ForwardedFrom json.RawMessage `json:"forwarded_from,omitempty"`
-    AttachmentIDs []string        `json:"attachment_ids,omitempty" validate:"omitempty,max=20,dive,uuid"`
 }
 ```
 
-`validate:"omitempty,max=20,dive,uuid"` — at most 20 attachment ids per message, each a valid UUID. (Existing attachment limit per message TBD; if there's an existing constant, reuse it; otherwise 20 is a reasonable upper bound for forward-of-attachments.)
-
-The handler resolves `*string` ParentID + `[]string` AttachmentIDs into `*uuid.UUID` + `[]uuid.UUID` before calling service.
+**Removed `validate:"required,min=1,max=40000"` from the request struct** — validation moves to the service input (§4.3) where conditional content-emptiness is expressible. Handler still calls `decodeJSON`; service validates. The handler resolves `*string` ParentID → `*uuid.UUID` before calling service.
 
 ### 4.3 Service input (`internal/service/chat/service.go:236-238`)
 
-Extend `SendMessageInput`:
-
 ```go
 type SendMessageInput struct {
-    Content       string          `validate:"required,min=1,max=40000"`
+    Content       string          // length validated in §4.4 by SendMessage, not by tag
     ParentID      *uuid.UUID
-    ForwardedFrom json.RawMessage // nil when not a forward
-    AttachmentIDs []uuid.UUID     // nil or empty when none
+    ForwardedFrom json.RawMessage // nil when not a forward; persisted verbatim when set
 }
 ```
 
-### 4.4 Service `SendMessage` signature
+**Removed the `validate:"required,min=1,max=40000"` tag** because the rule is now conditional (see §4.4). All other Input structs in the file keep their tags — only `SendMessageInput` changes.
 
-Switch to a struct-input signature for evolvability (avoids growing positional args):
+### 4.4 Service `SendMessage` — conditional content validation + signature
+
+Switch to a struct-input signature (cleaner evolution for new optional fields):
 
 ```go
 func (s *Service) SendMessage(
     ctx context.Context,
     channelID, userID uuid.UUID,
     input SendMessageInput,
-) (*entity.Message, error)
+) (*entity.Message, error) {
+    // Conditional content validation:
+    // - When forwarded_from is set, content may be empty (= comment-less forward).
+    // - Otherwise, content must be non-empty (legacy behaviour).
+    if len(input.ForwardedFrom) == 0 {
+        if len(input.Content) < 1 {
+            return nil, ErrValidation("content is required")
+        }
+    }
+    if len(input.Content) > 40000 {
+        return nil, ErrValidation("content must be at most 40000 characters")
+    }
+
+    // If forwarded_from is set, assert it parses as valid JSON (defense-in-depth: the
+    // jsonb column would reject invalid JSON anyway, but we want a clean 400 not a 500).
+    if len(input.ForwardedFrom) > 0 {
+        var probe interface{}
+        if err := json.Unmarshal(input.ForwardedFrom, &probe); err != nil {
+            return nil, ErrValidation("forwarded_from must be valid JSON")
+        }
+    }
+
+    // Existing logic (channel access check, parent validation, insert) unchanged
+    // except the message entity now carries ForwardedFrom into the repository call.
+    msg := &entity.Message{
+        // ...existing fields...,
+        ForwardedFrom: input.ForwardedFrom, // nil propagates to NULL in jsonb
+    }
+    return s.repo.Create(ctx, msg)
+}
 ```
 
-If signature break is too invasive, use the variant: keep the old function with old args, add a sibling `SendMessageV2(ctx, channelID, userID, input SendMessageInput) (*entity.Message, error)` and migrate the handler to call V2. **Recommend: full signature change** since this is a same-PR cohesive change and the only caller is the HTTP handler.
+(`ErrValidation` is whatever the existing repo uses for 400-mapped errors — see existing `requireMessageAccess` error returns.)
 
-### 4.5 Service implementation
+**No change to the existing channel access enforcement** for the target channel. **No new check against the snapshot's source `message_id` / `channel_id`** per §8.4.
 
-In `SendMessage`:
+### 4.5 Repository `Create` (`internal/repository/postgres/message.go:38-64`)
 
-1. Existing checks (channel exists, user member, parent valid) unchanged.
-2. **Attachment validation** (only when `len(input.AttachmentIDs) > 0`):
-   - `SELECT id, channel_id, user_id, message_id, file_name, file_size, mime_type, storage_path, url, created_at FROM attachments WHERE id = ANY($1)`.
-   - Assert: `len(returned) == len(input.AttachmentIDs)` — else 400 "one or more attachments not found".
-   - **Permission check:** for each returned row, the user must be allowed to read the originating message. Cheapest correct check: user must be a member of `attachments.channel_id` (which is `messages.channel_id` via the FK). Reuse existing `repo.IsChannelMember(ctx, attachment.channel_id, userID)` per attachment, OR batch via `SELECT channel_id FROM channels WHERE id = ANY(...) AND id IN (SELECT channel_id FROM channel_members WHERE user_id = $1)`. Reject 403 "no access to attachment {id}" if any check fails.
-3. Insert the new message row (now with `forwarded_from = $X`).
-4. **Duplicate attachment rows** (option B): for each `(id, attachment)` in the validated set, `INSERT INTO attachments (id, message_id, file_name, file_size, mime_type, storage_path, url, created_at, channel_id) VALUES (gen_random_uuid(), $newMsgID, $attachment.FileName, $attachment.FileSize, $attachment.MimeType, $attachment.StoragePath, $attachment.URL, now(), $newMsgChannelID)`. Wrap in transaction with the message insert. The new attachment row shares `storage_path` with the original — no blob copy.
-5. Load aggregations (existing logic for `Reactions`, `Attachments`, `User`) — `Attachments` returns the newly-duplicated rows automatically since they query by `message_id`.
-6. Return Message.
+- Add `forwarded_from` to the INSERT column list and the VALUES placeholder list (positional or named binding — match the existing style).
+- Bind `entity.Message.ForwardedFrom` (pgx handles `json.RawMessage` → jsonb natively because `RawMessage` implements `[]byte` underneath).
+- Make `forwarded_from` selectable in **all** SELECT queries that load Message (`GetByID`, `ListByChannel`, thread queries, search). Add `forwarded_from` to the SELECT column list. pgxscan row-mapping handles `*json.RawMessage` (or scan `[]byte` then assign — match the existing style in the file).
+- `nil`-safe: empty `RawMessage` ↔ NULL column.
 
-**Forwarded_from**: pass `input.ForwardedFrom` directly to the repository as `json.RawMessage`. The repository binds to the `jsonb` column. **No internal validation of the JSON structure** — FE owns the shape per [[aloqa_backend_changes_allowed]] + ALOQA-175 spec §12.5. Server does NOT verify source-channel membership.
+### 4.6 Events (`internal/domain/event/events.go`)
 
-### 4.6 Repository (`internal/repository/postgres/message.go:38-64`)
+**No code change.** `MessagePayload.Message` is `*entity.Message`; the new `ForwardedFrom` field flows automatically through JSON marshaling. `message.created` event payload includes the field on forwarded messages.
 
-Extend `Create`:
+### 4.7 No attachment changes
 
-- Add `forwarded_from` to the INSERT column list and the VALUES placeholder list.
-- Bind `entity.Message.ForwardedFrom` (`json.RawMessage` — pgx handles `[]byte` → jsonb natively).
-- Make `forwarded_from` selectable in all SELECT queries that load `Message` (existing `GetByID`, `ListByChannel`, etc.) — add the column to the projection.
-- `pgxscan` row-mapping must handle `*json.RawMessage` or scan `[]byte` and assign.
-
-### 4.7 Events (`internal/domain/event/events.go`)
-
-**No code changes** — `MessagePayload.Message` is `*entity.Message`; the new `ForwardedFrom` field flows automatically through JSON marshaling. Realtime subscribers (`message.created` event) receive the field for free.
-
-### 4.8 No-op for attachments table
-
-The `attachments` table schema is unchanged. The new write path inserts additional rows with new `id` values, same `storage_path`. Existing storage GC (if any) is responsible for not deleting a blob while another row references the same `storage_path`. **Verify this is true** — if GC currently deletes blob on row delete, document as a known issue and file a follow-up; for MVP it's tolerable since forwarded messages are not commonly deleted, and even then the worst case is a temporarily-broken blob ref.
+`attachment_ids` is NOT in the request, NOT in the service input, NOT processed. Forwarded messages have an empty `Attachments` array (no rows in `attachments` table reference the new `message_id`). FE renders the visual attachment list from `forwarded_from.snapshot.attachments`. Download remains gated by the source-channel access policy. **See ALOQA-262 for the proper cross-channel-attachment fix.**
 
 ---
 
@@ -230,120 +214,113 @@ The `attachments` table schema is unchanged. The new write path inserts addition
 
 | Condition | HTTP | Body |
 |---|---|---|
-| `forwarded_from` malformed JSON | 400 | `{"error": "invalid forwarded_from: <message>"}` |
-| `attachment_ids` includes a non-UUID | 400 | (validator default — `validation failed: attachment_ids.[i] must be a valid UUID`) |
-| `attachment_ids` length > 20 | 400 | (validator default — `attachment_ids must contain at most 20 items`) |
-| Any `attachment_ids[i]` not found in `attachments` | 400 | `{"error": "attachment not found: <id>"}` |
-| Any `attachment_ids[i]` references a channel the user is not a member of | 403 | `{"error": "no access to attachment: <id>"}` |
+| `content` empty AND `forwarded_from` absent | 400 | `{"error":"content is required"}` |
+| `content` > 40000 chars | 400 | `{"error":"content must be at most 40000 characters"}` |
+| `forwarded_from` is non-empty but not valid JSON | 400 | `{"error":"forwarded_from must be valid JSON"}` |
 | Target channel send permission fails | 403 | (existing behaviour, unchanged) |
-
-The first 3 are validator-level (request-time). The last 3 are service-level (after request bind). Test cases per §7.
+| `forwarded_from` is a JSON value of arbitrary shape (e.g., scalar, missing keys) | 201 | Persisted verbatim. **Trust FE per §8.4.** |
 
 ---
 
 ## 6. Performance + storage notes
 
-- **Attachment duplication cost**: one row per attachment in `attachments` table. Each row is ~200 bytes of metadata; blob is shared. For a 5-attachment message forwarded once, +1KB DB overhead.
-- **Query plan for forwarded_from JSONB**: indexed via expression index on `(forwarded_from->>'message_id')`. Reverse-lookup "all forwards of message X" is O(log N) with this index.
-- **Realtime payload size**: `forwarded_from.snapshot` includes the original content + attachment metadata. For a typical 200-byte forwarded message with one attachment, the broadcast payload grows by ~500 bytes. Acceptable.
-- **No N+1**: the existing message loading already batches reactions/attachments/user. New field is on the row itself.
+- Single new column, mostly NULL (only forwarded messages carry it).
+- Expression index on `(forwarded_from->>'message_id')` filtered `WHERE forwarded_from IS NOT NULL` — sparse, cheap.
+- Realtime broadcast payload grows by ~500 bytes per forwarded message (snapshot content + attachment metadata). Acceptable.
+- No N+1.
 
 ---
 
 ## 7. Test plan
 
-### Unit (service_test.go)
+### Unit (`internal/service/chat/service_test.go`)
 
 | # | Case | Expected |
 |---|---|---|
-| U1 | `SendMessage` without `ForwardedFrom` or `AttachmentIDs` | Unchanged behaviour; row inserted with `forwarded_from = NULL`. |
-| U2 | `SendMessage` with `ForwardedFrom = raw json blob` | Row inserted with `forwarded_from = <blob>`; returned `Message.ForwardedFrom` equals input. |
-| U3 | `SendMessage` with `AttachmentIDs` of 2 valid existing attachments the user can access | 2 new rows in `attachments` table, both with new message_id, sharing storage_path. Returned `Message.Attachments` has 2 entries. |
-| U4 | `SendMessage` with `AttachmentIDs` of an attachment the user cannot access (different channel, not a member) | 403; no message row inserted; no attachment rows inserted. |
-| U5 | `SendMessage` with `AttachmentIDs` containing a non-existent UUID | 400; no insertion. |
-| U6 | `SendMessage` with both `ForwardedFrom` AND `AttachmentIDs` (typical forward path) | All-in-one happy path; correct row state. |
-| U7 | `SendMessage` with `ForwardedFrom = empty raw json` (e.g., `{}`) | Accepted; persisted as `{}`. (No internal validation.) |
-| U8 | Transaction rollback test: simulate attachment INSERT failure mid-loop | Message row rolled back; no attachments inserted; error surfaced. |
+| U1 | `SendMessage` without `ForwardedFrom`, `Content="hi"` | Inserted with `forwarded_from=NULL`. Returned Message has nil/empty `ForwardedFrom`. |
+| U2 | `SendMessage` with `ForwardedFrom=<valid json object>`, `Content="comment"` | Inserted with `forwarded_from=<blob>`. Returned `Message.ForwardedFrom` deep-equal to input. |
+| U3 | `SendMessage` with `ForwardedFrom=<valid json>`, `Content=""` (comment-less forward) | Accepted — 201 / no validation error. Persisted with `content=""`, `forwarded_from=<blob>`. |
+| U4 | `SendMessage` with `Content=""` AND `ForwardedFrom=nil` (legacy regression) | 400 `content is required`. No row inserted. |
+| U5 | `SendMessage` with `Content` of length 40001 | 400 `content must be at most 40000 characters`. |
+| U6 | `SendMessage` with `ForwardedFrom=[]byte("not json")` | 400 `forwarded_from must be valid JSON`. No row inserted. |
+| U7 | `SendMessage` with `ForwardedFrom=[]byte("\"a string\"")` (valid JSON scalar) | Accepted; persisted verbatim. Trust contract per §8.4. |
+| U8 | `SendMessage` with `ForwardedFrom=[]byte("{}")` (empty object) | Accepted; persisted verbatim. |
 
-### Integration (handler-level, HTTP)
-
-| # | Case | Expected |
-|---|---|---|
-| I1 | `POST` with `forwarded_from: {...}` + `attachment_ids: [...]` | 201; response JSON contains `forwarded_from` echo + `attachments[]` with new ids. |
-| I2 | `POST` with `attachment_ids` of length 21 | 400 validator error. |
-| I3 | `POST` with `attachment_ids: ["not-a-uuid"]` | 400 validator error. |
-| I4 | `POST` omitting both new fields | 201; response JSON does NOT include `forwarded_from` (omitempty). |
-| I5 | `GET /messages/{id}` after a forward | Response includes `forwarded_from` echo. |
-| I6 | Realtime `message.created` event after forward send | Payload includes `forwarded_from`. |
-| I7 | `POST` with `forwarded_from: "not-an-object"` (string scalar) | Accept as valid JSON (it IS valid JSON). Persisted. **Trust FE per §12.5.** Document this as a known behaviour. (Optional: add minimal "must be object" guard if Codex feels strongly; not strictly required by FE spec.) |
-
-### Migration test
+### Integration (handler-level HTTP)
 
 | # | Case | Expected |
 |---|---|---|
-| M1 | Run `035_messages_forward_attachment.sql` on a populated dev DB | Column added, existing rows have `forwarded_from = NULL`, no data loss. |
+| I1 | `POST` body `{"content":"hi","forwarded_from":{"user_id":"u1","message_id":"m1","channel_id":"c1","created_at":"...","snapshot":{"content":"...","attachments":[]}}}` | 201; response JSON has `forwarded_from` echo (deep-equal). |
+| I2 | `POST` body `{"content":""}` (no `forwarded_from`) | 400 `content is required`. |
+| I3 | `POST` body `{"content":"","forwarded_from":{"user_id":"u1",...}}` | 201; comment-less forward accepted. |
+| I4 | `POST` body `{"content":"hi"}` (legacy) | 201; response JSON does NOT include `forwarded_from` (omitempty preserved). |
+| I5 | `GET /messages/{id}` after a forward POST | Response includes `forwarded_from`. |
+| I6 | Realtime `message.created` event after a forward POST | Payload includes `forwarded_from`. |
+
+### Migration
+
+| # | Case | Expected |
+|---|---|---|
+| M1 | Run `035_messages_forward_from.sql` on a populated dev DB | Column added (NULL default), existing rows untouched, no data loss. |
 | M2 | Run down migration after up | Column removed, no data loss for other columns. |
-| M3 | Idempotency: run up twice | Second run no-ops (`IF NOT EXISTS` on index, `ADD COLUMN` without `IF NOT EXISTS` would error — use `ALTER TABLE messages ADD COLUMN IF NOT EXISTS forwarded_from jsonb DEFAULT NULL` for safety). **Update migration to use `IF NOT EXISTS`.** |
+| M3 | Run up migration twice in a row | Second run is a no-op (`IF NOT EXISTS` on both column add and index create). |
 
 ---
 
 ## 8. DO-NOT-DRIFT invariants
 
-1. **Migration uses `IF NOT EXISTS`** on both column add and index create.
-2. **Server does NOT validate forwarded_from structure** beyond "is valid JSON". FE owns the schema per ALOQA-175 §12.5.
-3. **Attachment access check is mandatory** when `attachment_ids` is non-empty. Users must be members of `attachments.channel_id`. No access → 403.
-4. **Attachment duplication is atomic with message insert** — both happen in one transaction; rollback on either failure.
-5. **`forwarded_from` omitempty** on JSON response — absent field when NULL.
-6. **`Attachments` field on response is the NEW message's attachments**, not the snapshot's. The snapshot is only inside `forwarded_from.snapshot.attachments` (FE-rendered).
-7. **No change to existing send-message-without-forward path** — verify by running existing service_test.go without modifications.
-8. **No new external dependencies** — all changes use stdlib + existing deps (pgx, validator/v10, etc.).
-9. **Realtime broadcast carries `forwarded_from`** automatically via JSON marshaling — no event payload struct change.
-10. **Max 20 attachment_ids per forward** enforced at validator level + service-level defensive cap.
+1. **Migration uses `IF NOT EXISTS`** on both `ADD COLUMN` and `CREATE INDEX`. Test M3.
+2. **`forwarded_from` is `omitempty`** on the Message JSON response — absent field when NULL. Test I4, U1.
+3. **Content validation is conditional**: required (length ≥ 1) when `ForwardedFrom` is empty; allowed-empty when `ForwardedFrom` is non-empty. Test U3, U4.
+4. **No source-channel membership check on `forwarded_from.snapshot.message_id` / `channel_id`** — FE-trusted per ALOQA-175 §12.5.
+5. **`omitempty` preserved on the request struct** — legacy `{"content":"hi"}` body unchanged behaviour. Test I4.
+6. **No attachment_ids handling** in this PR — explicitly out of scope per §1, follow-up ALOQA-262. Reject any code that touches the `attachments` table on forward.
+7. **Realtime broadcast carries `forwarded_from`** automatically via JSON marshaling — no event payload struct change. Test I6.
+8. **No external dependencies** added.
+9. **Service-level `validate.Struct` is NOT removed for SendMessageInput** — but its `Content` tag is replaced by the manual conditional check in `SendMessage`. Other input structs keep validators. (If the file uses one shared `validate.New()` instance — confirm no cross-impact.)
+10. **`forwarded_from` non-empty implies valid JSON** — service rejects 400 before INSERT; jsonb column never receives garbage. Test U6.
 
 ---
 
 ## 9. Acceptance criteria
 
-1. All unit tests U1–U8 pass.
-2. All integration tests I1–I7 pass.
-3. Migration M1–M3 verified manually against a dev DB.
-4. `make lint && make test` green.
-5. Realtime `message.created` event payload includes `forwarded_from` for forwarded messages (manually verified by triggering a forward send and inspecting websocket output).
-6. POST `/api/v1/workspaces/{wsId}/channels/{chId}/messages` with the legacy body (no new fields) returns 201 + the same response shape as before — backward compatibility regression test.
-7. All 10 §8 DO-NOT-DRIFT invariants pass review.
+1. All §7 unit + integration + migration tests pass.
+2. `make lint && make test` green.
+3. Manual smoke (§9 below) executed against the new build.
+4. Realtime `message.created` payload includes `forwarded_from` on a forwarded message (verified by tailing websocket on a member account).
+5. Legacy `POST /messages` body returns the same response shape — backward compat regression.
+6. All 10 §8 DO-NOT-DRIFT invariants pass review.
 
 ### Manual test cases (will be `state.manual_test_cases`)
 
 | # | Title | Steps | Expected |
 |---|---|---|---|
-| 1 | Legacy send still works | POST with body `{"content":"hi"}` | 201, response same shape as before. No `forwarded_from` in response. |
-| 2 | Forward with snapshot only | POST with body `{"content":"","forwarded_from":{"user_id":"u1","message_id":"m1","channel_id":"c1","created_at":"...","snapshot":{"content":"...","attachments":[]}}}` | 201, response echoes `forwarded_from`. No attachments duplicated. |
-| 3 | Forward with attachment_ids | POST with body including `attachment_ids:[<existing>]` user can access | 201, response `attachments[]` has new rows with same storage_path. |
-| 4 | Forward with foreign attachment_ids | POST with body including `attachment_ids:[<id from a channel user is not in>]` | 403 with clear error message. No message row inserted. |
-| 5 | Realtime event includes forwarded_from | Subscribe to the channel websocket, then POST forward | `message.created` event payload includes `forwarded_from`. |
-| 6 | Migration idempotency | Run up migration twice on same DB | Second run no-ops, no error. |
+| 1 | Legacy send | `POST .../messages` body `{"content":"hi"}` | 201, response shape unchanged. No `forwarded_from` in JSON. |
+| 2 | Forward with comment | `POST` body `{"content":"FYI","forwarded_from":{"user_id":"u1","message_id":"m1","channel_id":"c1","created_at":"2026-05-15T10:42:00Z","snapshot":{"content":"original body","attachments":[]}}}` | 201; response echoes `forwarded_from` deep-equal. |
+| 3 | Comment-less forward | Same as #2 but `content=""` | 201; persisted with empty content. |
+| 4 | Empty content, no forward | `POST` body `{"content":""}` | 400 `content is required`. |
+| 5 | Invalid forwarded_from JSON | `POST` body `{"content":"x","forwarded_from":"not-json"}` (string-escaped invalid JSON) | The string is itself valid JSON; persisted. To trigger the 400, send raw bytes via curl with a malformed JSON payload — verify 400 from json decoder. |
+| 6 | Realtime delivery | Subscribe to channel WS, then POST forward | `message.created` event payload includes `forwarded_from` deep-equal. |
+| 7 | Idempotent migration | Apply `035` migration up, then apply up again | Second `up` is a no-op (no error). |
+| 8 | Down migration | Apply `035` migration down | Column dropped, no data loss in other columns. |
 
 ---
 
-## 10. Code review prompt augmentation
+## 10. Code-review prompt augmentation
 
-When reviewing the PR, the Codex reviewer MUST inline-enumerate:
-1. Every §7 test case (U1–U8, I1–I7, M1–M3) and verify each has a matching test.
+Per [[aloqa_168_merge_codex_led]] lesson. The Codex reviewer brief MUST inline-enumerate:
+1. Every §7 case (U1–U8, I1–I6, M1–M3) and verify each has a matching test.
 2. Every §8 DO-NOT-DRIFT invariant (1–10) and verify the code upholds it.
-3. The `IF NOT EXISTS` guard on migration (§M3).
-4. The attachment access check on the service layer (§5).
-5. Backward compatibility: `omitempty` on Message.ForwardedFrom in response.
-
-Per [[aloqa_168_merge_codex_led]] lesson — "consult §X" is insufficient; the brief MUST enumerate verbatim.
+3. The `IF NOT EXISTS` guard on migration (§8.1).
+4. The conditional content-validation logic in §4.4 (§8.3).
+5. The omitempty preservation (§8.2, §8.5).
+6. Confirmation that NO attachment_ids handling exists in the PR diff (§8.6).
+7. `forwarded_from` reaches the realtime event payload (§8.7).
 
 ---
 
-## 11. Out of scope
+## 11. Out of scope (filed)
 
-- Storage blob garbage collection rework (existing GC retained).
-- `message_attachments` join-table migration (option A); chosen option B per §2.
-- Forwarded-message search / indexing (out of scope; existing FTS can be extended later).
-- Attachment ownership transfer (current model: duplicated row owns its own metadata).
-- Audit trail for forwards (not requested by FE spec).
+- **ALOQA-262** Forward: cross-channel attachment access (BE join-table or blob copy) — proper fix for visible-but-not-downloadable chips in cross-channel forwards.
 
-Related: [[aloqa_calls_backend_session_pause_2026_05_15]], [[aloqa_backend_changes_allowed]], [[vultr_staging_deploy_2026_05_14]] (auto-deploy on develop merge).
+Related: [[aloqa_calls_backend_session_pause_2026_05_15]], [[aloqa_backend_changes_allowed]], [[vultr_staging_deploy_2026_05_14]].

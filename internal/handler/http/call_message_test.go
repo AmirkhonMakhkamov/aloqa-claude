@@ -211,9 +211,11 @@ func (r *fakeHTTPWorkspaceRepo) Create(context.Context, *entity.Workspace) error
 func (r *fakeHTTPWorkspaceRepo) GetByID(context.Context, uuid.UUID) (*entity.Workspace, error) {
 	return nil, cerrors.NotFound("workspace not found")
 }
+
 func (r *fakeHTTPWorkspaceRepo) GetBySlug(context.Context, string) (*entity.Workspace, error) {
 	return nil, cerrors.NotFound("workspace not found")
 }
+
 func (r *fakeHTTPWorkspaceRepo) ListByUser(context.Context, uuid.UUID) ([]entity.Workspace, error) {
 	return nil, nil
 }
@@ -221,18 +223,22 @@ func (r *fakeHTTPWorkspaceRepo) Update(context.Context, *entity.Workspace) error
 func (r *fakeHTTPWorkspaceRepo) AddMember(context.Context, *entity.WorkspaceMember) error {
 	return nil
 }
+
 func (r *fakeHTTPWorkspaceRepo) GetMember(_ context.Context, workspaceID, userID uuid.UUID) (*entity.WorkspaceMember, error) {
 	if member := r.members[[2]uuid.UUID{workspaceID, userID}]; member != nil {
 		return member, nil
 	}
 	return nil, cerrors.NotFound("workspace member not found")
 }
+
 func (r *fakeHTTPWorkspaceRepo) ListMembers(context.Context, uuid.UUID, pagination.Params) ([]entity.WorkspaceMember, error) {
 	return nil, nil
 }
+
 func (r *fakeHTTPWorkspaceRepo) UpdateMemberRole(context.Context, uuid.UUID, uuid.UUID, entity.WorkspaceRole) error {
 	return nil
 }
+
 func (r *fakeHTTPWorkspaceRepo) RemoveMember(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 
 type fakeHTTPChannelRepo struct{}
@@ -241,9 +247,11 @@ func (fakeHTTPChannelRepo) Create(context.Context, *entity.Channel) error { retu
 func (fakeHTTPChannelRepo) GetByID(context.Context, uuid.UUID) (*entity.Channel, error) {
 	return nil, cerrors.NotFound("channel not found")
 }
+
 func (fakeHTTPChannelRepo) ListByWorkspace(context.Context, uuid.UUID, pagination.Params) ([]entity.Channel, error) {
 	return nil, nil
 }
+
 func (fakeHTTPChannelRepo) ListByUser(context.Context, uuid.UUID, uuid.UUID) ([]entity.Channel, error) {
 	return nil, nil
 }
@@ -253,6 +261,7 @@ func (fakeHTTPChannelRepo) AddMember(context.Context, *entity.ChannelMember) err
 func (fakeHTTPChannelRepo) GetMember(context.Context, uuid.UUID, uuid.UUID) (*entity.ChannelMember, error) {
 	return nil, cerrors.NotFound("channel member not found")
 }
+
 func (fakeHTTPChannelRepo) ListMembers(context.Context, uuid.UUID) ([]entity.ChannelMember, error) {
 	return nil, nil
 }
@@ -260,6 +269,7 @@ func (fakeHTTPChannelRepo) RemoveMember(context.Context, uuid.UUID, uuid.UUID) e
 func (fakeHTTPChannelRepo) UpdateLastRead(context.Context, uuid.UUID, uuid.UUID) error {
 	return nil
 }
+
 func (fakeHTTPChannelRepo) GetDMChannel(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*entity.Channel, error) {
 	return nil, cerrors.NotFound("dm channel not found")
 }
@@ -273,15 +283,18 @@ func (r *fakeHTTPCallRepo) Create(_ context.Context, call *entity.Call) error {
 	r.calls[call.ID] = call
 	return nil
 }
+
 func (r *fakeHTTPCallRepo) GetByID(_ context.Context, id uuid.UUID) (*entity.Call, error) {
 	if call := r.calls[id]; call != nil {
 		return call, nil
 	}
 	return nil, cerrors.NotFound("call not found")
 }
+
 func (r *fakeHTTPCallRepo) ListActiveByWorkspace(context.Context, uuid.UUID) ([]entity.Call, error) {
 	return nil, nil
 }
+
 func (r *fakeHTTPCallRepo) UpdateStatus(context.Context, uuid.UUID, entity.CallStatus) error {
 	return nil
 }
@@ -290,15 +303,18 @@ func (r *fakeHTTPCallRepo) AddParticipant(_ context.Context, p *entity.CallParti
 	r.participants[[2]uuid.UUID{p.CallID, p.UserID}] = p
 	return nil
 }
+
 func (r *fakeHTTPCallRepo) AddParticipantIfCapacity(ctx context.Context, p *entity.CallParticipant, _ int) error {
 	return r.AddParticipant(ctx, p)
 }
+
 func (r *fakeHTTPCallRepo) GetParticipant(_ context.Context, callID, userID uuid.UUID) (*entity.CallParticipant, error) {
 	if p := r.participants[[2]uuid.UUID{callID, userID}]; p != nil {
 		return p, nil
 	}
 	return nil, cerrors.NotFound("call participant not found")
 }
+
 func (r *fakeHTTPCallRepo) ListParticipants(_ context.Context, callID uuid.UUID) ([]entity.CallParticipant, error) {
 	var participants []entity.CallParticipant
 	for key, p := range r.participants {
@@ -308,15 +324,19 @@ func (r *fakeHTTPCallRepo) ListParticipants(_ context.Context, callID uuid.UUID)
 	}
 	return participants, nil
 }
+
 func (r *fakeHTTPCallRepo) UpdateParticipantStatus(context.Context, uuid.UUID, entity.ParticipantStatus) error {
 	return nil
 }
+
 func (r *fakeHTTPCallRepo) UpdateParticipantRole(context.Context, uuid.UUID, entity.CallRole) error {
 	return nil
 }
+
 func (r *fakeHTTPCallRepo) UpdateParticipantMedia(context.Context, uuid.UUID, bool, bool, bool) error {
 	return nil
 }
+
 func (r *fakeHTTPCallRepo) RemoveParticipant(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 
 type fakeHTTPCallMessageRepo struct {
@@ -374,6 +394,7 @@ func (fakeHTTPBreakoutRepo) Create(context.Context, *entity.BreakoutRoom) error 
 func (fakeHTTPBreakoutRepo) GetByID(context.Context, uuid.UUID) (*entity.BreakoutRoom, error) {
 	return nil, cerrors.NotFound("breakout room not found")
 }
+
 func (fakeHTTPBreakoutRepo) ListByCall(context.Context, uuid.UUID) ([]entity.BreakoutRoom, error) {
 	return nil, nil
 }
@@ -381,9 +402,11 @@ func (fakeHTTPBreakoutRepo) Close(context.Context, uuid.UUID) error { return nil
 func (fakeHTTPBreakoutRepo) CloseAllByCall(context.Context, uuid.UUID) error {
 	return nil
 }
+
 func (fakeHTTPBreakoutRepo) AssignParticipant(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error {
 	return nil
 }
+
 func (fakeHTTPBreakoutRepo) UnassignParticipant(context.Context, uuid.UUID, uuid.UUID) error {
 	return nil
 }

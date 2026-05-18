@@ -250,20 +250,34 @@ type fakeMoveCalHTTPScope struct {
 	calendars *fakeMoveCalendarRepo
 }
 
-func (s *fakeMoveCalHTTPScope) Users() repository.UserRepository                       { return nil }
-func (s *fakeMoveCalHTTPScope) Workspaces() repository.WorkspaceRepository             { return nil }
-func (s *fakeMoveCalHTTPScope) Messages() repository.MessageRepository                 { return nil }
-func (s *fakeMoveCalHTTPScope) Channels() repository.ChannelRepository                 { return nil }
+func (s *fakeMoveCalHTTPScope) Users() repository.UserRepository { return nil }
+
+func (s *fakeMoveCalHTTPScope) Workspaces() repository.WorkspaceRepository { return nil }
+
+func (s *fakeMoveCalHTTPScope) Messages() repository.MessageRepository { return nil }
+
+func (s *fakeMoveCalHTTPScope) Channels() repository.ChannelRepository { return nil }
+
 func (s *fakeMoveCalHTTPScope) ChannelGrants() repository.ChannelAccessGrantRepository { return nil }
-func (s *fakeMoveCalHTTPScope) Calls() repository.CallRepository                       { return nil }
-func (s *fakeMoveCalHTTPScope) CallMessages() repository.CallMessageRepository         { return nil }
-func (s *fakeMoveCalHTTPScope) Calendars() repository.CalendarRepository               { return s.calendars }
-func (s *fakeMoveCalHTTPScope) Recordings() repository.RecordingRepository             { return nil }
-func (s *fakeMoveCalHTTPScope) Invites() repository.GuestInviteRepository              { return nil }
-func (s *fakeMoveCalHTTPScope) GuestGrants() repository.GuestAccessRepository          { return nil }
-func (s *fakeMoveCalHTTPScope) Roles() repository.WorkspaceRoleRepository              { return nil }
-func (s *fakeMoveCalHTTPScope) Audit() repository.AuditRepository                      { return nil }
-func (s *fakeMoveCalHTTPScope) SearchIndexer() searchsvc.Indexer                       { return nil }
+
+func (s *fakeMoveCalHTTPScope) Calls() repository.CallRepository { return nil }
+
+func (s *fakeMoveCalHTTPScope) CallMessages() repository.CallMessageRepository { return nil }
+
+func (s *fakeMoveCalHTTPScope) Calendars() repository.CalendarRepository { return s.calendars }
+
+func (s *fakeMoveCalHTTPScope) Recordings() repository.RecordingRepository { return nil }
+
+func (s *fakeMoveCalHTTPScope) Invites() repository.GuestInviteRepository { return nil }
+
+func (s *fakeMoveCalHTTPScope) GuestGrants() repository.GuestAccessRepository { return nil }
+
+func (s *fakeMoveCalHTTPScope) Roles() repository.WorkspaceRoleRepository { return nil }
+
+func (s *fakeMoveCalHTTPScope) Audit() repository.AuditRepository { return nil }
+
+func (s *fakeMoveCalHTTPScope) SearchIndexer() searchsvc.Indexer { return nil }
+
 func (s *fakeMoveCalHTTPScope) EnqueueRealtime(context.Context, event.Event, []byte) error {
 	return nil
 }
@@ -323,52 +337,69 @@ func (r *fakeMoveCalendarRepo) UpdateEventTx(ctx context.Context, eventEntity *e
 func (r *fakeMoveCalendarRepo) ListUserCalendars(context.Context, uuid.UUID, uuid.UUID) ([]entity.UserCalendar, error) {
 	return nil, nil
 }
+
 func (r *fakeMoveCalendarRepo) GetUserCalendar(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*entity.UserCalendar, error) {
 	return nil, cerrors.NotFound("calendar not found")
 }
+
 func (r *fakeMoveCalendarRepo) CreateUserCalendar(context.Context, *entity.UserCalendar) error {
 	return nil
 }
+
 func (r *fakeMoveCalendarRepo) UpdateUserCalendar(context.Context, *entity.UserCalendar) error {
 	return nil
 }
+
 func (r *fakeMoveCalendarRepo) DeleteUserCalendar(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error {
 	return nil
 }
+
 func (r *fakeMoveCalendarRepo) SetCalendarVisibility(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, bool) (*entity.UserCalendar, error) {
 	return nil, nil
 }
+
 func (r *fakeMoveCalendarRepo) EnsureDefaultCalendar(context.Context, uuid.UUID, uuid.UUID) (*entity.UserCalendar, error) {
 	return nil, nil
 }
+
 func (r *fakeMoveCalendarRepo) ListEvents(context.Context, uuid.UUID, time.Time, time.Time, uuid.UUID) ([]entity.EventOccurrence, error) {
 	return nil, nil
 }
+
 func (r *fakeMoveCalendarRepo) ListUpcoming(context.Context, uuid.UUID, uuid.UUID, int) ([]entity.EventOccurrence, error) {
 	return nil, nil
 }
+
 func (r *fakeMoveCalendarRepo) ListDueReminderTargets(context.Context, time.Time, time.Duration, int) ([]entity.ReminderTarget, error) {
 	return nil, nil
 }
+
 func (r *fakeMoveCalendarRepo) EnqueueReminderOutbox(context.Context, entity.ReminderTarget, []byte, time.Time) error {
 	return nil
 }
+
 func (r *fakeMoveCalendarRepo) MarkReminderDispatched(context.Context, uuid.UUID, time.Time, time.Time) error {
 	return nil
 }
+
 func (r *fakeMoveCalendarRepo) PublishReminderOutbox(context.Context, int, int, func(context.Context, entity.ReminderOutboxMessage) error) (int, int, int, error) {
 	return 0, 0, 0, nil
 }
+
 func (r *fakeMoveCalendarRepo) LockEventForStartCall(ctx context.Context, eventID uuid.UUID) (*entity.CalendarEvent, error) {
 	return r.GetEvent(ctx, eventID)
 }
+
 func (r *fakeMoveCalendarRepo) DeleteEvent(context.Context, uuid.UUID, uuid.UUID) error { return nil }
+
 func (r *fakeMoveCalendarRepo) SetEventCallIDIfUnset(context.Context, uuid.UUID, uuid.UUID) (*entity.CalendarEvent, error) {
 	return nil, nil
 }
+
 func (r *fakeMoveCalendarRepo) LinkEventAndCall(context.Context, uuid.UUID, uuid.UUID) error {
 	return nil
 }
+
 func (r *fakeMoveCalendarRepo) UpsertRsvp(context.Context, uuid.UUID, uuid.UUID, entity.RsvpStatus) (*entity.EventAttendee, error) {
 	return nil, nil
 }
@@ -398,9 +429,11 @@ func (m fakeCalHTTPMembers) Create(context.Context, *entity.Workspace) error { r
 func (m fakeCalHTTPMembers) GetByID(context.Context, uuid.UUID) (*entity.Workspace, error) {
 	return nil, cerrors.NotFound("workspace not found")
 }
+
 func (m fakeCalHTTPMembers) GetBySlug(context.Context, string) (*entity.Workspace, error) {
 	return nil, cerrors.NotFound("workspace not found")
 }
+
 func (m fakeCalHTTPMembers) ListByUser(context.Context, uuid.UUID) ([]entity.Workspace, error) {
 	return nil, nil
 }
@@ -412,9 +445,11 @@ func (m fakeCalHTTPMembers) GetMember(_ context.Context, workspaceID, userID uui
 	}
 	return nil, cerrors.NotFound("workspace member not found")
 }
+
 func (m fakeCalHTTPMembers) ListMembers(context.Context, uuid.UUID, pagination.Params) ([]entity.WorkspaceMember, error) {
 	return nil, nil
 }
+
 func (m fakeCalHTTPMembers) UpdateMemberRole(context.Context, uuid.UUID, uuid.UUID, entity.WorkspaceRole) error {
 	return nil
 }

@@ -637,9 +637,11 @@ func TestMoveEventOccurrence_NonRecurring_All_OK(t *testing.T) {
 	wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
 	now := time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)
 	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
-		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+		eventID: {
+			ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
 			Title: "S", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
-			ScheduledAt: now, DurationMinutes: 30},
+			ScheduledAt: now, DurationMinutes: 30,
+		},
 	}}
 	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
 
@@ -666,9 +668,11 @@ func TestMoveEventOccurrence_NonRecurring_This_DegeneratesToAll(t *testing.T) {
 	wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
 	now := time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)
 	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
-		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+		eventID: {
+			ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
 			Title: "X", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
-			ScheduledAt: now, DurationMinutes: 30},
+			ScheduledAt: now, DurationMinutes: 30,
+		},
 	}}
 	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
 	newAt := now.Add(48 * time.Hour)
@@ -688,10 +692,12 @@ func TestMoveEventOccurrence_Recurring_All_OK(t *testing.T) {
 	wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
 	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
 	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
-		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+		eventID: {
+			ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
 			Title: "Daily", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
 			ScheduledAt: start, DurationMinutes: 30,
-			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=10"}},
+			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=10"},
+		},
 	}}
 	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
 	newAt := start.Add(time.Hour)
@@ -719,9 +725,11 @@ func TestMoveEventOccurrence_ScopeAll_OptimisticLock_Conflict(t *testing.T) {
 	storedUpdatedAt := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
 	staleExpected := storedUpdatedAt.Add(-time.Second)
 	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
-		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+		eventID: {
+			ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
 			Title: "X", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
-			ScheduledAt: storedUpdatedAt, DurationMinutes: 30, UpdatedAt: storedUpdatedAt},
+			ScheduledAt: storedUpdatedAt, DurationMinutes: 30, UpdatedAt: storedUpdatedAt,
+		},
 	}}
 	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
 	svc.SetTransactionManager(newCalendarReminderTxManager(repo))
@@ -741,10 +749,12 @@ func TestMoveEventOccurrence_Recurring_All_WithMatchingToken(t *testing.T) {
 	storedUpdatedAt := time.Date(2026, 5, 1, 9, 30, 0, 0, time.UTC)
 	matchExpected := storedUpdatedAt
 	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
-		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+		eventID: {
+			ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
 			Title: "Daily", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
 			ScheduledAt: start, DurationMinutes: 30, UpdatedAt: storedUpdatedAt,
-			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=10"}},
+			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=10"},
+		},
 	}}
 	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
 	svc.SetTransactionManager(newCalendarReminderTxManager(repo))
@@ -776,10 +786,12 @@ func TestMoveEventOccurrence_Recurring_All_WithStaleToken(t *testing.T) {
 	storedUpdatedAt := time.Date(2026, 5, 1, 9, 30, 0, 0, time.UTC)
 	staleExpected := storedUpdatedAt.Add(-time.Second)
 	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
-		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+		eventID: {
+			ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
 			Title: "Daily", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
 			ScheduledAt: start, DurationMinutes: 30, UpdatedAt: storedUpdatedAt,
-			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=10"}},
+			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=10"},
+		},
 	}}
 	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
 	svc.SetTransactionManager(newCalendarReminderTxManager(repo))
@@ -797,9 +809,11 @@ func TestMoveEventOccurrence_NonOrganizer_Forbidden(t *testing.T) {
 	wsID, orgID, other, eventID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	now := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
 	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
-		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+		eventID: {
+			ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
 			Title: "X", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
-			ScheduledAt: now, DurationMinutes: 30},
+			ScheduledAt: now, DurationMinutes: 30,
+		},
 	}}
 	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{
 		{wsID, orgID}: true, {wsID, other}: true,
@@ -815,9 +829,11 @@ func TestMoveEventOccurrence_InvalidScope_BadRequest(t *testing.T) {
 	wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
 	now := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
 	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
-		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+		eventID: {
+			ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
 			Title: "X", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
-			ScheduledAt: now, DurationMinutes: 30},
+			ScheduledAt: now, DurationMinutes: 30,
+		},
 	}}
 	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
 	_, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
@@ -832,9 +848,11 @@ func TestMoveEventOccurrence_DurationOutOfRange_BadRequest(t *testing.T) {
 	now := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
 	bad := 1441
 	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
-		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+		eventID: {
+			ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
 			Title: "X", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
-			ScheduledAt: now, DurationMinutes: 30},
+			ScheduledAt: now, DurationMinutes: 30,
+		},
 	}}
 	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
 	_, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
@@ -873,9 +891,11 @@ func TestUpdateEventTx_UpdatesEvent(t *testing.T) {
 	eventID := uuid.New()
 	wsID := uuid.New()
 	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
-		eventID: {ID: eventID, WorkspaceID: wsID,
+		eventID: {
+			ID: eventID, WorkspaceID: wsID,
 			Title: "Old", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
-			ScheduledAt: now, DurationMinutes: 30, UpdatedAt: now},
+			ScheduledAt: now, DurationMinutes: 30, UpdatedAt: now,
+		},
 	}}
 	ev := &entity.CalendarEvent{
 		ID: eventID, WorkspaceID: wsID,
@@ -898,9 +918,11 @@ func TestUpdateEventTx_OptimisticLock_Conflict(t *testing.T) {
 	eventID := uuid.New()
 	wsID := uuid.New()
 	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
-		eventID: {ID: eventID, WorkspaceID: wsID,
+		eventID: {
+			ID: eventID, WorkspaceID: wsID,
 			Title: "X", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
-			ScheduledAt: now, DurationMinutes: 30, UpdatedAt: now},
+			ScheduledAt: now, DurationMinutes: 30, UpdatedAt: now,
+		},
 	}}
 	ev := &entity.CalendarEvent{
 		ID: eventID, WorkspaceID: wsID,
@@ -919,7 +941,8 @@ func TestMoveEventOccurrence_Recurring_This_OK(t *testing.T) {
 	instance := time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
 	attendeeUID := uuid.New()
 	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
-		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+		eventID: {
+			ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
 			Title: "Daily", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
 			ScheduledAt: start, DurationMinutes: 30,
 			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=5"},
@@ -986,10 +1009,12 @@ func TestMoveEventOccurrence_InstanceNotInSeries_BadRequest(t *testing.T) {
 	wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
 	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
 	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
-		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+		eventID: {
+			ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
 			Title: "D", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
 			ScheduledAt: start, DurationMinutes: 30,
-			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=3"}},
+			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=3"},
+		},
 	}}
 	txMgr := newCalendarReminderTxManager(repo)
 	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
@@ -1009,10 +1034,12 @@ func TestMoveEventOccurrence_InstanceAlreadyExdated_BadRequest(t *testing.T) {
 	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
 	exdated := time.Date(2026, 5, 2, 10, 0, 0, 0, time.UTC)
 	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
-		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+		eventID: {
+			ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
 			Title: "D", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
 			ScheduledAt: start, DurationMinutes: 30,
-			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=5", Exdates: []time.Time{exdated}}},
+			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=5", Exdates: []time.Time{exdated}},
+		},
 	}}
 	txMgr := newCalendarReminderTxManager(repo)
 	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
@@ -1033,10 +1060,12 @@ func TestMoveEventOccurrence_ConcurrentUpdate_Conflict_409(t *testing.T) {
 	storedUpdatedAt := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
 	staleExpected := storedUpdatedAt.Add(-time.Second)
 	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
-		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+		eventID: {
+			ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
 			Title: "D", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
 			ScheduledAt: start, DurationMinutes: 30, UpdatedAt: storedUpdatedAt,
-			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=5"}},
+			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=5"},
+		},
 	}}
 	txMgr := newCalendarReminderTxManager(repo)
 	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
@@ -1060,10 +1089,12 @@ func TestMoveEventOccurrence_Recurring_ThisAndFollowing_OK(t *testing.T) {
 	futureEx := time.Date(2026, 5, 6, 10, 0, 0, 0, time.UTC)
 	delta := 2 * 24 * time.Hour
 	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
-		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+		eventID: {
+			ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
 			Title: "Daily", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
 			ScheduledAt: start, DurationMinutes: 30,
-			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=7", Exdates: []time.Time{futureEx}}},
+			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=7", Exdates: []time.Time{futureEx}},
+		},
 	}}
 	txMgr := newCalendarReminderTxManager(repo)
 	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
@@ -1112,10 +1143,12 @@ func TestMoveEventOccurrence_Recurring_ThisAndFollowing_FirstOccurrence_Degenera
 	wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
 	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
 	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
-		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+		eventID: {
+			ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
 			Title: "D", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
 			ScheduledAt: start, DurationMinutes: 30,
-			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=5"}},
+			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=5"},
+		},
 	}}
 	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
 
@@ -1140,10 +1173,12 @@ func TestMoveEventOccurrence_Recurring_ThisAndFollowing_LastOccurrence_OK(t *tes
 	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
 	last := time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
 	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
-		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+		eventID: {
+			ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
 			Title: "D", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
 			ScheduledAt: start, DurationMinutes: 30,
-			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=3"}},
+			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=3"},
+		},
 	}}
 	txMgr := newCalendarReminderTxManager(repo)
 	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
@@ -1169,13 +1204,15 @@ func TestMoveEventOccurrence_Recurring_ThisAndFollowing_FirstOccurrenceAlreadyEx
 	wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
 	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
 	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
-		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+		eventID: {
+			ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
 			Title: "D", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
 			ScheduledAt: start, DurationMinutes: 30,
 			Recurrence: &entity.RecurrenceRule{
 				RRule:   "FREQ=DAILY;COUNT=5",
 				Exdates: []time.Time{start},
-			}},
+			},
+		},
 	}}
 	txMgr := newCalendarReminderTxManager(repo)
 	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
@@ -1195,10 +1232,12 @@ func TestMoveEventOccurrence_RealtimePublishedCorrectly(t *testing.T) {
 	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
 	instance := time.Date(2026, 5, 2, 10, 0, 0, 0, time.UTC)
 	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
-		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+		eventID: {
+			ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
 			Title: "D", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
 			ScheduledAt: start, DurationMinutes: 30,
-			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=5"}},
+			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=5"},
+		},
 	}}
 	pub := &capturingPublisher{}
 	txMgr := newCalendarReminderTxManager(repo)
@@ -1225,9 +1264,11 @@ func TestMoveEventOccurrence_RealtimePublishedCorrectly(t *testing.T) {
 	}
 
 	repo2 := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
-		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+		eventID: {
+			ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
 			Title: "D", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
-			ScheduledAt: start, DurationMinutes: 30},
+			ScheduledAt: start, DurationMinutes: 30,
+		},
 	}}
 	pub2 := &capturingPublisher{}
 	svc2 := NewService(repo2, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, pub2)
@@ -1312,12 +1353,15 @@ func (r *fakeCalendarRepo) CreateUserCalendar(_ context.Context, calendar *entit
 func (r *fakeCalendarRepo) UpdateUserCalendar(context.Context, *entity.UserCalendar) error {
 	return nil
 }
+
 func (r *fakeCalendarRepo) DeleteUserCalendar(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error {
 	return nil
 }
+
 func (r *fakeCalendarRepo) SetCalendarVisibility(_ context.Context, workspaceID, calendarID, ownerID uuid.UUID, visible bool) (*entity.UserCalendar, error) {
 	return &entity.UserCalendar{ID: calendarID, WorkspaceID: workspaceID, OwnerID: ownerID, IsVisible: visible}, nil
 }
+
 func (r *fakeCalendarRepo) EnsureDefaultCalendar(_ context.Context, workspaceID, ownerID uuid.UUID) (*entity.UserCalendar, error) {
 	return &entity.UserCalendar{ID: uuid.New(), WorkspaceID: workspaceID, OwnerID: ownerID, IsDefault: true}, nil
 }
@@ -1325,9 +1369,11 @@ func (r *fakeCalendarRepo) EnsureDefaultCalendar(_ context.Context, workspaceID,
 func (r *fakeCalendarRepo) ListEvents(context.Context, uuid.UUID, time.Time, time.Time, uuid.UUID) ([]entity.EventOccurrence, error) {
 	return nil, nil
 }
+
 func (r *fakeCalendarRepo) ListUpcoming(context.Context, uuid.UUID, uuid.UUID, int) ([]entity.EventOccurrence, error) {
 	return nil, nil
 }
+
 func (r *fakeCalendarRepo) ListDueReminderTargets(_ context.Context, now time.Time, horizon time.Duration, limit int) ([]entity.ReminderTarget, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1359,6 +1405,7 @@ func (r *fakeCalendarRepo) ListDueReminderTargets(_ context.Context, now time.Ti
 	}
 	return targets, nil
 }
+
 func (r *fakeCalendarRepo) EnqueueReminderOutbox(_ context.Context, target entity.ReminderTarget, payloadJSON []byte, enqueuedAt time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1376,6 +1423,7 @@ func (r *fakeCalendarRepo) EnqueueReminderOutbox(_ context.Context, target entit
 	})
 	return nil
 }
+
 func (r *fakeCalendarRepo) MarkReminderDispatched(_ context.Context, reminderID uuid.UUID, occurrenceAt, dispatchedAt time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1471,9 +1519,11 @@ func (r *fakeCalendarRepo) GetEvent(_ context.Context, eventID uuid.UUID) (*enti
 	}
 	return copy, nil
 }
+
 func (r *fakeCalendarRepo) LockEventForStartCall(ctx context.Context, eventID uuid.UUID) (*entity.CalendarEvent, error) {
 	return r.GetEvent(ctx, eventID)
 }
+
 func (r *fakeCalendarRepo) CreateEvent(ctx context.Context, eventEntity *entity.CalendarEvent) (*entity.CalendarEvent, error) {
 	if r.events == nil {
 		r.events = map[uuid.UUID]*entity.CalendarEvent{}
@@ -1484,9 +1534,11 @@ func (r *fakeCalendarRepo) CreateEvent(ctx context.Context, eventEntity *entity.
 	r.replaceEventReminders(eventEntity.ID, eventEntity.Reminders)
 	return r.GetEvent(ctx, eventEntity.ID)
 }
+
 func (r *fakeCalendarRepo) CreateEventTx(ctx context.Context, eventEntity *entity.CalendarEvent) (*entity.CalendarEvent, error) {
 	return r.CreateEvent(ctx, eventEntity)
 }
+
 func (r *fakeCalendarRepo) UpdateEvent(ctx context.Context, eventEntity *entity.CalendarEvent) (*entity.CalendarEvent, error) {
 	if r.events == nil {
 		r.events = map[uuid.UUID]*entity.CalendarEvent{}
@@ -1497,6 +1549,7 @@ func (r *fakeCalendarRepo) UpdateEvent(ctx context.Context, eventEntity *entity.
 	r.replaceEventReminders(eventEntity.ID, eventEntity.Reminders)
 	return r.GetEvent(ctx, eventEntity.ID)
 }
+
 func (r *fakeCalendarRepo) UpdateEventTx(ctx context.Context, eventEntity *entity.CalendarEvent, expectedUpdatedAt *time.Time) (*entity.CalendarEvent, error) {
 	if expectedUpdatedAt != nil {
 		existing, err := r.GetEvent(ctx, eventEntity.ID)
@@ -1603,6 +1656,7 @@ func (r *fakeCalendarRepo) SetEventCallIDIfUnset(_ context.Context, eventID, cal
 	}
 	return eventEntity, nil
 }
+
 func (r *fakeCalendarRepo) LinkEventAndCall(_ context.Context, eventID, callID uuid.UUID) error {
 	eventEntity := r.events[eventID]
 	if eventEntity == nil {
@@ -1611,6 +1665,7 @@ func (r *fakeCalendarRepo) LinkEventAndCall(_ context.Context, eventID, callID u
 	eventEntity.CallID = &callID
 	return nil
 }
+
 func (r *fakeCalendarRepo) UpsertRsvp(_ context.Context, eventID, userID uuid.UUID, status entity.RsvpStatus) (*entity.EventAttendee, error) {
 	now := time.Now().UTC()
 	attendee := &entity.EventAttendee{
@@ -1632,9 +1687,11 @@ func (m fakeMembers) Create(context.Context, *entity.Workspace) error { return n
 func (m fakeMembers) GetByID(context.Context, uuid.UUID) (*entity.Workspace, error) {
 	return nil, cerrors.NotFound("workspace not found")
 }
+
 func (m fakeMembers) GetBySlug(context.Context, string) (*entity.Workspace, error) {
 	return nil, cerrors.NotFound("workspace not found")
 }
+
 func (m fakeMembers) ListByUser(context.Context, uuid.UUID) ([]entity.Workspace, error) {
 	return nil, nil
 }
@@ -1646,9 +1703,11 @@ func (m fakeMembers) GetMember(_ context.Context, workspaceID, userID uuid.UUID)
 	}
 	return nil, cerrors.NotFound("workspace member not found")
 }
+
 func (m fakeMembers) ListMembers(context.Context, uuid.UUID, pagination.Params) ([]entity.WorkspaceMember, error) {
 	return nil, nil
 }
+
 func (m fakeMembers) UpdateMemberRole(context.Context, uuid.UUID, uuid.UUID, entity.WorkspaceRole) error {
 	return nil
 }
@@ -1851,15 +1910,19 @@ func (r *txCallRepo) AddParticipantIfCapacity(ctx context.Context, p *entity.Cal
 func (r *txCallRepo) GetParticipant(context.Context, uuid.UUID, uuid.UUID) (*entity.CallParticipant, error) {
 	return nil, cerrors.NotFound("participant not found")
 }
+
 func (r *txCallRepo) ListParticipants(context.Context, uuid.UUID) ([]entity.CallParticipant, error) {
 	return nil, nil
 }
+
 func (r *txCallRepo) UpdateParticipantStatus(context.Context, uuid.UUID, entity.ParticipantStatus) error {
 	return nil
 }
+
 func (r *txCallRepo) UpdateParticipantRole(context.Context, uuid.UUID, entity.CallRole) error {
 	return nil
 }
+
 func (r *txCallRepo) UpdateParticipantMedia(context.Context, uuid.UUID, bool, bool, bool) error {
 	return nil
 }

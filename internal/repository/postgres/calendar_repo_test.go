@@ -85,7 +85,8 @@ func TestCalendarRepoUpdateEventPreservesReminderDispatchedState(t *testing.T) {
 
 	var gotReminderID uuid.UUID
 	var gotDispatchedAt time.Time
-	err = pool.QueryRow(ctx, `
+	err = pool.QueryRow(
+		ctx, `
 		SELECT r.id, d.dispatched_at
 		FROM event_reminders r
 		JOIN event_reminder_dispatches d ON d.reminder_id = r.id
@@ -376,7 +377,8 @@ func setupCalendarTestEnv(t *testing.T, ctx context.Context, pool *pgxpool.Pool)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM users WHERE id = $1`, env.userID)
 	})
 
-	if _, err := pool.Exec(ctx, `
+	if _, err := pool.Exec(
+		ctx, `
 		INSERT INTO users (id, email, display_name, avatar_url, password_hash, status, locale, created_at, updated_at)
 		VALUES ($1, $2, 'Calendar Repo Test User', '', 'hash', 'active', 'en', $3, $3)`,
 		env.userID,
@@ -385,7 +387,8 @@ func setupCalendarTestEnv(t *testing.T, ctx context.Context, pool *pgxpool.Pool)
 	); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `
+	if _, err := pool.Exec(
+		ctx, `
 		INSERT INTO workspaces (id, name, slug, avatar_url, created_by, created_at, updated_at)
 		VALUES ($1, 'Calendar Repo Test Workspace', $2, '', $3, $4, $4)`,
 		env.workspaceID,
@@ -395,7 +398,8 @@ func setupCalendarTestEnv(t *testing.T, ctx context.Context, pool *pgxpool.Pool)
 	); err != nil {
 		t.Fatalf("insert workspace: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `
+	if _, err := pool.Exec(
+		ctx, `
 		INSERT INTO user_calendars (id, owner_id, workspace_id, name, color, is_default, is_system, is_visible, created_at)
 		VALUES ($1, $2, $3, 'Calendar Repo Test Calendar', 'brand', true, false, true, $4)`,
 		env.calendarID,
@@ -438,7 +442,8 @@ func selectCalendarRepoTestReminderID(
 	t.Helper()
 
 	var reminderID uuid.UUID
-	if err := pool.QueryRow(ctx, `
+	if err := pool.QueryRow(
+		ctx, `
 		SELECT id
 		FROM event_reminders
 		WHERE event_id = $1
@@ -465,7 +470,8 @@ func insertCalendarRepoTestDispatch(
 ) {
 	t.Helper()
 
-	if _, err := pool.Exec(ctx, `
+	if _, err := pool.Exec(
+		ctx, `
 		INSERT INTO event_reminder_dispatches (reminder_id, occurrence_at, dispatched_at)
 		VALUES ($1, $2, $3)`,
 		reminderID,
@@ -486,7 +492,8 @@ type calendarRepoTestReminderRow struct {
 func selectCalendarRepoTestReminderRows(t *testing.T, ctx context.Context, pool *pgxpool.Pool, eventID uuid.UUID) []calendarRepoTestReminderRow {
 	t.Helper()
 
-	rows, err := pool.Query(ctx, `
+	rows, err := pool.Query(
+		ctx, `
 		SELECT id, user_id, offset_minutes, channel
 		FROM event_reminders
 		WHERE event_id = $1
@@ -516,7 +523,8 @@ func countCalendarRepoTestDispatches(t *testing.T, ctx context.Context, pool *pg
 	t.Helper()
 
 	var count int
-	if err := pool.QueryRow(ctx, `
+	if err := pool.QueryRow(
+		ctx, `
 		SELECT count(*)
 		FROM event_reminder_dispatches
 		WHERE reminder_id = $1`,

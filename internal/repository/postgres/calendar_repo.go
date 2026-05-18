@@ -77,7 +77,8 @@ func (r *CalendarRepo) GetUserCalendar(ctx context.Context, workspaceID, calenda
 }
 
 func (r *CalendarRepo) CreateUserCalendar(ctx context.Context, calendar *entity.UserCalendar) error {
-	_, err := r.db.Exec(ctx, `
+	_, err := r.db.Exec(
+		ctx, `
 		INSERT INTO user_calendars (id, owner_id, workspace_id, name, color, is_default, is_system, is_visible, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 		calendar.ID,
@@ -426,7 +427,8 @@ func (r *CalendarRepo) discoverDueReminderDispatches(ctx context.Context, now ti
 }
 
 func (r *CalendarRepo) EnqueueReminderOutbox(ctx context.Context, target entity.ReminderTarget, payloadJSON []byte, enqueuedAt time.Time) error {
-	if _, err := r.db.Exec(ctx, `
+	if _, err := r.db.Exec(
+		ctx, `
 		INSERT INTO reminder_outbox (reminder_id, event_id, occurrence_at, user_id, payload_json, enqueued_at)
 		VALUES ($1, $2, $3, $4, $5, $6)`,
 		target.ReminderID,
@@ -748,10 +750,6 @@ func (r *CalendarRepo) insertEvent(ctx context.Context, event *entity.CalendarEv
 		return wrapCalendarWriteErr(err, "create calendar event")
 	}
 	return nil
-}
-
-func (r *CalendarRepo) updateEventRow(ctx context.Context, event *entity.CalendarEvent) error {
-	return r.updateEventRowTx(ctx, event, nil)
 }
 
 func (r *CalendarRepo) updateEventRowTx(ctx context.Context, event *entity.CalendarEvent, expectedUpdatedAt *time.Time) error {

@@ -75,11 +75,17 @@ func NewSimulcastTrack(streamID, sourcePeer string) *SimulcastTrack {
 
 // AddLayer adds a quality layer to this simulcast track and starts forwarding.
 // Called when Pion fires OnTrack for each simulcast RID.
+//
+// The outbound local track's StreamID is set to st.SourcePeer (the user ID)
+// so subscribers can map remote streams back to a user via stream.id.
+// See ALOQA-245 / BE-PR3 §B1. SimulcastTrack.StreamID is retained as the
+// internal group key for the layers and is not exposed on the wire.
 func (st *SimulcastTrack) AddLayer(quality QualityLayer, remote *webrtc.TrackRemote) error {
+	outboundStreamID := st.SourcePeer
 	localTrack, err := webrtc.NewTrackLocalStaticRTP(
 		remote.Codec().RTPCodecCapability,
 		remote.ID(),
-		remote.StreamID(),
+		outboundStreamID,
 	)
 	if err != nil {
 		return err
@@ -91,7 +97,7 @@ func (st *SimulcastTrack) AddLayer(quality QualityLayer, remote *webrtc.TrackRem
 		done:       make(chan struct{}),
 		observed: ObservedTrack{
 			TrackID:    remote.ID(),
-			StreamID:   remote.StreamID(),
+			StreamID:   outboundStreamID,
 			SourcePeer: st.SourcePeer,
 			MimeType:   remote.Codec().MimeType,
 			Layer:      string(quality),
@@ -119,8 +125,12 @@ func (st *SimulcastTrack) AddLayer(quality QualityLayer, remote *webrtc.TrackRem
 }
 
 // AddInjectedLayer adds a simulcast layer backed by inter-node relay packets.
+//
+// Outbound StreamID is forced to st.SourcePeer for the same reason as
+// AddLayer — see ALOQA-245 / BE-PR3 §B1.
 func (st *SimulcastTrack) AddInjectedLayer(quality QualityLayer, trackID, mimeType string) error {
-	localTrack, err := webrtc.NewTrackLocalStaticRTP(codecCapabilityForMimeType(mimeType), trackID, st.StreamID)
+	outboundStreamID := st.SourcePeer
+	localTrack, err := webrtc.NewTrackLocalStaticRTP(codecCapabilityForMimeType(mimeType), trackID, outboundStreamID)
 	if err != nil {
 		return err
 	}
@@ -129,7 +139,7 @@ func (st *SimulcastTrack) AddInjectedLayer(quality QualityLayer, trackID, mimeTy
 		done:       make(chan struct{}),
 		observed: ObservedTrack{
 			TrackID:    trackID,
-			StreamID:   st.StreamID,
+			StreamID:   outboundStreamID,
 			SourcePeer: st.SourcePeer,
 			MimeType:   mimeType,
 			Layer:      string(quality),

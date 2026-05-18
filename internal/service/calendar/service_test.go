@@ -1051,6 +1051,143 @@ func TestMoveEventOccurrence_ConcurrentUpdate_Conflict_409(t *testing.T) {
 	assertConflict(t, err, "CONCURRENT_UPDATE")
 }
 
+func TestMoveEventOccurrence_Recurring_ThisAndFollowing_OK(t *testing.T) {
+	ctx := context.Background()
+	wsID, orgID := uuid.New(), uuid.New()
+	eventID := uuid.New()
+	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	instance := time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC)
+	futureEx := time.Date(2026, 5, 6, 10, 0, 0, 0, time.UTC)
+	delta := 2 * 24 * time.Hour
+	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+			Title: "Daily", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			ScheduledAt: start, DurationMinutes: 30,
+			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=7", Exdates: []time.Time{futureEx}}},
+	}}
+	txMgr := newCalendarReminderTxManager(repo)
+	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
+	svc.SetTransactionManager(txMgr)
+
+	newAt := instance.Add(delta)
+	res, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+		InstanceAt: instance, Scope: MoveScopeThisAndFollowing, NewScheduledAt: newAt,
+	})
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+
+	parent := txMgr.calendars.events[eventID]
+	if parent.Recurrence == nil || !strings.Contains(parent.Recurrence.RRule, "UNTIL=") {
+		t.Fatalf("parent must have UNTIL: %+v", parent.Recurrence)
+	}
+	for _, ex := range parent.Recurrence.Exdates {
+		if !ex.UTC().Before(instance.UTC()) {
+			t.Fatalf("parent exdate %v must be < instance", ex)
+		}
+	}
+	if res.Created == nil {
+		t.Fatal("Created must not be nil")
+	}
+	if !res.Created.ScheduledAt.Equal(newAt.UTC()) {
+		t.Fatalf("child ScheduledAt=%v", res.Created.ScheduledAt)
+	}
+	if res.Created.Recurrence == nil || !strings.Contains(res.Created.Recurrence.RRule, "FREQ=DAILY") {
+		t.Fatalf("child rrule: %+v", res.Created.Recurrence)
+	}
+	shiftedEx := futureEx.UTC().Add(delta)
+	var found bool
+	for _, ex := range res.Created.Recurrence.Exdates {
+		if ex.UTC().Equal(shiftedEx) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("child exdates %v missing shifted future exdate %v", res.Created.Recurrence.Exdates, shiftedEx)
+	}
+}
+
+func TestMoveEventOccurrence_Recurring_ThisAndFollowing_FirstOccurrence_DegeneratesToAll(t *testing.T) {
+	ctx := context.Background()
+	wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
+	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+			Title: "D", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			ScheduledAt: start, DurationMinutes: 30,
+			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=5"}},
+	}}
+	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
+
+	newAt := start.Add(time.Hour)
+	res, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+		InstanceAt: start, Scope: MoveScopeThisAndFollowing, NewScheduledAt: newAt,
+	})
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if !res.Updated.ScheduledAt.Equal(newAt.UTC()) || res.Created != nil {
+		t.Fatalf("degenerate: %+v", res)
+	}
+	if res.Updated.Recurrence == nil {
+		t.Fatal("recurrence must be preserved in degenerate path")
+	}
+}
+
+func TestMoveEventOccurrence_Recurring_ThisAndFollowing_LastOccurrence_OK(t *testing.T) {
+	ctx := context.Background()
+	wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
+	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	last := time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
+	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+			Title: "D", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			ScheduledAt: start, DurationMinutes: 30,
+			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=3"}},
+	}}
+	txMgr := newCalendarReminderTxManager(repo)
+	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
+	svc.SetTransactionManager(txMgr)
+
+	res, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+		InstanceAt: last, Scope: MoveScopeThisAndFollowing,
+		NewScheduledAt: last.Add(24 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if res.Created == nil {
+		t.Fatal("last occurrence must still produce child event")
+	}
+	if res.Created.Recurrence == nil || !strings.Contains(res.Created.Recurrence.RRule, "COUNT=1") {
+		t.Fatalf("child rrule must be COUNT=1: %+v", res.Created.Recurrence)
+	}
+}
+
+func TestMoveEventOccurrence_Recurring_ThisAndFollowing_FirstOccurrenceAlreadyExdated_BadRequest(t *testing.T) {
+	ctx := context.Background()
+	wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
+	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+			Title: "D", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			ScheduledAt: start, DurationMinutes: 30,
+			Recurrence: &entity.RecurrenceRule{
+				RRule:   "FREQ=DAILY;COUNT=5",
+				Exdates: []time.Time{start},
+			}},
+	}}
+	txMgr := newCalendarReminderTxManager(repo)
+	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
+	svc.SetTransactionManager(txMgr)
+
+	_, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+		InstanceAt: start, Scope: MoveScopeThisAndFollowing,
+		NewScheduledAt: start.Add(time.Hour),
+	})
+	assertInvalidInput(t, err, "INVALID_INSTANCE")
+}
+
 type fakeCalendarRepo struct {
 	mu                  sync.Mutex
 	calendars           []entity.UserCalendar

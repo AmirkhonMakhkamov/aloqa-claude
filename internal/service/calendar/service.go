@@ -581,8 +581,71 @@ func (s *Service) moveOccurrenceThis(ctx context.Context, existing *entity.Calen
 	return &MoveOccurrenceResult{Updated: parentAfter, Created: created}, nil
 }
 
-func (s *Service) moveOccurrenceThisAndFollowing(context.Context, *entity.CalendarEvent, MoveOccurrenceInput) (*MoveOccurrenceResult, error) {
-	return nil, cerrors.Unavailable("not yet implemented")
+func (s *Service) moveOccurrenceThisAndFollowing(ctx context.Context, existing *entity.CalendarEvent, input MoveOccurrenceInput) (*MoveOccurrenceResult, error) {
+	loc := recurrenceLocation(existing.OriginatorTZ)
+	ok, err := calrrule.IsMember(existing.Recurrence.RRule, existing.ScheduledAt.In(loc), input.InstanceAt.UTC(), existing.Recurrence.Exdates)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, cerrors.InvalidInput("INVALID_INSTANCE: instance_at is not a member of the series")
+	}
+	if input.InstanceAt.UTC().Equal(existing.ScheduledAt.UTC()) {
+		return s.moveOccurrenceAll(ctx, existing, input)
+	}
+	if s.tx == nil {
+		return nil, cerrors.Unavailable("transaction manager required for scope=this_and_following")
+	}
+
+	delta := input.NewScheduledAt.UTC().Sub(input.InstanceAt.UTC())
+	parentUntil := input.InstanceAt.UTC().Add(-time.Millisecond)
+	var parentExdates, childExdates []time.Time
+	for _, ex := range existing.Recurrence.Exdates {
+		switch {
+		case ex.UTC().Before(input.InstanceAt.UTC()):
+			parentExdates = append(parentExdates, ex)
+		case ex.UTC().After(input.InstanceAt.UTC()):
+			childExdates = append(childExdates, ex.UTC().Add(delta))
+		}
+	}
+
+	childRule, _, err := calrrule.ShiftBounds(existing.Recurrence.RRule, existing.ScheduledAt.UTC(), input.InstanceAt.UTC(), input.NewScheduledAt.UTC())
+	if err != nil {
+		return nil, err
+	}
+
+	var parentAfter, created *entity.CalendarEvent
+	if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
+		if scope.Calendars() == nil {
+			return cerrors.Unavailable("calendar transaction scope not configured")
+		}
+		parentRRule, err := calrrule.SetUntil(existing.Recurrence.RRule, parentUntil)
+		if err != nil {
+			return err
+		}
+		parent := cloneEvent(existing)
+		parent.Recurrence = &entity.RecurrenceRule{RRule: parentRRule, Exdates: parentExdates}
+		parent.UpdatedAt = time.Now().UTC()
+		updated, err := scope.Calendars().UpdateEventTx(ctx, parent, input.ExpectedUpdatedAt)
+		if err != nil {
+			return err
+		}
+		parentAfter = updated
+
+		child := buildOccurrenceChild(existing, input.NewScheduledAt, deriveDuration(existing, input))
+		child.Recurrence = &entity.RecurrenceRule{RRule: childRule, Exdates: childExdates}
+		inserted, err := scope.Calendars().CreateEventTx(ctx, child)
+		if err != nil {
+			return err
+		}
+		created = inserted
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	s.publishEvent(ctx, event.TypeCalendarEventUpdated, *parentAfter, existing.OrganizerID)
+	s.publishEvent(ctx, event.TypeCalendarEventCreated, *created, existing.OrganizerID)
+	return &MoveOccurrenceResult{Updated: parentAfter, Created: created}, nil
 }
 
 func (s *Service) UpsertRsvp(ctx context.Context, workspaceID, eventID, userID uuid.UUID, status entity.RsvpStatus) (*entity.EventAttendee, error) {

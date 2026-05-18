@@ -38,3 +38,36 @@ func TestNewInjectedTrackRouterForcesStreamIDToUserID(t *testing.T) {
 		t.Fatalf("router.observed.TrackID = %q, want %q", router.observed.TrackID, trackID)
 	}
 }
+
+// TestSimulcastAddInjectedLayerForcesStreamIDToUserID verifies the §B1
+// contract extends to simulcast injected layers: outbound local track
+// StreamID must equal SimulcastTrack.SourcePeer (the user ID) even when
+// SimulcastTrack.StreamID is set to the publisher's original group key.
+func TestSimulcastAddInjectedLayerForcesStreamIDToUserID(t *testing.T) {
+	const (
+		sourcePeer        = "user-42"
+		publisherStreamID = "browser-original-stream"
+		trackID           = "track-screen-low"
+		mimeType          = "video/VP8"
+		quality           = QualityLow
+	)
+
+	st := NewSimulcastTrack(publisherStreamID, sourcePeer)
+	if err := st.AddInjectedLayer(quality, trackID, mimeType); err != nil {
+		t.Fatalf("AddInjectedLayer: %v", err)
+	}
+
+	st.mu.RLock()
+	layer, ok := st.layers[quality]
+	st.mu.RUnlock()
+	if !ok {
+		t.Fatalf("layer %q not registered on simulcast track", quality)
+	}
+	if got := layer.localTrack.StreamID(); got != sourcePeer {
+		t.Fatalf("localTrack.StreamID() = %q, want sourcePeer %q (publisher streamID %q must not leak)",
+			got, sourcePeer, publisherStreamID)
+	}
+	if layer.observed.StreamID != sourcePeer {
+		t.Fatalf("layer.observed.StreamID = %q, want %q", layer.observed.StreamID, sourcePeer)
+	}
+}

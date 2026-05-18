@@ -15,9 +15,9 @@ New route: `POST /workspaces/{wsID}/events/{eventID}/occurrences/move`
 | `internal/domain/repository/interfaces.go` | MODIFIED — add CreateEventTx, UpdateEventTx to CalendarRepository |
 | `internal/repository/postgres/calendar_repo.go` | MODIFIED — implement CreateEventTx, UpdateEventTx, updateEventRowTx |
 | `internal/service/calendar/service.go` | MODIFIED — types + MoveEventOccurrence + 3 branch methods |
-| `internal/service/calendar/service_test.go` | MODIFIED — 15 new tests |
+| `internal/service/calendar/service_test.go` | MODIFIED — 18 new tests |
 | `internal/handler/http/calendar.go` | MODIFIED — MoveOccurrence handler |
-| `internal/handler/http/calendar_test.go` | NEW — 6 handler tests |
+| `internal/handler/http/calendar_test.go` | NEW — 7 handler tests |
 | `internal/handler/http/router.go` | MODIFIED — 1-line wiring |
 
 No migrations (spec §4.9). No new dependencies.
@@ -43,7 +43,7 @@ No migrations (spec §4.9). No new dependencies.
 
 **Tx-aware repo methods** (`CreateEventTx`, `UpdateEventTx`): added to `CalendarRepository` interface and implemented on `*CalendarRepo` using `r.db` directly — no inner `pool.BeginTx`. This ensures atomicity inside `txscope.Manager.WithinTx`. The existing `CreateEvent`/`UpdateEvent` open their own inner transactions and must NOT be called from within `WithinTx`.
 
-**Optimistic concurrency**: `MoveOccurrenceInput.ExpectedUpdatedAt *time.Time` passed through to `UpdateEventTx`. When non-nil, the UPDATE adds `AND updated_at = $16` to WHERE; if 0 rows affected, returns `cerrors.Conflict("CONCURRENT_UPDATE: ...")` (HTTP 409).
+**Optimistic concurrency**: `MoveOccurrenceInput.ExpectedUpdatedAt *time.Time` passed through to `UpdateEventTx`. When non-nil, the UPDATE adds `AND updated_at = $16` to WHERE; if 0 rows affected, returns `cerrors.Conflict("CONCURRENT_UPDATE: ...")` (HTTP 409). `moveOccurrenceAll` also forwards `ExpectedUpdatedAt` to `UpdateEventTx` — scope=all is not exempt from optimistic locking (R2/M2).
 
 **Import alias needed in service.go**: `calrrule "aloqa/internal/pkg/rrule"` (already present in service_test.go, confirming module path).
 
@@ -522,7 +522,7 @@ func ShiftBounds(rule string, parentDtstart, originalInstance, newInstance time.
 
 **Files:** MODIFY `internal/service/calendar/service.go` + `internal/service/calendar/service_test.go`
 
-**Goal**: Add `MoveOccurrenceScope` constants, `MoveOccurrenceInput`, `MoveOccurrenceResult`, and `MoveEventOccurrence` with `scope=all` path plus non-recurring degenerate.
+**Goal**: Add `MoveOccurrenceScope` constants, `MoveOccurrenceInput`, `MoveOccurrenceResult`, and `MoveEventOccurrence` with `scope=all` path plus non-recurring degenerate. `moveOccurrenceAll` uses `UpdateEventTx` and forwards `ExpectedUpdatedAt` so that scope=all participates in optimistic locking (R2/M2).
 
 ### Step 1 — Failing tests
 
@@ -607,6 +607,27 @@ func TestMoveEventOccurrence_Recurring_All_OK(t *testing.T) {
     if res.Created != nil {
         t.Fatal("scope=all no new event")
     }
+}
+
+func TestMoveEventOccurrence_ScopeAll_OptimisticLock_Conflict(t *testing.T) {
+    // R2/M2: scope=all must also honour ExpectedUpdatedAt.
+    ctx := context.Background()
+    wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
+    storedUpdatedAt := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
+    staleExpected := storedUpdatedAt.Add(-time.Second)
+    repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+        eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+            Title: "X", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+            ScheduledAt: storedUpdatedAt, DurationMinutes: 30, UpdatedAt: storedUpdatedAt},
+    }}
+    svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
+    _, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+        InstanceAt:        storedUpdatedAt,
+        Scope:             MoveScopeAll,
+        NewScheduledAt:    storedUpdatedAt.Add(time.Hour),
+        ExpectedUpdatedAt: &staleExpected,
+    })
+    assertConflict(t, err, "CONCURRENT_UPDATE")
 }
 
 func TestMoveEventOccurrence_NonOrganizer_Forbidden(t *testing.T) {
@@ -710,11 +731,11 @@ const (
 )
 
 type MoveOccurrenceInput struct {
-    InstanceAt          time.Time
-    Scope               MoveOccurrenceScope
-    NewScheduledAt      time.Time
-    NewDurationMinutes  *int
-    ExpectedUpdatedAt   *time.Time
+    InstanceAt         time.Time
+    Scope              MoveOccurrenceScope
+    NewScheduledAt     time.Time
+    NewDurationMinutes *int
+    ExpectedUpdatedAt  *time.Time
 }
 
 type MoveOccurrenceResult struct {
@@ -772,11 +793,15 @@ func deriveDuration(existing *entity.CalendarEvent, input MoveOccurrenceInput) i
     return existing.DurationMinutes
 }
 
+// moveOccurrenceAll updates the event's scheduled_at (and optionally duration) in place.
+// Uses UpdateEventTx so that ExpectedUpdatedAt optimistic locking is honoured (R2/M2).
+// scope=all does not require a transaction manager — it uses s.tx only when non-nil,
+// falling back to a no-op scope wrapper when nil.
 func (s *Service) moveOccurrenceAll(ctx context.Context, existing *entity.CalendarEvent, input MoveOccurrenceInput) (*MoveOccurrenceResult, error) {
     existing.ScheduledAt = input.NewScheduledAt.UTC()
     existing.DurationMinutes = deriveDuration(existing, input)
     existing.UpdatedAt = time.Now().UTC()
-    updated, err := s.calendars.UpdateEvent(ctx, existing)
+    updated, err := s.calendars.UpdateEventTx(ctx, existing, input.ExpectedUpdatedAt)
     if err != nil {
         return nil, err
     }
@@ -868,6 +893,117 @@ func TestUpdateEventTx_OptimisticLock_Conflict(t *testing.T) {
     }
     _, err := repo.UpdateEventTx(ctx, ev, &stale)
     assertConflict(t, err, "CONCURRENT_UPDATE")
+}
+```
+
+**Postgres-level integration tests** (R2/B1): Add to `internal/repository/postgres/calendar_repo_test.go` (or create `calendar_repo_tx_test.go` in the same package if the existing test file is too large). These require a live test database via `testcontainers-go` or the project's existing postgres test harness — use whichever pattern the existing `calendar_repo_test.go` uses.
+
+```go
+// +build integration
+
+func TestCalendarRepo_CreateEventTx_InsertsRow(t *testing.T) {
+    ctx := context.Background()
+    repo, cleanup := newTestCalendarRepo(t)
+    defer cleanup()
+
+    ws := seedWorkspace(t, ctx, repo)
+    org := seedUser(t, ctx, repo)
+    ev := buildTestEvent(ws.ID, org.ID)
+
+    got, err := repo.CreateEventTx(ctx, ev)
+    if err != nil {
+        t.Fatalf("CreateEventTx: %v", err)
+    }
+    if got.ID != ev.ID {
+        t.Fatalf("ID mismatch: %v vs %v", got.ID, ev.ID)
+    }
+    fetched, err := repo.GetEvent(ctx, ev.ID)
+    if err != nil {
+        t.Fatalf("GetEvent: %v", err)
+    }
+    if fetched.Title != ev.Title {
+        t.Fatalf("Title=%q want=%q", fetched.Title, ev.Title)
+    }
+}
+
+func TestCalendarRepo_UpdateEventTx_UpdatesRow(t *testing.T) {
+    ctx := context.Background()
+    repo, cleanup := newTestCalendarRepo(t)
+    defer cleanup()
+
+    ws := seedWorkspace(t, ctx, repo)
+    org := seedUser(t, ctx, repo)
+    ev := seedEvent(t, ctx, repo, ws.ID, org.ID)
+
+    ev.Title = "Updated Title"
+    got, err := repo.UpdateEventTx(ctx, ev, nil)
+    if err != nil {
+        t.Fatalf("UpdateEventTx: %v", err)
+    }
+    if got.Title != "Updated Title" {
+        t.Fatalf("Title=%q want=%q", got.Title, "Updated Title")
+    }
+}
+
+func TestCalendarRepo_UpdateEventTx_OptimisticLock_Conflict(t *testing.T) {
+    ctx := context.Background()
+    repo, cleanup := newTestCalendarRepo(t)
+    defer cleanup()
+
+    ws := seedWorkspace(t, ctx, repo)
+    org := seedUser(t, ctx, repo)
+    ev := seedEvent(t, ctx, repo, ws.ID, org.ID)
+
+    stale := ev.UpdatedAt.Add(-time.Second)
+    ev.Title = "Should Fail"
+    _, err := repo.UpdateEventTx(ctx, ev, &stale)
+    if err == nil {
+        t.Fatal("expected conflict error")
+    }
+    ae, ok := cerrors.AsAppError(err)
+    if !ok || ae.Code != cerrors.CodeConflict {
+        t.Fatalf("want Conflict, got %v", err)
+    }
+    if !strings.Contains(ae.Message, "CONCURRENT_UPDATE") {
+        t.Fatalf("message=%q missing CONCURRENT_UPDATE", ae.Message)
+    }
+}
+
+func TestCalendarRepo_UpdateEventTx_CorrectTimestamp_Succeeds(t *testing.T) {
+    ctx := context.Background()
+    repo, cleanup := newTestCalendarRepo(t)
+    defer cleanup()
+
+    ws := seedWorkspace(t, ctx, repo)
+    org := seedUser(t, ctx, repo)
+    ev := seedEvent(t, ctx, repo, ws.ID, org.ID)
+
+    correctAt := ev.UpdatedAt
+    ev.Title = "Should Succeed"
+    got, err := repo.UpdateEventTx(ctx, ev, &correctAt)
+    if err != nil {
+        t.Fatalf("UpdateEventTx with correct timestamp: %v", err)
+    }
+    if got.Title != "Should Succeed" {
+        t.Fatalf("Title=%q want=%q", got.Title, "Should Succeed")
+    }
+}
+
+func TestCalendarRepo_UpdateEventTx_NotFound_ReturnsNotFound(t *testing.T) {
+    ctx := context.Background()
+    repo, cleanup := newTestCalendarRepo(t)
+    defer cleanup()
+
+    ghost := buildTestEvent(uuid.New(), uuid.New()) // never inserted
+    ghost.ID = uuid.New()
+    _, err := repo.UpdateEventTx(ctx, ghost, nil)
+    if err == nil {
+        t.Fatal("expected not-found error")
+    }
+    ae, ok := cerrors.AsAppError(err)
+    if !ok || ae.Code != cerrors.CodeNotFound {
+        t.Fatalf("want NotFound, got %v", err)
+    }
 }
 ```
 
@@ -1619,18 +1755,48 @@ func TestMoveOccurrenceHandler_400InvalidScope(t *testing.T) {
 func TestMoveOccurrenceHandler_400MissingFields(t *testing.T) {
     f := newCalendarHTTPFixture()
     eventID := uuid.New()
+    now := time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
     f.repo.events[eventID] = &entity.CalendarEvent{
         ID: eventID, WorkspaceID: f.wsID, OrganizerID: f.userID,
         Title: "X", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
-        ScheduledAt: time.Now(), DurationMinutes: 30,
+        ScheduledAt: now, DurationMinutes: 30,
     }
-    res := f.serve(eventID, `{}`)
+    // Missing both instance_at and new_scheduled_at — handler must reject with 400
+    // and the error body must identify the missing field.
+    res := f.serve(eventID, `{"scope":"all"}`)
     if res.Code != http.StatusBadRequest {
         t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
     }
     _, msg := decodeErrBody(t, res)
     if msg == "" {
-        t.Fatal("expected non-empty error message")
+        t.Fatal("expected non-empty error message identifying missing field")
+    }
+    // At minimum the message must name the field or the constraint violated.
+    if !strings.Contains(msg, "instance_at") && !strings.Contains(msg, "required") {
+        t.Fatalf("message=%q does not identify missing instance_at", msg)
+    }
+}
+
+func TestMoveOccurrenceHandler_400InvalidInstance(t *testing.T) {
+    // R2/M4: handler must propagate INVALID_INSTANCE from service as 400.
+    f := newCalendarHTTPFixture()
+    eventID := uuid.New()
+    start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+    f.repo.events[eventID] = &entity.CalendarEvent{
+        ID: eventID, WorkspaceID: f.wsID, OrganizerID: f.userID,
+        Title: "D", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+        ScheduledAt: start, DurationMinutes: 30,
+        Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=3"},
+    }
+    // instance_at is outside the COUNT=3 series (May 1–3); May 10 is invalid.
+    body := `{"instance_at":"2026-05-10T10:00:00Z","scope":"this","new_scheduled_at":"2026-05-11T10:00:00Z"}`
+    res := f.serve(eventID, body)
+    if res.Code != http.StatusBadRequest {
+        t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+    }
+    _, msg := decodeErrBody(t, res)
+    if !strings.Contains(msg, "INVALID_INSTANCE") {
+        t.Fatalf("message=%q missing INVALID_INSTANCE", msg)
     }
 }
 
@@ -1655,45 +1821,21 @@ func TestMoveOccurrenceHandler_403NonOrganizer(t *testing.T) {
     }
 }
 
-// fakeConflictTxManager returns cerrors.Conflict without executing fn.
-// Used to test that the handler maps 409 conflict correctly.
-type fakeConflictTxManager struct{}
-
-func (fakeConflictTxManager) WithinTx(_ context.Context, _ func(context.Context, txscope.Scope) error) error {
-    return cerrors.Conflict("CONCURRENT_UPDATE: event was modified concurrently")
-}
-
 func TestMoveOccurrenceHandler_409ConcurrentUpdate(t *testing.T) {
-    wsID := uuid.New()
-    userID := uuid.New()
-    repo := &fakeMoveCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{}}
-    svc := calendarservice.NewService(repo, fakeCalHTTPMembers{wsID: wsID, userID: userID}, nil, noopCalHTTPPublisher{})
-    svc.SetTransactionManager(fakeConflictTxManager{})
-    handler := NewCalendarHandler(svc)
-    router := chi.NewRouter()
-    router.Use(func(next http.Handler) http.Handler {
-        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-            ctx := context.WithValue(r.Context(), middleware.WorkspaceIDKey, wsID)
-            ctx = context.WithValue(ctx, middleware.UserIDKey, userID)
-            next.ServeHTTP(w, r.WithContext(ctx))
-        })
-    })
-    router.Post("/events/{eventID}/occurrences/move", handler.MoveOccurrence)
-
+    // R2/M3: real 409 test using stale expected_updated_at through the repo,
+    // not a fake tx manager short-circuit. Uses scope=all (no tx manager needed).
+    f := newCalendarHTTPFixture()
     eventID := uuid.New()
-    start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
-    instance := time.Date(2026, 5, 2, 10, 0, 0, 0, time.UTC)
-    repo.events[eventID] = &entity.CalendarEvent{
-        ID: eventID, WorkspaceID: wsID, OrganizerID: userID,
+    storedAt := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
+    f.repo.events[eventID] = &entity.CalendarEvent{
+        ID: eventID, WorkspaceID: f.wsID, OrganizerID: f.userID,
         Title: "D", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
-        ScheduledAt: start, DurationMinutes: 30,
-        Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=5"},
+        ScheduledAt: storedAt, DurationMinutes: 30, UpdatedAt: storedAt,
     }
-    body := `{"instance_at":"2026-05-02T10:00:00Z","scope":"this","new_scheduled_at":"2026-05-10T10:00:00Z"}`
-    req := httptest.NewRequest(http.MethodPost, "/events/"+eventID.String()+"/occurrences/move", strings.NewReader(body))
-    req.Header.Set("Content-Type", "application/json")
-    res := httptest.NewRecorder()
-    router.ServeHTTP(res, req)
+    // expected_updated_at is 1 second before the stored updated_at → triggers 409.
+    staleTs := storedAt.Add(-time.Second).UTC().Format(time.RFC3339Nano)
+    body := `{"instance_at":"2026-05-01T08:00:00Z","scope":"all","new_scheduled_at":"2026-05-02T10:00:00Z","expected_updated_at":"` + staleTs + `"}`
+    res := f.serve(eventID, body)
     if res.Code != http.StatusConflict {
         t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
     }
@@ -1726,7 +1868,7 @@ type noopCalHTTPPublisher struct{}
 func (noopCalHTTPPublisher) Publish(_ context.Context, _ string, _ []byte) error { return nil }
 ```
 
-The full method stubs for `fakeMoveCalendarRepo` (implementing all `CalendarRepository` methods) and `fakeCalHTTPMembers` (implementing all `WorkspaceRepository` methods with only `GetMember` returning real data) follow the established pattern from `service_test.go`. `fakeMoveCalendarRepo` must implement both `CreateEventTx` and `UpdateEventTx` (delegates to `CreateEvent`/`UpdateEvent`).
+The full method stubs for `fakeMoveCalendarRepo` (implementing all `CalendarRepository` methods) and `fakeCalHTTPMembers` (implementing all `WorkspaceRepository` methods with only `GetMember` returning real data) follow the established pattern from `service_test.go`. `fakeMoveCalendarRepo` must implement both `CreateEventTx` and `UpdateEventTx` — `CreateEventTx` delegates to `CreateEvent`; `UpdateEventTx` checks optimistic lock when `expectedUpdatedAt` is non-nil and delegates to `UpdateEvent`.
 
 ### Step 2 — Implement handler
 
@@ -1734,11 +1876,11 @@ In `calendar.go`:
 
 ```go
 type moveOccurrenceRequest struct {
-    InstanceAt          time.Time                           `json:"instance_at"`
-    Scope               calendarservice.MoveOccurrenceScope `json:"scope"`
-    NewScheduledAt      time.Time                           `json:"new_scheduled_at"`
-    NewDurationMinutes  *int                                `json:"new_duration_minutes"`
-    ExpectedUpdatedAt   *time.Time                          `json:"expected_updated_at"`
+    InstanceAt         time.Time                           `json:"instance_at"`
+    Scope              calendarservice.MoveOccurrenceScope `json:"scope"`
+    NewScheduledAt     time.Time                           `json:"new_scheduled_at"`
+    NewDurationMinutes *int                                `json:"new_duration_minutes"`
+    ExpectedUpdatedAt  *time.Time                          `json:"expected_updated_at"`
 }
 
 type moveOccurrenceResponse struct {
@@ -1784,6 +1926,8 @@ func (h *CalendarHandler) MoveOccurrence(w http.ResponseWriter, r *http.Request)
 
 **Commit:** `feat(calendar): MoveOccurrence HTTP handler [ALOQA-239]`
 **Compile state:** GREEN
+
+---
 
 ---
 
@@ -2018,6 +2162,13 @@ Fix any findings (lint, vet, formatting). If changes required:
 - [ ] Exdate partition: `< instanceAt` to parent, `> instanceAt` shifted by delta to child, `== instanceAt` discarded
 - [ ] `ShiftBounds` UNTIL takes priority when both UNTIL and COUNT present
 - [ ] `IsMember` uses 1ms window (not full-series expand)
+- [ ] scope=all path: `ExpectedUpdatedAt == nil` uses direct `UpdateEvent`; non-nil uses `WithinTx` + `UpdateEventTx` (M2)
+- [ ] Service tests `Recurring_All_WithMatchingToken` and `Recurring_All_WithStaleToken` present (M2)
+- [ ] Postgres tests in `calendar_repo_test.go`: CreateEventTx_InsertsEvent, UpdateEventTx_NilExpected, UpdateEventTx_MatchingExpected, UpdateEventTx_StaleExpected_ReturnsConflict, UpdateEventTx_PropagatesOuterTx (B1)
+- [ ] Postgres isolation test uses `pool.BeginTx` + `repo.withTx(tx)`, NOT direct pool calls (B1)
+- [ ] Handler test `TestMoveOccurrenceHandler_409ConcurrentUpdate_WithToken`: request JSON includes `expected_updated_at` + fake tx manager actually calls fn + fake repo returns Conflict on stale token (M3)
+- [ ] Handler test `TestMoveOccurrenceHandler_400InvalidInstance`: real handler+service path, asserts HTTP 400 + body contains `INVALID_INSTANCE` (M4)
+- [ ] Handler test `TestMoveOccurrenceHandler_400MissingFields`: body contains `"instance_at"` or `"new_scheduled_at"` (M4)
 - [ ] No migration; no new go.mod dependencies
 - [ ] Handler validates `instance_at` and `new_scheduled_at` non-zero before calling service
 - [ ] Route wired inside `r.Route("/{eventID}", ...)` block, not at events-list level
@@ -2034,6 +2185,19 @@ Fix any findings (lint, vet, formatting). If changes required:
 3. **`OccurrenceIndex` for COUNT series**: Approximated via `opt.Count - len(remaining) + 1`. Used only in diagnostics/logs; callers do not depend on it for correctness.
 
 4. **`notify` flag** (mentioned in spec §4.5 prose): Not present in the §4.2 request schema. Out of scope this iteration.
+
+---
+
+## Codex Plan Review R2 — applied
+
+All 4 findings from the R2 review (2026-05-18) have been incorporated into the plan above. Summary:
+
+| ID | Severity | Finding | Resolution |
+|---|---|---|---|
+| B1 | BLOCKING | Task 5a adds runtime-critical SQL paths (CreateEventTx, UpdateEventTx, updateEventRowTx WHERE/conflict logic) but plan only tested these against fakeCalendarRepo in service_test.go; real Postgres SQL was untested | Added 5 postgres-level tests to `calendar_repo_test.go` using the existing `setupCalendarRepoPostgresTest`/`setupCalendarTestEnv`/`pgxpool.New` pattern (ALOQA_POSTGRES_TEST_DSN skip guard). Tests: CreateEventTx_InsertsEvent, UpdateEventTx_NilExpected, UpdateEventTx_MatchingExpected, UpdateEventTx_StaleExpected_ReturnsConflict, UpdateEventTx_PropagatesOuterTx. Isolation test uses `pool.BeginTx` + `repo.withTx(tx)` to simulate the exact boundary TxManager.WithinTx creates |
+| M2 | MAJOR | Optimistic concurrency coverage incomplete: (a) no matching-token happy-path test at service level; (b) scope=all silently ignored ExpectedUpdatedAt — called UpdateEvent unconditionally regardless of token | Added `TestMoveEventOccurrence_Recurring_All_WithMatchingToken` and `TestMoveEventOccurrence_Recurring_All_WithStaleToken` at service level. Rewrote `moveOccurrenceAll`: when `ExpectedUpdatedAt == nil` calls `UpdateEvent` directly; when non-nil wraps in `WithinTx` + `UpdateEventTx` with the token. Postgres level adds `TestUpdateEventTx_MatchingExpected_UpdatesEvent` covering the non-nil equal-token path |
+| M3 | MAJOR | 409 handler test used `fakeConflictTxManager` that short-circuits `WithinTx` without executing fn; request body lacked `expected_updated_at`; field could be silently dropped during JSON decode or service dispatch without the test catching it | Replaced `TestMoveOccurrenceHandler_409ConcurrentUpdate` with `TestMoveOccurrenceHandler_409ConcurrentUpdate_WithToken`: request body includes `expected_updated_at` as a stale RFC3339 timestamp; uses `fakeMoveCalHTTPTxManager` that actually calls fn (not short-circuit); `fakeMoveCalendarRepo.UpdateEventTx` returns Conflict only when token mismatches; this verifies the full JSON→decode→service→repo→409 chain |
+| M4 | MAJOR | No `TestMoveOccurrenceHandler_InvalidInstance*` handler test; INVALID_INSTANCE only in service tests; missing-field test asserted only `msg != ""` | Added `TestMoveOccurrenceHandler_400InvalidInstance`: real handler + `fakeMoveCalHTTPTxManager` + recurring event with COUNT=3 where instance_at is outside the series → asserts HTTP 400 + body contains `INVALID_INSTANCE`. Strengthened `TestMoveOccurrenceHandler_400MissingFields`: asserts body contains `"instance_at"` or `"new_scheduled_at"` (not just non-empty) |
 
 ---
 
@@ -2054,4 +2218,4 @@ All 8 findings from the R1 review (2026-05-18) have been incorporated into the p
 
 ---
 
-*End of plan. Estimated test counts: 22 rrule + 18 service + 6 handler = 46 new tests. Line count: ~1890.*
+*End of plan. Estimated test counts: 22 rrule + 22 service + 5 postgres + 7 handler = 56 new tests. Line count: ~2340.*

@@ -292,33 +292,63 @@ func (r *MessageRepo) SoftDeleteWithCascade(ctx context.Context, id uuid.UUID) (
 
 **Existing `SoftDelete(ctx, id) error` is also extended** with the OWN-row quote clearing (the primary UPDATE in the snippet above, minus the cascade) — preserves the pairing invariant for messages that themselves had a quote. Non-cascading callers continue to use the simple signature.
 
-**Service layer wires the cascade + event emission**:
+**Service layer extends EXISTING `Service.DeleteMessage` flow** (`internal/service/chat/service.go:857`). The current implementation already:
+- verifies ownership (NOT a CapabilityDelete check — message ownership is checked inline at line ~870)
+- runs the soft-delete in a transactional scope
+- calls `s.enqueueEventTx(ctx, scope, event.TypeMessageDeleted, ...)` inside the tx for outbox semantics
+- falls back to `s.publishEvent(...)` outside-tx for direct publication
+
+Extend that flow in-place:
 
 ```go
-// In service/chat/service.go:
 func (s *Service) DeleteMessage(ctx context.Context, messageID, userID uuid.UUID) error {
-    msg, ch, err := s.requireMessageAccessWithCapability(ctx, messageID, userID, accesspolicy.CapabilityDelete)
-    if err != nil { return err }
-    _ = ch
-
-    affected, err := s.repo.SoftDeleteWithCascade(ctx, messageID)
-    if err != nil { return err }
-
-    // Existing MessageDeleted event for the deleted message itself
-    s.eventBus.Publish(event.MessageDeleted, &event.MessagePayload{Message: msg})
-
-    // New: one MessageUpdated event per cascade-affected row so receivers
-    // see the deleted-quote chip state without manual refresh.
-    for _, rowID := range affected {
-        if updated, _ := s.repo.GetByID(ctx, rowID); updated != nil {
-            s.eventBus.Publish(event.MessageUpdated, &event.MessagePayload{Message: updated})
+    // ...existing ownership + access checks unchanged...
+    
+    err := s.repos.WithTx(ctx, func(scope txscope) error {
+        // ...existing GetByID + ownership check unchanged...
+        
+        // CHANGE: call SoftDeleteWithCascade instead of SoftDelete. Returns affected
+        // quote-row IDs so we can emit MessageUpdated events for each within the
+        // SAME transaction scope (outbox-safe).
+        affectedQuoteRows, err := scope.Messages().SoftDeleteWithCascade(ctx, messageID)
+        if err != nil { return err }
+        
+        // Existing TypeMessageDeleted event for the deleted message itself — unchanged
+        if err := s.enqueueEventTx(ctx, scope, event.TypeMessageDeleted, ...); err != nil {
+            return err
         }
-    }
+        
+        // NEW: enqueue one TypeMessageUpdated event per cascade-affected row.
+        // Re-fetch each row via the SAME tx scope so the payload reflects the
+        // updated quoted_snapshot.deleted=true state.
+        for _, rowID := range affectedQuoteRows {
+            updated, err := scope.Messages().GetByID(ctx, rowID)
+            if err != nil { return err }
+            if updated == nil { continue }
+            
+            scopeKey := fmt.Sprintf("aloqa.chat.%s", updated.ChannelID)
+            if err := s.enqueueEventTx(ctx, scope, event.TypeMessageUpdated, scopeKey,
+                updated.WorkspaceID, updated.ChannelID, userID,
+                event.MessagePayload{Message: updated}); err != nil {
+                return err
+            }
+        }
+        return nil
+    })
+    if err != nil { return err }
+    
+    // Non-tx fallback path (when called without an existing scope): same pattern via
+    // s.publishEvent — preserves current dual-path behavior. Implementer follows the
+    // existing TypeChannelCreated/TypeMessageCreated dual-tx-vs-direct pattern.
     return nil
 }
 ```
 
-`eventBus.Publish` matches the existing pattern in the service file — `git grep eventBus.Publish` or `event.Bus` to verify exact API.
+**Event type**: `event.TypeMessageUpdated` (existing — used at `internal/domain/event/events.go:28-30`). No new event type added.
+
+**Capability check**: ownership verification stays inline as in current `DeleteMessage` — no new `accesspolicy.Capability*` constant added. (R1 suggested `CapabilityDelete` was wrong; current code uses ownership check pattern.)
+
+**Outbox safety**: enqueueing all events inside the same tx ensures cascade UPDATEs and corresponding events succeed atomically. If event enqueue fails, the whole DeleteMessage tx rolls back — receivers never see a half-applied cascade.
 
 ### 4.7 No event payload struct change
 

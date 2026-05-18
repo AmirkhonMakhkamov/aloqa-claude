@@ -667,6 +667,23 @@ func (s *Service) SendMessage(
 			return nil, cerrors.InvalidInput("forwarded_from must be valid JSON")
 		}
 	}
+	if (input.QuotedMessageID == nil) != (input.QuotedSnapshot == nil) {
+		return nil, cerrors.InvalidInput("quoted_message_id and quoted_snapshot must be set together")
+	}
+
+	var quotedSnapshot *entity.QuotedSnapshot
+	if input.QuotedSnapshot != nil {
+		if utf8.RuneCountInString(input.QuotedSnapshot.ContentExcerpt) > 200 {
+			return nil, cerrors.InvalidInput("quoted_snapshot.content_excerpt must be at most 200 characters")
+		}
+		quotedSnapshot = &entity.QuotedSnapshot{
+			UserID:          input.QuotedSnapshot.UserID,
+			ContentExcerpt:  input.QuotedSnapshot.ContentExcerpt,
+			CreatedAt:       input.QuotedSnapshot.CreatedAt,
+			Deleted:         nil,
+			ParentMessageID: input.QuotedSnapshot.ParentMessageID,
+		}
+	}
 
 	// Verify channel exists.
 	decision, err := s.authorizeChannel(ctx, channelID, userID, accesspolicy.CapabilityParticipate)
@@ -696,15 +713,17 @@ func (s *Service) SendMessage(
 
 	now := time.Now()
 	msg := &entity.Message{
-		ID:            id.New(),
-		ChannelID:     channelID,
-		UserID:        userID,
-		ParentID:      input.ParentID,
-		Content:       input.Content,
-		Type:          entity.MessageTypeText,
-		ForwardedFrom: input.ForwardedFrom,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		ID:              id.New(),
+		ChannelID:       channelID,
+		UserID:          userID,
+		ParentID:        input.ParentID,
+		Content:         input.Content,
+		Type:            entity.MessageTypeText,
+		ForwardedFrom:   input.ForwardedFrom,
+		QuotedMessageID: input.QuotedMessageID,
+		QuotedSnapshot:  quotedSnapshot,
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}
 
 	if s.tx != nil {
@@ -885,7 +904,8 @@ func (s *Service) DeleteMessage(ctx context.Context, messageID, userID uuid.UUID
 			if scope.Messages() == nil {
 				return cerrors.Unavailable("message transaction scope is not configured")
 			}
-			if err := scope.Messages().SoftDelete(ctx, messageID); err != nil {
+			affectedQuoteRows, err := scope.Messages().SoftDeleteWithCascade(ctx, messageID)
+			if err != nil {
 				return err
 			}
 			deletedMsg, err := scope.Messages().GetByID(ctx, messageID)
@@ -908,13 +928,17 @@ func (s *Service) DeleteMessage(ctx context.Context, messageID, userID uuid.UUID
 					}
 				}
 			}
-			return s.enqueueEventTx(ctx, scope, event.TypeMessageDeleted, fmt.Sprintf("aloqa.chat.%s", msg.ChannelID), workspaceID, msg.ChannelID, userID, event.MessagePayload{Message: msg})
+			if err := s.enqueueEventTx(ctx, scope, event.TypeMessageDeleted, fmt.Sprintf("aloqa.chat.%s", msg.ChannelID), workspaceID, msg.ChannelID, userID, event.MessagePayload{Message: msg}); err != nil {
+				return err
+			}
+			return s.enqueueCascadeQuoteUpdateEventsTx(ctx, scope, affectedQuoteRows, userID)
 		}); err != nil {
 			slog.ErrorContext(ctx, "failed to delete message transaction", "message_id", messageID, "error", err)
 			return cerrors.Internal("failed to delete message", err)
 		}
 	} else {
-		if err := s.messages.SoftDelete(ctx, messageID); err != nil {
+		affectedQuoteRows, err := s.messages.SoftDeleteWithCascade(ctx, messageID)
+		if err != nil {
 			slog.ErrorContext(ctx, "failed to soft-delete message", "message_id", messageID, "error", err)
 			return cerrors.Internal("failed to delete message", err)
 		}
@@ -946,10 +970,60 @@ func (s *Service) DeleteMessage(ctx context.Context, messageID, userID uuid.UUID
 			}
 		}
 		s.publishEvent(ctx, event.TypeMessageDeleted, workspaceID, msg.ChannelID, userID, event.MessagePayload{Message: msg})
+		s.publishCascadeQuoteUpdateEvents(ctx, affectedQuoteRows, userID)
 	}
 
 	slog.InfoContext(ctx, "message deleted", "message_id", messageID, "user_id", userID)
 	return nil
+}
+
+func (s *Service) enqueueCascadeQuoteUpdateEventsTx(ctx context.Context, scope txscope.Scope, affectedQuoteRows []uuid.UUID, userID uuid.UUID) error {
+	if scope.Messages() == nil {
+		return cerrors.Unavailable("message transaction scope is not configured")
+	}
+	if scope.Channels() == nil {
+		return cerrors.Unavailable("channel transaction scope is not configured")
+	}
+	for _, rowID := range affectedQuoteRows {
+		updated, err := scope.Messages().GetByID(ctx, rowID)
+		if err != nil {
+			return err
+		}
+		if updated == nil {
+			continue
+		}
+		ch, err := scope.Channels().GetByID(ctx, updated.ChannelID)
+		if err != nil {
+			return err
+		}
+		if ch == nil {
+			continue
+		}
+		if err := s.enqueueEventTx(ctx, scope, event.TypeMessageUpdated, fmt.Sprintf("aloqa.chat.%s", updated.ChannelID), ch.WorkspaceID, updated.ChannelID, userID, event.MessagePayload{Message: updated}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) publishCascadeQuoteUpdateEvents(ctx context.Context, affectedQuoteRows []uuid.UUID, userID uuid.UUID) {
+	for _, rowID := range affectedQuoteRows {
+		updated, err := s.messages.GetByID(ctx, rowID)
+		if err != nil || updated == nil {
+			if err != nil {
+				slog.ErrorContext(ctx, "failed to load cascade quote update", "message_id", rowID, "error", err)
+			}
+			continue
+		}
+		ch, err := s.channels.GetByID(ctx, updated.ChannelID)
+		if err != nil || ch == nil {
+			if err != nil {
+				slog.ErrorContext(ctx, "failed to load cascade quote channel", "channel_id", updated.ChannelID, "error", err)
+			}
+			continue
+		}
+		s.publishEvent(ctx, event.TypeMessageUpdated, ch.WorkspaceID, updated.ChannelID, userID, event.MessagePayload{Message: updated})
+	}
 }
 
 // validateEmoji checks that the emoji string is valid: non-empty, at most 32
@@ -1595,6 +1669,8 @@ func redactDeletedMessage(msg entity.Message) entity.Message {
 	msg.PinnedBy = nil
 	msg.PinnedAt = nil
 	msg.ForwardedFrom = nil
+	msg.QuotedMessageID = nil
+	msg.QuotedSnapshot = nil
 	msg.Reactions = nil
 	msg.Attachments = nil
 	return msg

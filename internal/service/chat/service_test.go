@@ -257,13 +257,20 @@ func TestCollaboratorCanSendWithSharedAccessPolicy(t *testing.T) {
 }
 
 func TestSendMessageForwardedFromValidationAndPersistence(t *testing.T) {
+	quotedMessageID := uuid.New()
+	quotedUserID := uuid.New()
+	quotedParentID := uuid.New()
+	quotedCreatedAt := time.Now().UTC()
 	tests := []struct {
 		name                string
 		content             string
 		forwardedFrom       json.RawMessage
+		quotedMessageID     *uuid.UUID
+		quotedSnapshot      *ParsedQuotedSnapshotInput
 		wantErrCode         cerrors.Code
 		wantErrMessage      string
 		wantForwardedFrom   json.RawMessage
+		wantQuotedSnapshot  bool
 		wantCreatedMessages int
 	}{
 		{
@@ -319,6 +326,85 @@ func TestSendMessageForwardedFromValidationAndPersistence(t *testing.T) {
 			wantCreatedMessages: 1,
 		},
 		{
+			name:            "quote fields persist typed snapshot",
+			content:         "reply",
+			quotedMessageID: &quotedMessageID,
+			quotedSnapshot: &ParsedQuotedSnapshotInput{
+				UserID:          quotedUserID,
+				ContentExcerpt:  "quoted text",
+				CreatedAt:       quotedCreatedAt,
+				ParentMessageID: &quotedParentID,
+			},
+			wantQuotedSnapshot:  true,
+			wantCreatedMessages: 1,
+		},
+		{
+			name:            "quoted_message_id without snapshot rejected",
+			content:         "reply",
+			quotedMessageID: &quotedMessageID,
+			wantErrCode:     cerrors.CodeInvalidInput,
+			wantErrMessage:  "quoted_message_id and quoted_snapshot must be set together",
+		},
+		{
+			name:    "quoted_snapshot without message id rejected",
+			content: "reply",
+			quotedSnapshot: &ParsedQuotedSnapshotInput{
+				UserID:         quotedUserID,
+				ContentExcerpt: "quoted text",
+				CreatedAt:      quotedCreatedAt,
+			},
+			wantErrCode:    cerrors.CodeInvalidInput,
+			wantErrMessage: "quoted_message_id and quoted_snapshot must be set together",
+		},
+		{
+			name:            "quoted excerpt exactly 200 codepoints accepted",
+			content:         "reply",
+			quotedMessageID: &quotedMessageID,
+			quotedSnapshot: &ParsedQuotedSnapshotInput{
+				UserID:         quotedUserID,
+				ContentExcerpt: strings.Repeat("a", 200),
+				CreatedAt:      quotedCreatedAt,
+			},
+			wantQuotedSnapshot:  true,
+			wantCreatedMessages: 1,
+		},
+		{
+			name:            "quoted excerpt over 200 codepoints rejected",
+			content:         "reply",
+			quotedMessageID: &quotedMessageID,
+			quotedSnapshot: &ParsedQuotedSnapshotInput{
+				UserID:         quotedUserID,
+				ContentExcerpt: strings.Repeat("a", 201),
+				CreatedAt:      quotedCreatedAt,
+			},
+			wantErrCode:    cerrors.CodeInvalidInput,
+			wantErrMessage: "quoted_snapshot.content_excerpt must be at most 200 characters",
+		},
+		{
+			name:            "quoted multibyte excerpt at rune limit accepted",
+			content:         "reply",
+			quotedMessageID: &quotedMessageID,
+			quotedSnapshot: &ParsedQuotedSnapshotInput{
+				UserID:         quotedUserID,
+				ContentExcerpt: strings.Repeat("я", 200),
+				CreatedAt:      quotedCreatedAt,
+			},
+			wantQuotedSnapshot:  true,
+			wantCreatedMessages: 1,
+		},
+		{
+			name:            "quoted multibyte excerpt over rune limit rejected",
+			content:         "reply",
+			quotedMessageID: &quotedMessageID,
+			quotedSnapshot: &ParsedQuotedSnapshotInput{
+				UserID:         quotedUserID,
+				ContentExcerpt: strings.Repeat("я", 201),
+				CreatedAt:      quotedCreatedAt,
+			},
+			wantErrCode:    cerrors.CodeInvalidInput,
+			wantErrMessage: "quoted_snapshot.content_excerpt must be at most 200 characters",
+		},
+		{
 			name:                "multibyte content at rune limit accepted",
 			content:             strings.Repeat("я", 40000),
 			wantCreatedMessages: 1,
@@ -352,8 +438,10 @@ func TestSendMessageForwardedFromValidationAndPersistence(t *testing.T) {
 			svc := NewService(channels, messages, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
 
 			msg, err := svc.SendMessage(ctx, channelID, userID, SendMessageInput{
-				Content:       tt.content,
-				ForwardedFrom: tt.forwardedFrom,
+				Content:         tt.content,
+				ForwardedFrom:   tt.forwardedFrom,
+				QuotedMessageID: tt.quotedMessageID,
+				QuotedSnapshot:  tt.quotedSnapshot,
 			})
 			if tt.wantErrCode != "" {
 				if !hasCode(err, tt.wantErrCode) {
@@ -378,6 +466,31 @@ func TestSendMessageForwardedFromValidationAndPersistence(t *testing.T) {
 			}
 			if string(msg.ForwardedFrom) != string(tt.wantForwardedFrom) {
 				t.Fatalf("forwarded_from = %s, want %s", msg.ForwardedFrom, tt.wantForwardedFrom)
+			}
+			if !tt.wantQuotedSnapshot {
+				if msg.QuotedMessageID != nil || msg.QuotedSnapshot != nil {
+					t.Fatalf("quote fields = %s %+v, want nil", msg.QuotedMessageID, msg.QuotedSnapshot)
+				}
+				return
+			}
+			if msg.QuotedMessageID == nil || *msg.QuotedMessageID != *tt.quotedMessageID {
+				t.Fatalf("quoted_message_id = %v, want %s", msg.QuotedMessageID, *tt.quotedMessageID)
+			}
+			if msg.QuotedSnapshot == nil {
+				t.Fatalf("quoted_snapshot = nil, want value")
+			}
+			if msg.QuotedSnapshot.UserID != tt.quotedSnapshot.UserID ||
+				msg.QuotedSnapshot.ContentExcerpt != tt.quotedSnapshot.ContentExcerpt ||
+				!msg.QuotedSnapshot.CreatedAt.Equal(tt.quotedSnapshot.CreatedAt) {
+				t.Fatalf("quoted_snapshot = %+v, want %+v", msg.QuotedSnapshot, tt.quotedSnapshot)
+			}
+			if tt.quotedSnapshot.ParentMessageID != nil {
+				if msg.QuotedSnapshot.ParentMessageID == nil || *msg.QuotedSnapshot.ParentMessageID != *tt.quotedSnapshot.ParentMessageID {
+					t.Fatalf("quoted_snapshot.parent_message_id = %v, want %s", msg.QuotedSnapshot.ParentMessageID, *tt.quotedSnapshot.ParentMessageID)
+				}
+			}
+			if msg.QuotedSnapshot.Deleted != nil {
+				t.Fatalf("quoted_snapshot.deleted = %v, want nil on send", *msg.QuotedSnapshot.Deleted)
 			}
 		})
 	}
@@ -626,6 +739,101 @@ func TestDeleteMessagePublishesRedactedTombstone(t *testing.T) {
 	}
 	if got.Edited || got.EditedAt != nil || got.Pinned || got.PinnedBy != nil || got.PinnedAt != nil {
 		t.Fatalf("event deleted metadata was not redacted: %+v", got)
+	}
+}
+
+func TestDeleteMessageWithTxEnqueuesCascadeQuoteUpdatedEvents(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	otherWorkspaceID := uuid.New()
+	channelID := uuid.New()
+	otherChannelID := uuid.New()
+	userID := uuid.New()
+	messageID := uuid.New()
+	quotedIDs := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
+	now := time.Now().UTC()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID:      {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePublic},
+			otherChannelID: {ID: otherChannelID, WorkspaceID: otherWorkspaceID, Type: entity.ChannelTypePublic},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, userID}: {ChannelID: channelID, UserID: userID},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	messages := &fakeMessageRepo{messages: map[uuid.UUID]*entity.Message{
+		messageID: {
+			ID:        messageID,
+			ChannelID: channelID,
+			UserID:    userID,
+			Content:   "source",
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+	}}
+	for i, id := range quotedIDs {
+		msgChannelID := channelID
+		if i == len(quotedIDs)-1 {
+			msgChannelID = otherChannelID
+		}
+		messages.messages[id] = &entity.Message{
+			ID:              id,
+			ChannelID:       msgChannelID,
+			UserID:          userID,
+			Content:         "quote",
+			QuotedMessageID: &messageID,
+			QuotedSnapshot: &entity.QuotedSnapshot{
+				UserID:         userID,
+				ContentExcerpt: "source",
+				CreatedAt:      now,
+			},
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+	}
+
+	txScope := &fakeChatTxScope{messages: messages, channels: channels}
+	svc := NewService(channels, messages, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+	svc.tx = &fakeChatTxManager{scope: txScope}
+
+	if err := svc.DeleteMessage(ctx, messageID, userID); err != nil {
+		t.Fatalf("DeleteMessage returned error: %v", err)
+	}
+
+	updated := map[uuid.UUID]eventpkg.Event{}
+	for _, evt := range txScope.events {
+		if evt.Type != eventpkg.TypeMessageUpdated {
+			continue
+		}
+		payload, ok := evt.Payload.(eventpkg.MessagePayload)
+		if !ok || payload.Message == nil {
+			t.Fatalf("message.updated payload = %#v, want MessagePayload", evt.Payload)
+		}
+		updated[payload.Message.ID] = evt
+	}
+	if len(updated) != len(quotedIDs) {
+		t.Fatalf("message.updated events = %d, want %d", len(updated), len(quotedIDs))
+	}
+	for _, id := range quotedIDs {
+		evt, ok := updated[id]
+		if !ok {
+			t.Fatalf("missing message.updated for quoted row %s", id)
+		}
+		payload := evt.Payload.(eventpkg.MessagePayload)
+		if payload.Message.QuotedSnapshot == nil || payload.Message.QuotedSnapshot.Deleted == nil || !*payload.Message.QuotedSnapshot.Deleted {
+			t.Fatalf("quoted_snapshot.deleted for %s = %+v, want true", id, payload.Message.QuotedSnapshot)
+		}
+		wantWorkspaceID := workspaceID
+		if payload.Message.ChannelID == otherChannelID {
+			wantWorkspaceID = otherWorkspaceID
+		}
+		if evt.WorkspaceID != wantWorkspaceID {
+			t.Fatalf("event workspace_id for %s = %s, want %s", id, evt.WorkspaceID, wantWorkspaceID)
+		}
 	}
 }
 
@@ -974,7 +1182,23 @@ func (r *fakeMessageRepo) SoftDelete(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 func (r *fakeMessageRepo) SoftDeleteWithCascade(ctx context.Context, id uuid.UUID) ([]uuid.UUID, error) {
-	return nil, r.SoftDelete(ctx, id)
+	if err := r.SoftDelete(ctx, id); err != nil {
+		return nil, err
+	}
+	deleted := true
+	var affected []uuid.UUID
+	for _, msg := range r.messages {
+		if msg.QuotedMessageID == nil || *msg.QuotedMessageID != id {
+			continue
+		}
+		if msg.QuotedSnapshot == nil {
+			msg.QuotedSnapshot = &entity.QuotedSnapshot{}
+		}
+		msg.QuotedSnapshot.Deleted = &deleted
+		msg.UpdatedAt = time.Now().UTC()
+		affected = append(affected, msg.ID)
+	}
+	return affected, nil
 }
 func (r *fakeMessageRepo) ListPinned(context.Context, uuid.UUID) ([]entity.Message, error) {
 	return nil, nil
@@ -1047,13 +1271,14 @@ func (m *fakeChatTxManager) WithinTx(ctx context.Context, fn func(context.Contex
 }
 
 type fakeChatTxScope struct {
+	messages repository.MessageRepository
 	channels repository.ChannelRepository
 	events   []eventpkg.Event
 }
 
 func (s *fakeChatTxScope) Users() repository.UserRepository                       { return nil }
 func (s *fakeChatTxScope) Workspaces() repository.WorkspaceRepository             { return nil }
-func (s *fakeChatTxScope) Messages() repository.MessageRepository                 { return nil }
+func (s *fakeChatTxScope) Messages() repository.MessageRepository                 { return s.messages }
 func (s *fakeChatTxScope) Channels() repository.ChannelRepository                 { return s.channels }
 func (s *fakeChatTxScope) ChannelGrants() repository.ChannelAccessGrantRepository { return nil }
 func (s *fakeChatTxScope) Calls() repository.CallRepository                       { return nil }

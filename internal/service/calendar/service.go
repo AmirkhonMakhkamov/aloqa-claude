@@ -84,6 +84,31 @@ type UpdateEventInput struct {
 	RemindersSet    bool
 }
 
+type MoveOccurrenceScope string
+
+const (
+	MoveScopeThis             MoveOccurrenceScope = "this"
+	MoveScopeThisAndFollowing MoveOccurrenceScope = "this_and_following"
+	MoveScopeAll              MoveOccurrenceScope = "all"
+)
+
+type MoveOccurrenceInput struct {
+	InstanceAt         time.Time
+	Scope              MoveOccurrenceScope
+	NewScheduledAt     time.Time
+	NewDurationMinutes *int
+	ExpectedUpdatedAt  *time.Time
+}
+
+type MoveOccurrenceResult struct {
+	Updated *entity.CalendarEvent
+	Created *entity.CalendarEvent
+}
+
+type calendarEventTxUpdater interface {
+	UpdateEventTx(ctx context.Context, event *entity.CalendarEvent, expectedUpdatedAt *time.Time) (*entity.CalendarEvent, error)
+}
+
 func NewService(
 	calendars repository.CalendarRepository,
 	members repository.WorkspaceRepository,
@@ -357,6 +382,95 @@ func (s *Service) DeleteEvent(ctx context.Context, workspaceID, eventID, actorID
 	}
 	s.publishEvent(ctx, event.TypeCalendarEventDeleted, *existing, actorID)
 	return nil
+}
+
+func (s *Service) MoveEventOccurrence(
+	ctx context.Context,
+	workspaceID, eventID, actorID uuid.UUID,
+	input MoveOccurrenceInput,
+) (*MoveOccurrenceResult, error) {
+	if err := s.requireWorkspaceMember(ctx, workspaceID, actorID); err != nil {
+		return nil, err
+	}
+	switch input.Scope {
+	case MoveScopeThis, MoveScopeThisAndFollowing, MoveScopeAll:
+	default:
+		return nil, cerrors.InvalidInput("INVALID_SCOPE: must be this, this_and_following, or all")
+	}
+	if input.NewDurationMinutes != nil && (*input.NewDurationMinutes < 0 || *input.NewDurationMinutes > 24*60) {
+		return nil, cerrors.InvalidInput("INVALID_DURATION: duration_minutes must be 0-1440")
+	}
+	existing, err := s.calendars.GetEvent(ctx, eventID)
+	if err != nil {
+		return nil, err
+	}
+	if existing.WorkspaceID != workspaceID {
+		return nil, cerrors.NotFound("event not found")
+	}
+	if existing.OrganizerID != actorID {
+		return nil, cerrors.Forbidden("FORBIDDEN_NOT_ORGANIZER: only the organizer can move occurrences")
+	}
+	if existing.Recurrence == nil {
+		return s.moveOccurrenceAll(ctx, existing, input)
+	}
+	switch input.Scope {
+	case MoveScopeAll:
+		return s.moveOccurrenceAll(ctx, existing, input)
+	case MoveScopeThis:
+		return s.moveOccurrenceThis(ctx, existing, input)
+	default:
+		return s.moveOccurrenceThisAndFollowing(ctx, existing, input)
+	}
+}
+
+func deriveDuration(existing *entity.CalendarEvent, input MoveOccurrenceInput) int {
+	if input.NewDurationMinutes != nil {
+		return *input.NewDurationMinutes
+	}
+	return existing.DurationMinutes
+}
+
+func (s *Service) moveOccurrenceAll(ctx context.Context, existing *entity.CalendarEvent, input MoveOccurrenceInput) (*MoveOccurrenceResult, error) {
+	existing.ScheduledAt = input.NewScheduledAt.UTC()
+	existing.DurationMinutes = deriveDuration(existing, input)
+	existing.UpdatedAt = time.Now().UTC()
+
+	var updated *entity.CalendarEvent
+	if input.ExpectedUpdatedAt == nil {
+		u, err := s.calendars.UpdateEvent(ctx, existing)
+		if err != nil {
+			return nil, err
+		}
+		updated = u
+	} else {
+		if s.tx == nil {
+			return nil, cerrors.Unavailable("transaction manager not configured")
+		}
+		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
+			txCalendars, ok := scope.Calendars().(calendarEventTxUpdater)
+			if !ok || txCalendars == nil {
+				return cerrors.Unavailable("calendars repository not bound to tx")
+			}
+			u, err := txCalendars.UpdateEventTx(ctx, existing, input.ExpectedUpdatedAt)
+			if err != nil {
+				return err
+			}
+			updated = u
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+	}
+	s.publishEvent(ctx, event.TypeCalendarEventUpdated, *updated, existing.OrganizerID)
+	return &MoveOccurrenceResult{Updated: updated}, nil
+}
+
+func (s *Service) moveOccurrenceThis(context.Context, *entity.CalendarEvent, MoveOccurrenceInput) (*MoveOccurrenceResult, error) {
+	return nil, cerrors.Unavailable("not yet implemented")
+}
+
+func (s *Service) moveOccurrenceThisAndFollowing(context.Context, *entity.CalendarEvent, MoveOccurrenceInput) (*MoveOccurrenceResult, error) {
+	return nil, cerrors.Unavailable("not yet implemented")
 }
 
 func (s *Service) UpsertRsvp(ctx context.Context, workspaceID, eventID, userID uuid.UUID, status entity.RsvpStatus) (*entity.EventAttendee, error) {

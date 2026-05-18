@@ -632,6 +632,218 @@ func TestListEventsKeepsOriginatorTimezoneAcrossBerlinDST(t *testing.T) {
 	}
 }
 
+func TestMoveEventOccurrence_NonRecurring_All_OK(t *testing.T) {
+	ctx := context.Background()
+	wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)
+	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+			Title: "S", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			ScheduledAt: now, DurationMinutes: 30},
+	}}
+	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
+
+	newAt := time.Date(2026, 5, 14, 15, 0, 0, 0, time.UTC)
+	res, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+		InstanceAt: now, Scope: MoveScopeAll, NewScheduledAt: newAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Updated.ScheduledAt.Equal(newAt.UTC()) {
+		t.Fatalf("ScheduledAt=%v want=%v", res.Updated.ScheduledAt, newAt.UTC())
+	}
+	if res.Updated.DurationMinutes != 30 {
+		t.Fatalf("duration not preserved: %d", res.Updated.DurationMinutes)
+	}
+	if res.Created != nil {
+		t.Fatal("scope=all must not create event")
+	}
+}
+
+func TestMoveEventOccurrence_NonRecurring_This_DegeneratesToAll(t *testing.T) {
+	ctx := context.Background()
+	wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)
+	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+			Title: "X", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			ScheduledAt: now, DurationMinutes: 30},
+	}}
+	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
+	newAt := now.Add(48 * time.Hour)
+	res, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+		InstanceAt: now, Scope: MoveScopeThis, NewScheduledAt: newAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Updated.ScheduledAt.Equal(newAt.UTC()) || res.Created != nil {
+		t.Fatalf("degenerate: %+v", res)
+	}
+}
+
+func TestMoveEventOccurrence_Recurring_All_OK(t *testing.T) {
+	ctx := context.Background()
+	wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
+	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+			Title: "Daily", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			ScheduledAt: start, DurationMinutes: 30,
+			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=10"}},
+	}}
+	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
+	newAt := start.Add(time.Hour)
+	res, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+		InstanceAt: start, Scope: MoveScopeAll, NewScheduledAt: newAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Updated.ScheduledAt.Equal(newAt.UTC()) {
+		t.Fatalf("ScheduledAt=%v", res.Updated.ScheduledAt)
+	}
+	if res.Updated.Recurrence == nil || res.Updated.Recurrence.RRule != "FREQ=DAILY;COUNT=10" {
+		t.Fatalf("recurrence must be preserved: %+v", res.Updated.Recurrence)
+	}
+	if res.Created != nil {
+		t.Fatal("scope=all no new event")
+	}
+}
+
+func TestMoveEventOccurrence_ScopeAll_OptimisticLock_Conflict(t *testing.T) {
+	// R2/M2: scope=all must also honour ExpectedUpdatedAt.
+	ctx := context.Background()
+	wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
+	storedUpdatedAt := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
+	staleExpected := storedUpdatedAt.Add(-time.Second)
+	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+			Title: "X", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			ScheduledAt: storedUpdatedAt, DurationMinutes: 30, UpdatedAt: storedUpdatedAt},
+	}}
+	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
+	svc.SetTransactionManager(newCalendarReminderTxManager(repo))
+	_, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+		InstanceAt:        storedUpdatedAt,
+		Scope:             MoveScopeAll,
+		NewScheduledAt:    storedUpdatedAt.Add(time.Hour),
+		ExpectedUpdatedAt: &staleExpected,
+	})
+	assertConflict(t, err, "CONCURRENT_UPDATE")
+}
+
+func TestMoveEventOccurrence_Recurring_All_WithMatchingToken(t *testing.T) {
+	ctx := context.Background()
+	wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
+	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	storedUpdatedAt := time.Date(2026, 5, 1, 9, 30, 0, 0, time.UTC)
+	matchExpected := storedUpdatedAt
+	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+			Title: "Daily", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			ScheduledAt: start, DurationMinutes: 30, UpdatedAt: storedUpdatedAt,
+			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=10"}},
+	}}
+	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
+	svc.SetTransactionManager(newCalendarReminderTxManager(repo))
+	newAt := start.Add(time.Hour)
+	res, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+		InstanceAt:        start,
+		Scope:             MoveScopeAll,
+		NewScheduledAt:    newAt,
+		ExpectedUpdatedAt: &matchExpected,
+	})
+	if err != nil {
+		t.Fatalf("matching-token recurring scope=all must succeed: %v", err)
+	}
+	if !res.Updated.ScheduledAt.Equal(newAt.UTC()) {
+		t.Fatalf("ScheduledAt=%v want=%v", res.Updated.ScheduledAt, newAt.UTC())
+	}
+	if res.Updated.Recurrence == nil || res.Updated.Recurrence.RRule != "FREQ=DAILY;COUNT=10" {
+		t.Fatalf("recurrence must be preserved through the tx path: %+v", res.Updated.Recurrence)
+	}
+	if res.Created != nil {
+		t.Fatal("scope=all must not create a new event")
+	}
+}
+
+func TestMoveEventOccurrence_Recurring_All_WithStaleToken(t *testing.T) {
+	ctx := context.Background()
+	wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
+	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	storedUpdatedAt := time.Date(2026, 5, 1, 9, 30, 0, 0, time.UTC)
+	staleExpected := storedUpdatedAt.Add(-time.Second)
+	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+			Title: "Daily", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			ScheduledAt: start, DurationMinutes: 30, UpdatedAt: storedUpdatedAt,
+			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=10"}},
+	}}
+	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
+	svc.SetTransactionManager(newCalendarReminderTxManager(repo))
+	_, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+		InstanceAt:        start,
+		Scope:             MoveScopeAll,
+		NewScheduledAt:    start.Add(time.Hour),
+		ExpectedUpdatedAt: &staleExpected,
+	})
+	assertConflict(t, err, "CONCURRENT_UPDATE")
+}
+
+func TestMoveEventOccurrence_NonOrganizer_Forbidden(t *testing.T) {
+	ctx := context.Background()
+	wsID, orgID, other, eventID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+			Title: "X", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			ScheduledAt: now, DurationMinutes: 30},
+	}}
+	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{
+		{wsID, orgID}: true, {wsID, other}: true,
+	}}, nil, noopPublisher{})
+	_, err := svc.MoveEventOccurrence(ctx, wsID, eventID, other, MoveOccurrenceInput{
+		InstanceAt: now, Scope: MoveScopeAll, NewScheduledAt: now.Add(time.Hour),
+	})
+	assertForbidden(t, err, "FORBIDDEN_NOT_ORGANIZER")
+}
+
+func TestMoveEventOccurrence_InvalidScope_BadRequest(t *testing.T) {
+	ctx := context.Background()
+	wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+			Title: "X", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			ScheduledAt: now, DurationMinutes: 30},
+	}}
+	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
+	_, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+		InstanceAt: now, Scope: "bogus", NewScheduledAt: now.Add(time.Hour),
+	})
+	assertInvalidInput(t, err, "INVALID_SCOPE")
+}
+
+func TestMoveEventOccurrence_DurationOutOfRange_BadRequest(t *testing.T) {
+	ctx := context.Background()
+	wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	bad := 1441
+	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+			Title: "X", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			ScheduledAt: now, DurationMinutes: 30},
+	}}
+	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
+	_, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+		InstanceAt: now, Scope: MoveScopeAll,
+		NewScheduledAt: now.Add(time.Hour), NewDurationMinutes: &bad,
+	})
+	assertInvalidInput(t, err, "INVALID_DURATION")
+}
+
 type fakeCalendarRepo struct {
 	mu                  sync.Mutex
 	calendars           []entity.UserCalendar
@@ -875,6 +1087,9 @@ func (r *fakeCalendarRepo) CreateEvent(ctx context.Context, eventEntity *entity.
 	r.replaceEventReminders(eventEntity.ID, eventEntity.Reminders)
 	return r.GetEvent(ctx, eventEntity.ID)
 }
+func (r *fakeCalendarRepo) CreateEventTx(ctx context.Context, eventEntity *entity.CalendarEvent) (*entity.CalendarEvent, error) {
+	return r.CreateEvent(ctx, eventEntity)
+}
 func (r *fakeCalendarRepo) UpdateEvent(ctx context.Context, eventEntity *entity.CalendarEvent) (*entity.CalendarEvent, error) {
 	if r.events == nil {
 		r.events = map[uuid.UUID]*entity.CalendarEvent{}
@@ -884,6 +1099,18 @@ func (r *fakeCalendarRepo) UpdateEvent(ctx context.Context, eventEntity *entity.
 	r.events[eventEntity.ID] = stored
 	r.replaceEventReminders(eventEntity.ID, eventEntity.Reminders)
 	return r.GetEvent(ctx, eventEntity.ID)
+}
+func (r *fakeCalendarRepo) UpdateEventTx(ctx context.Context, eventEntity *entity.CalendarEvent, expectedUpdatedAt *time.Time) (*entity.CalendarEvent, error) {
+	if expectedUpdatedAt != nil {
+		existing, err := r.GetEvent(ctx, eventEntity.ID)
+		if err != nil {
+			return nil, err
+		}
+		if !existing.UpdatedAt.UTC().Equal(expectedUpdatedAt.UTC()) {
+			return nil, cerrors.Conflict("CONCURRENT_UPDATE: event was modified concurrently")
+		}
+	}
+	return r.UpdateEvent(ctx, eventEntity)
 }
 
 type fakeReminderDefinitionKey struct {
@@ -1316,6 +1543,39 @@ func cloneReminderOutbox(in []entity.ReminderOutboxMessage) []entity.ReminderOut
 		out[i].PayloadJSON = append([]byte(nil), msg.PayloadJSON...)
 	}
 	return out
+}
+
+func assertForbidden(t *testing.T, err error, fragment string) {
+	t.Helper()
+	ae, ok := cerrors.AsAppError(err)
+	if !ok || ae.Code != cerrors.CodeForbidden {
+		t.Fatalf("want Forbidden, got %v", err)
+	}
+	if !strings.Contains(ae.Message, fragment) {
+		t.Fatalf("message %q missing fragment %q", ae.Message, fragment)
+	}
+}
+
+func assertInvalidInput(t *testing.T, err error, fragment string) {
+	t.Helper()
+	ae, ok := cerrors.AsAppError(err)
+	if !ok || ae.Code != cerrors.CodeInvalidInput {
+		t.Fatalf("want InvalidInput, got %v", err)
+	}
+	if !strings.Contains(ae.Message, fragment) {
+		t.Fatalf("message %q missing %q", ae.Message, fragment)
+	}
+}
+
+func assertConflict(t *testing.T, err error, fragment string) {
+	t.Helper()
+	ae, ok := cerrors.AsAppError(err)
+	if !ok || ae.Code != cerrors.CodeConflict {
+		t.Fatalf("want Conflict, got %v", err)
+	}
+	if !strings.Contains(ae.Message, fragment) {
+		t.Fatalf("message %q missing fragment %q", ae.Message, fragment)
+	}
 }
 
 type noopPublisher struct{}

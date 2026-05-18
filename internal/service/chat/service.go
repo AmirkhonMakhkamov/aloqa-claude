@@ -235,9 +235,25 @@ type CreateChannelInput struct {
 // SendMessageInput validates message creation parameters. Content validation is
 // conditional in SendMessage because comment-less forwards may be empty.
 type SendMessageInput struct {
-	Content       string
-	ParentID      *uuid.UUID
-	ForwardedFrom json.RawMessage
+	Content         string
+	ParentID        *uuid.UUID
+	ForwardedFrom   json.RawMessage
+	QuotedMessageID *uuid.UUID
+	QuotedSnapshot  *ParsedQuotedSnapshotInput
+}
+
+type QuotedSnapshotInput struct {
+	UserID          string  `json:"user_id"`
+	ContentExcerpt  string  `json:"content_excerpt"`
+	CreatedAt       string  `json:"created_at"`
+	ParentMessageID *string `json:"parent_message_id,omitempty"`
+}
+
+type ParsedQuotedSnapshotInput struct {
+	UserID          uuid.UUID
+	ContentExcerpt  string
+	CreatedAt       time.Time
+	ParentMessageID *uuid.UUID
 }
 
 // EditMessageInput preserves the legacy content validation tag for edit flows.

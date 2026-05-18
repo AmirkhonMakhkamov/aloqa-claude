@@ -630,6 +630,72 @@ func TestMoveEventOccurrence_ScopeAll_OptimisticLock_Conflict(t *testing.T) {
     assertConflict(t, err, "CONCURRENT_UPDATE")
 }
 
+// R4/M2 fix: explicit named tests for the recurring scope=all path with
+// matching and stale ExpectedUpdatedAt tokens. These complement the
+// non-recurring ScopeAll_OptimisticLock_Conflict test above and exercise
+// the same WithinTx + UpdateEventTx code path on a recurring event so we
+// also confirm recurrence preservation under the optimistic-lock branch.
+func TestMoveEventOccurrence_Recurring_All_WithMatchingToken(t *testing.T) {
+    ctx := context.Background()
+    wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
+    start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+    storedUpdatedAt := time.Date(2026, 5, 1, 9, 30, 0, 0, time.UTC)
+    matchExpected := storedUpdatedAt // exact match
+    repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+        eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+            Title: "Daily", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+            ScheduledAt: start, DurationMinutes: 30, UpdatedAt: storedUpdatedAt,
+            Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=10"}},
+    }}
+    svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
+    // R4/M2: wire WithinTx so the non-nil token routes through tx scope.
+    // newCalendarReminderTxManager is defined in Task 6 — it satisfies
+    // txscope.Manager and exposes scope.Calendars() returning the same repo.
+    svc.SetTransactionManager(newCalendarReminderTxManager(repo))
+    newAt := start.Add(time.Hour)
+    res, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+        InstanceAt:        start,
+        Scope:             MoveScopeAll,
+        NewScheduledAt:    newAt,
+        ExpectedUpdatedAt: &matchExpected,
+    })
+    if err != nil {
+        t.Fatalf("matching-token recurring scope=all must succeed: %v", err)
+    }
+    if !res.Updated.ScheduledAt.Equal(newAt.UTC()) {
+        t.Fatalf("ScheduledAt=%v want=%v", res.Updated.ScheduledAt, newAt.UTC())
+    }
+    if res.Updated.Recurrence == nil || res.Updated.Recurrence.RRule != "FREQ=DAILY;COUNT=10" {
+        t.Fatalf("recurrence must be preserved through the tx path: %+v", res.Updated.Recurrence)
+    }
+    if res.Created != nil {
+        t.Fatal("scope=all must not create a new event")
+    }
+}
+
+func TestMoveEventOccurrence_Recurring_All_WithStaleToken(t *testing.T) {
+    ctx := context.Background()
+    wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
+    start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+    storedUpdatedAt := time.Date(2026, 5, 1, 9, 30, 0, 0, time.UTC)
+    staleExpected := storedUpdatedAt.Add(-time.Second)
+    repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+        eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+            Title: "Daily", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+            ScheduledAt: start, DurationMinutes: 30, UpdatedAt: storedUpdatedAt,
+            Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=10"}},
+    }}
+    svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
+    svc.SetTransactionManager(&fakeTxManager{calendars: repo})
+    _, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+        InstanceAt:        start,
+        Scope:             MoveScopeAll,
+        NewScheduledAt:    start.Add(time.Hour),
+        ExpectedUpdatedAt: &staleExpected,
+    })
+    assertConflict(t, err, "CONCURRENT_UPDATE")
+}
+
 func TestMoveEventOccurrence_NonOrganizer_Forbidden(t *testing.T) {
     ctx := context.Background()
     wsID, orgID, other, eventID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
@@ -1784,6 +1850,10 @@ func newCalendarHTTPFixture() calendarHTTPFixture {
     userID := uuid.New()
     repo := &fakeMoveCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{}}
     svc := calendarservice.NewService(repo, fakeCalHTTPMembers{wsID: wsID, userID: userID}, nil, noopCalHTTPPublisher{})
+    // R4/M3 fix: wire fakeMoveCalHTTPTxManager so scope=all + non-nil ExpectedUpdatedAt
+    // routes through WithinTx → UpdateEventTx (otherwise s.tx == nil short-circuits to
+    // cerrors.Unavailable and the 409 path never reaches the repo).
+    svc.SetTransactionManager(&fakeMoveCalHTTPTxManager{repo: repo})
     handler := NewCalendarHandler(svc)
     router := chi.NewRouter()
     router.Use(func(next http.Handler) http.Handler {
@@ -2350,6 +2420,17 @@ Fix any findings (lint, vet, formatting). If changes required:
 4. **`notify` flag** (mentioned in spec §4.5 prose): Not present in the §4.2 request schema. Out of scope this iteration.
 
 5. **Concurrency token precision (R3)**: `ExpectedUpdatedAt` uses exact RFC3339Nano equality. Clients must round-trip the `updated_at` from the previous response without truncation. Future iteration may switch to opaque integer etag versioning.
+
+---
+
+## Codex Plan Review R4 — applied
+
+All 2 findings from the R4 review (2026-05-18) have been incorporated. Summary:
+
+| ID | Severity | Finding | Resolution |
+|---|---|---|---|
+| R4/B1 | BLOCKING | R3/M3 incomplete: `newCalendarHTTPFixture` constructed `svc := NewService(..., nil, ...)` and never called `svc.SetTransactionManager(&fakeMoveCalHTTPTxManager{...})`. The comment claimed wiring but body did not, so `s.tx == nil` short-circuited to `cerrors.Unavailable` before any 409 path could fire | Added `svc.SetTransactionManager(&fakeMoveCalHTTPTxManager{repo: repo})` to `newCalendarHTTPFixture` body with explanatory comment. The handler 409 test now actually reaches `WithinTx → UpdateEventTx → Conflict` |
+| R4/M2 | MAJOR | R3/M2 incomplete: `moveOccurrenceAll` branching correct but the exact named recurring service tests `TestMoveEventOccurrence_Recurring_All_WithMatchingToken` and `_WithStaleToken` did not exist in the plan body | Added both tests in Task 5 service_test.go block after `TestMoveEventOccurrence_ScopeAll_OptimisticLock_Conflict`. Both use a recurring `FREQ=DAILY;COUNT=10` event, set `svc.SetTransactionManager(newCalendarReminderTxManager(repo))` to wire WithinTx, then verify success (matching token preserves recurrence) or Conflict (stale token returns `CONCURRENT_UPDATE`) |
 
 ---
 

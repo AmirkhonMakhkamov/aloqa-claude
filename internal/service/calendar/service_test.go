@@ -1188,6 +1188,59 @@ func TestMoveEventOccurrence_Recurring_ThisAndFollowing_FirstOccurrenceAlreadyEx
 	assertInvalidInput(t, err, "INVALID_INSTANCE")
 }
 
+func TestMoveEventOccurrence_RealtimePublishedCorrectly(t *testing.T) {
+	ctx := context.Background()
+	wsID, orgID := uuid.New(), uuid.New()
+	eventID := uuid.New()
+	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	instance := time.Date(2026, 5, 2, 10, 0, 0, 0, time.UTC)
+	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+			Title: "D", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			ScheduledAt: start, DurationMinutes: 30,
+			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=5"}},
+	}}
+	pub := &capturingPublisher{}
+	txMgr := newCalendarReminderTxManager(repo)
+	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, pub)
+	svc.SetTransactionManager(txMgr)
+
+	_, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+		InstanceAt: instance, Scope: MoveScopeThis,
+		NewScheduledAt: time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+
+	counts := map[event.Type]int{}
+	for _, e := range pub.events {
+		counts[e.Type]++
+	}
+	if counts[event.TypeCalendarEventUpdated] != 1 {
+		t.Fatalf("Updated count=%d want=1", counts[event.TypeCalendarEventUpdated])
+	}
+	if counts[event.TypeCalendarEventCreated] != 1 {
+		t.Fatalf("Created count=%d want=1", counts[event.TypeCalendarEventCreated])
+	}
+
+	repo2 := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+			Title: "D", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			ScheduledAt: start, DurationMinutes: 30},
+	}}
+	pub2 := &capturingPublisher{}
+	svc2 := NewService(repo2, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, pub2)
+	if _, err := svc2.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+		InstanceAt: start, Scope: MoveScopeAll, NewScheduledAt: start.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("scope=all err=%v", err)
+	}
+	if len(pub2.events) != 1 || pub2.events[0].Type != event.TypeCalendarEventUpdated {
+		t.Fatalf("scope=all events=%v", pub2.events)
+	}
+}
+
 type fakeCalendarRepo struct {
 	mu                  sync.Mutex
 	calendars           []entity.UserCalendar

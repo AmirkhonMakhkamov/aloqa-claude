@@ -66,7 +66,17 @@ Commit: `feat(repo): persist + project messages.forwarded_from (ALOQA-257)`.
 
 ## Phase C — Service + handler (1 commit)
 
-1. **Service input** (`internal/service/chat/service.go:236-238`): extend `SendMessageInput` to include `ParentID *uuid.UUID` (if not already a field — verify; current state per recon has only `Content`) and `ForwardedFrom json.RawMessage`. **Drop only the `min=1` part** of the `validate:"required,min=1,max=40000"` tag from `Content` — keep `required,max=40000` so the empty-content gate moves to the manual check. Actually per spec §8.9 the cleanest approach is: remove the entire tag from `Content` (so `validate.Struct(input)` doesn't reject empty content) AND add a manual conditional check in `SendMessage` body. Other input structs in the file keep their validators untouched.
+1. **Service input** (`internal/service/chat/service.go:236-238`): extend `SendMessageInput` to include `ParentID *uuid.UUID` (if not already a field — verify; current state per recon has only `Content`) and `ForwardedFrom json.RawMessage`. Remove the entire `validate:"required,min=1,max=40000"` tag from `Content` (so `validate.Struct(input)` doesn't reject empty content) AND add manual conditional checks in `SendMessage` body — see step 2.
+   - **CRITICAL — EditMessage shares SendMessageInput** (verified at `internal/service/chat/service.go:779` — `EditMessage` does `input := SendMessageInput{Content: content}` then `validate.Struct(input)`). Removing the tag from SendMessageInput would silently break EditMessage's content validation. **Fix:** introduce a separate `EditMessageInput` struct that keeps the legacy `validate:"required,min=1,max=40000"` tag on `Content`:
+     ```go
+     // EditMessageInput preserves the legacy content validation tag for edit flows.
+     // SendMessageInput uses a conditional rule (see SendMessage body) because forwards
+     // may carry empty content.
+     type EditMessageInput struct {
+         Content string `validate:"required,min=1,max=40000"`
+     }
+     ```
+     Update `EditMessage` (line 779) to build `EditMessageInput{Content: content}` instead.
 2. **Service signature** (`internal/service/chat/service.go:625-630`): change to struct input
 
    ```go
@@ -79,7 +89,17 @@ Commit: `feat(repo): persist + project messages.forwarded_from (ALOQA-257)`.
 
    Update the body **preserving the existing `validate.Struct(input)` call** (per spec §8.9 — the call is NOT removed, only the `Content` tag inside the struct is dropped):
    - Keep `if err := validate.Struct(input); err != nil { return nil, err }` — validates ParentID UUID-ness, any future tags, etc.
-   - Add the conditional content validation per spec §4.4: if `len(input.ForwardedFrom) == 0 && len(input.Content) < 1` → 400 "content is required". If `len(input.Content) > 40000` → 400 "content must be at most 40000 characters".
+   - Add the conditional content validation per spec §4.4 using **utf8.RuneCountInString** for character counting (matches go-playground/validator's semantics, supports multi-byte content):
+     ```go
+     contentLen := utf8.RuneCountInString(input.Content)
+     if len(input.ForwardedFrom) == 0 && contentLen < 1 {
+         return nil, cerrors.Validation("content is required")
+     }
+     if contentLen > 40000 {
+         return nil, cerrors.Validation("content must be at most 40000 characters")
+     }
+     ```
+     Add `unicode/utf8` import. **Do NOT use `len(input.Content)`** — that counts bytes, which would silently reject valid multi-byte content (Russian, Uzbek-cyrl). A 40000-character Russian message is ~80000 bytes; rejecting it would be a regression vs the current `validator max=40000` rule.
    - Add JSON-validity probe on `input.ForwardedFrom` when non-empty: `var probe interface{}; if err := json.Unmarshal(input.ForwardedFrom, &probe); err != nil` → 400 "forwarded_from must be valid JSON".
    - Build the `entity.Message` with `ForwardedFrom: input.ForwardedFrom` (nil propagates to NULL).
    - All other existing logic (channel access via `GetAccessibleChannel`, parent validation, broadcast) unchanged.

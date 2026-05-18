@@ -246,6 +246,9 @@ func (s *Service) SendMessage(
 | U7 | `SendMessage` with `ForwardedFrom=[]byte("\"a string\"")` (valid JSON scalar) | Accepted; persisted verbatim. Trust contract per §8.4. |
 | U8 | `SendMessage` with `ForwardedFrom=[]byte("{}")` (empty object) | Accepted; persisted verbatim. |
 | U9 | Soft-delete privacy regression: insert message with `ForwardedFrom=<jsonb>`, call `MessageRepo.SoftDelete(ctx, id)`, then `GetByID(ctx, id)` | Returned Message has `Content=""` AND `ForwardedFrom == nil`. Snapshot must NOT leak through after soft-delete (§8.11). |
+| U10 | Multi-byte content boundary: `SendMessage` with `Content = strings.Repeat("я", 40000)` (40k Cyrillic chars = ~80k bytes) | Accepted (40000 runes, exactly at limit). Verifies `utf8.RuneCountInString` is used, not `len()` (§8.12). |
+| U11 | Multi-byte content over-limit: `SendMessage` with `Content = strings.Repeat("я", 40001)` | 400 "content must be at most 40000 characters". |
+| U12 | EditMessage validation unchanged: call `EditMessage(ctx, msgID, userID, "")` | 400 — EditMessage still rejects empty content (§8.13, separate EditMessageInput struct preserves legacy tag). |
 
 ### Integration (handler-level HTTP)
 
@@ -281,6 +284,8 @@ func (s *Service) SendMessage(
 9. **Service-level `validate.Struct` is NOT removed for SendMessageInput** — but its `Content` tag is replaced by the manual conditional check in `SendMessage`. Other input structs keep validators. (If the file uses one shared `validate.New()` instance — confirm no cross-impact.)
 10. **`forwarded_from` non-empty implies valid JSON** — service rejects 400 before INSERT; jsonb column never receives garbage. Test U6.
 11. **Soft-delete clears `forwarded_from`** — `MessageRepo.SoftDelete` UPDATE statement extends the existing field reset (`content = ''`, `pinned = false`, etc.) with `forwarded_from = NULL`. Without this, deleted forwarded messages still expose the embedded snapshot content. Test U9.
+12. **Content length is rune-counted, not byte-counted** — the manual `SendMessage` check uses `utf8.RuneCountInString(input.Content)` (matches go-playground/validator semantics). `len()` is forbidden because it counts bytes and would silently reject valid multi-byte content (Russian, Uzbek-cyrl). Test U10, U11.
+13. **EditMessage validation unchanged** — a separate `EditMessageInput` struct preserves the legacy `validate:"required,min=1,max=40000"` tag for edit flows. Removing the tag from `SendMessageInput` does NOT affect EditMessage. Test U12.
 
 ---
 

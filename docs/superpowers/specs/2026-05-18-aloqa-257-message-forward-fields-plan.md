@@ -93,10 +93,10 @@ Commit: `feat(repo): persist + project messages.forwarded_from (ALOQA-257)`.
      ```go
      contentLen := utf8.RuneCountInString(input.Content)
      if len(input.ForwardedFrom) == 0 && contentLen < 1 {
-         return nil, cerrors.Validation("content is required")
+         return nil, cerrors.InvalidInput("content is required")
      }
      if contentLen > 40000 {
-         return nil, cerrors.Validation("content must be at most 40000 characters")
+         return nil, cerrors.InvalidInput("content must be at most 40000 characters")
      }
      ```
      Add `unicode/utf8` import. **Do NOT use `len(input.Content)`** — that counts bytes, which would silently reject valid multi-byte content (Russian, Uzbek-cyrl). A 40000-character Russian message is ~80000 bytes; rejecting it would be a regression vs the current `validator max=40000` rule.
@@ -116,7 +116,7 @@ Commit: `feat(chat): SendMessage accepts forwarded_from + conditional content ru
 
 ### D1 — Unit + integration tests
 
-1. Extend `internal/service/chat/service_test.go` per spec §7 U1–U8.
+1. Extend `internal/service/chat/service_test.go` per spec §7 U1–U12 (including U10/U11 multi-byte boundary cases and U12 EditMessage empty-content rejection regression).
 2. Extend the existing HTTP handler test file (find via `git grep -l "TestSendMessage\|sendMessage"` — likely `internal/handler/http/message_test.go` or a sibling) per spec §7 I1–I6. If no test file exists, create one mirroring `call_message_test.go` pattern.
 3. **Soft-delete privacy regression** (`internal/repository/postgres/message_test.go` if exists, else service-level integration test): insert message with `forwarded_from = jsonb`, call `SoftDelete`, fetch via `GetByID`, assert returned `ForwardedFrom == nil` AND `Content == ""`.
 4. Migration tests M1–M3 — manual cycle on a dev DB via the explicit `psql -f` commands (no Makefile recipe per Phase A note); document the verification command run in commit message.

@@ -686,7 +686,7 @@ func TestMoveEventOccurrence_Recurring_All_WithStaleToken(t *testing.T) {
             Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=10"}},
     }}
     svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
-    svc.SetTransactionManager(&fakeTxManager{calendars: repo})
+    svc.SetTransactionManager(newCalendarReminderTxManager(repo)) // R5: same helper as Tasks 6/7 (no separate fakeTxManager exists)
     _, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
         InstanceAt:        start,
         Scope:             MoveScopeAll,

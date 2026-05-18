@@ -71,10 +71,15 @@ func (h *CallHandler) SendCallReaction(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+const callReactionRequestMaxBytes = 1 << 10 // 1 KiB — emoji + JSON envelope
+
 func decodeCallReactionRequest(r *http.Request, req *callReactionRequest) error {
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(io.LimitReader(r.Body, callReactionRequestMaxBytes+1))
 	if err != nil {
 		return cerrors.InvalidInput("invalid request body")
+	}
+	if len(body) > callReactionRequestMaxBytes {
+		return cerrors.InvalidInput("request body too large")
 	}
 	if !utf8.Valid(body) {
 		return cerrors.InvalidInput("invalid request body")

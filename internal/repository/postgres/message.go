@@ -37,8 +37,8 @@ func (r *MessageRepo) withTx(tx pgx.Tx) *MessageRepo {
 
 func (r *MessageRepo) Create(ctx context.Context, msg *entity.Message) error {
 	query := `
-		INSERT INTO messages (id, channel_id, user_id, parent_id, content, type, edited, edited_at, pinned, pinned_by, pinned_at, forwarded_from, created_at, updated_at, deleted_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`
+		INSERT INTO messages (id, channel_id, user_id, parent_id, content, type, edited, edited_at, pinned, pinned_by, pinned_at, forwarded_from, quoted_message_id, quoted_snapshot, created_at, updated_at, deleted_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`
 
 	_, err := r.db.Exec(ctx, query,
 		msg.ID,
@@ -53,6 +53,8 @@ func (r *MessageRepo) Create(ctx context.Context, msg *entity.Message) error {
 		msg.PinnedBy,
 		msg.PinnedAt,
 		msg.ForwardedFrom,
+		msg.QuotedMessageID,
+		msg.QuotedSnapshot,
 		msg.CreatedAt,
 		msg.UpdatedAt,
 		msg.DeletedAt,
@@ -69,7 +71,7 @@ func (r *MessageRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Messag
 		SELECT
 			m.id, m.channel_id, m.user_id, m.parent_id, m.content, m.type,
 			m.edited, m.edited_at, m.pinned, m.pinned_by, m.pinned_at,
-			m.forwarded_from,
+			m.forwarded_from, m.quoted_message_id, m.quoted_snapshot,
 			m.created_at, m.updated_at, m.deleted_at,
 			u.id, u.email, u.display_name, u.avatar_url, u.password_hash, u.status, u.locale, u.created_at, u.updated_at
 		FROM messages m
@@ -97,6 +99,8 @@ func (r *MessageRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Messag
 		&msg.PinnedBy,
 		&msg.PinnedAt,
 		&msg.ForwardedFrom,
+		&msg.QuotedMessageID,
+		&msg.QuotedSnapshot,
 		&msg.CreatedAt,
 		&msg.UpdatedAt,
 		&msg.DeletedAt,
@@ -154,7 +158,7 @@ func (r *MessageRepo) ListByChannel(ctx context.Context, channelID uuid.UUID, p 
 			SELECT
 				m.id, m.channel_id, m.user_id, m.parent_id, m.content, m.type,
 				m.edited, m.edited_at, m.pinned, m.pinned_by, m.pinned_at,
-				m.forwarded_from,
+				m.forwarded_from, m.quoted_message_id, m.quoted_snapshot,
 				m.created_at, m.updated_at, m.deleted_at,
 				u.id, u.email, u.display_name, u.avatar_url, u.status
 			FROM messages m
@@ -168,7 +172,7 @@ func (r *MessageRepo) ListByChannel(ctx context.Context, channelID uuid.UUID, p 
 			SELECT
 				m.id, m.channel_id, m.user_id, m.parent_id, m.content, m.type,
 				m.edited, m.edited_at, m.pinned, m.pinned_by, m.pinned_at,
-				m.forwarded_from,
+				m.forwarded_from, m.quoted_message_id, m.quoted_snapshot,
 				m.created_at, m.updated_at, m.deleted_at,
 				u.id, u.email, u.display_name, u.avatar_url, u.status
 			FROM messages m
@@ -203,6 +207,8 @@ func (r *MessageRepo) ListByChannel(ctx context.Context, channelID uuid.UUID, p 
 			&msg.PinnedBy,
 			&msg.PinnedAt,
 			&msg.ForwardedFrom,
+			&msg.QuotedMessageID,
+			&msg.QuotedSnapshot,
 			&msg.CreatedAt,
 			&msg.UpdatedAt,
 			&msg.DeletedAt,
@@ -268,7 +274,7 @@ func (r *MessageRepo) ListThreadReplies(ctx context.Context, parentID uuid.UUID,
 			SELECT
 				m.id, m.channel_id, m.user_id, m.parent_id, m.content, m.type,
 				m.edited, m.edited_at, m.pinned, m.pinned_by, m.pinned_at,
-				m.forwarded_from,
+				m.forwarded_from, m.quoted_message_id, m.quoted_snapshot,
 				m.created_at, m.updated_at, m.deleted_at,
 				u.id, u.email, u.display_name, u.avatar_url, u.status
 			FROM messages m
@@ -282,7 +288,7 @@ func (r *MessageRepo) ListThreadReplies(ctx context.Context, parentID uuid.UUID,
 			SELECT
 				m.id, m.channel_id, m.user_id, m.parent_id, m.content, m.type,
 				m.edited, m.edited_at, m.pinned, m.pinned_by, m.pinned_at,
-				m.forwarded_from,
+				m.forwarded_from, m.quoted_message_id, m.quoted_snapshot,
 				m.created_at, m.updated_at, m.deleted_at,
 				u.id, u.email, u.display_name, u.avatar_url, u.status
 			FROM messages m
@@ -317,6 +323,8 @@ func (r *MessageRepo) ListThreadReplies(ctx context.Context, parentID uuid.UUID,
 			&msg.PinnedBy,
 			&msg.PinnedAt,
 			&msg.ForwardedFrom,
+			&msg.QuotedMessageID,
+			&msg.QuotedSnapshot,
 			&msg.CreatedAt,
 			&msg.UpdatedAt,
 			&msg.DeletedAt,
@@ -387,6 +395,8 @@ func (r *MessageRepo) SoftDelete(ctx context.Context, id uuid.UUID) error {
 			pinned_by = NULL,
 			pinned_at = NULL,
 			forwarded_from = NULL,
+			quoted_message_id = NULL,
+			quoted_snapshot = NULL,
 			updated_at = $2,
 			deleted_at = $2
 		WHERE id = $1 AND deleted_at IS NULL`
@@ -445,7 +455,7 @@ func (r *MessageRepo) ListPinned(ctx context.Context, channelID uuid.UUID) ([]en
 		SELECT
 			m.id, m.channel_id, m.user_id, m.parent_id, m.content, m.type,
 			m.edited, m.edited_at, m.pinned, m.pinned_by, m.pinned_at,
-			m.forwarded_from,
+			m.forwarded_from, m.quoted_message_id, m.quoted_snapshot,
 			m.created_at, m.updated_at, m.deleted_at
 		FROM messages m
 		WHERE m.channel_id = $1 AND m.pinned = true AND m.deleted_at IS NULL
@@ -473,6 +483,8 @@ func (r *MessageRepo) ListPinned(ctx context.Context, channelID uuid.UUID) ([]en
 			&msg.PinnedBy,
 			&msg.PinnedAt,
 			&msg.ForwardedFrom,
+			&msg.QuotedMessageID,
+			&msg.QuotedSnapshot,
 			&msg.CreatedAt,
 			&msg.UpdatedAt,
 			&msg.DeletedAt,

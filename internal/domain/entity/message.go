@@ -15,6 +15,14 @@ const (
 	MessageTypeFile   MessageType = "file"
 )
 
+type QuotedSnapshot struct {
+	UserID          uuid.UUID  `json:"user_id" db:"user_id"`
+	ContentExcerpt  string     `json:"content_excerpt" db:"content_excerpt"`
+	CreatedAt       time.Time  `json:"created_at" db:"created_at"`
+	Deleted         *bool      `json:"deleted,omitempty" db:"deleted,omitempty"`
+	ParentMessageID *uuid.UUID `json:"parent_message_id,omitempty" db:"parent_message_id,omitempty"`
+}
+
 type Message struct {
 	ID        uuid.UUID   `json:"id"`
 	ChannelID uuid.UUID   `json:"channel_id"`
@@ -28,10 +36,12 @@ type Message struct {
 	PinnedBy  *uuid.UUID  `json:"pinned_by,omitempty"`
 	PinnedAt  *time.Time  `json:"pinned_at,omitempty"`
 	// JSON-typed forwarded-from envelope. Persisted verbatim; the FE owns the schema.
-	ForwardedFrom json.RawMessage `json:"forwarded_from,omitempty" db:"forwarded_from"`
-	CreatedAt     time.Time       `json:"created_at"`
-	UpdatedAt     time.Time       `json:"updated_at"`
-	DeletedAt     *time.Time      `json:"deleted_at,omitempty"`
+	ForwardedFrom   json.RawMessage `json:"forwarded_from,omitempty" db:"forwarded_from"`
+	QuotedMessageID *uuid.UUID      `json:"quoted_message_id,omitempty" db:"quoted_message_id"`
+	QuotedSnapshot  *QuotedSnapshot `json:"quoted_snapshot,omitempty" db:"quoted_snapshot"`
+	CreatedAt       time.Time       `json:"created_at"`
+	UpdatedAt       time.Time       `json:"updated_at"`
+	DeletedAt       *time.Time      `json:"deleted_at,omitempty"`
 
 	// Aggregated fields (populated by queries, not stored directly).
 	ReplyCount  int          `json:"reply_count,omitempty"`

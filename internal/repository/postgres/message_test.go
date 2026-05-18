@@ -22,12 +22,21 @@ type messageRepoTestEnv struct {
 	userID      uuid.UUID
 }
 
-func TestMessageRepoSoftDeleteClearsForwardedFrom(t *testing.T) {
+func TestMessageRepoSoftDeleteClearsForwardedFromAndQuoteFields(t *testing.T) {
 	ctx, pool := setupMessageRepoPostgresTest(t)
 	env := setupMessageRepoTestEnv(t, ctx, pool)
 	repo := NewMessageRepo(pool)
 	msg := newMessageRepoTestMessage(env.channelID, env.userID, messageRepoTestUUID(1), "forward")
 	msg.ForwardedFrom = json.RawMessage(`{"message_id":"source","snapshot":{"content":"secret"}}`)
+	quotedMessageID := messageRepoTestUUID(2)
+	parentMessageID := messageRepoTestUUID(3)
+	msg.QuotedMessageID = &quotedMessageID
+	msg.QuotedSnapshot = &entity.QuotedSnapshot{
+		UserID:          env.userID,
+		ContentExcerpt:  "quoted secret",
+		CreatedAt:       time.Now().UTC(),
+		ParentMessageID: &parentMessageID,
+	}
 
 	if err := repo.Create(ctx, msg); err != nil {
 		t.Fatalf("create message: %v", err)
@@ -44,6 +53,12 @@ func TestMessageRepoSoftDeleteClearsForwardedFrom(t *testing.T) {
 	}
 	if got.ForwardedFrom != nil {
 		t.Fatalf("forwarded_from = %s, want nil after soft delete", got.ForwardedFrom)
+	}
+	if got.QuotedMessageID != nil {
+		t.Fatalf("quoted_message_id = %s, want nil after soft delete", got.QuotedMessageID)
+	}
+	if got.QuotedSnapshot != nil {
+		t.Fatalf("quoted_snapshot = %+v, want nil after soft delete", got.QuotedSnapshot)
 	}
 }
 

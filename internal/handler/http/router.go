@@ -89,6 +89,7 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 			r.Use(authLimiter)
 			r.Post("/register", deps.Auth.Register)
 			r.Post("/login", deps.Auth.Login)
+			r.Post("/reactivate-and-login", deps.Auth.ReactivateAndLogin)
 			r.Post("/refresh", deps.Auth.Refresh)
 		})
 
@@ -119,6 +120,7 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 		r.Route("/api/v1/users", func(r chi.Router) {
 			r.Get("/me", deps.Account.Me)
 			r.Patch("/me", deps.Account.UpdateProfile)
+			r.Post("/me/deactivate", deps.Account.Deactivate)
 		})
 
 		// WebSocket endpoint.

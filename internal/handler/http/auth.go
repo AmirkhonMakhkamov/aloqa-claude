@@ -101,6 +101,29 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *AuthHandler) ReactivateAndLogin(w http.ResponseWriter, r *http.Request) {
+	var req loginRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	ipAddress := extractClientIP(r)
+
+	result, err := h.svc.ReactivateAndLogin(r.Context(), req.Email, req.Password, req.DeviceInfo, ipAddress)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, tokenResponse{
+		AccessToken:  result.AccessToken,
+		RefreshToken: result.RefreshToken,
+		SessionID:    result.SessionID,
+		ExpiresIn:    result.ExpiresIn,
+	})
+}
+
 func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	var req refreshRequest
 	if err := decodeJSON(r, &req); err != nil {

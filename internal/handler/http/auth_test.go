@@ -22,6 +22,156 @@ import (
 
 const testSafariUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
 
+func TestLoginStatusCodesAfterPasswordVerification(t *testing.T) {
+	env := newAuthHandlerTestEnv(t)
+	password := "Password1!"
+	activeID := env.addCredentialedUser(t, "active@example.com", password, entity.UserStatusActive)
+	deactivatedID := env.addCredentialedUser(t, "deactivated@example.com", password, entity.UserStatusDeactivated)
+	suspendedID := env.addCredentialedUser(t, "suspended@example.com", password, entity.UserStatusSuspended)
+
+	tests := []struct {
+		name     string
+		email    string
+		password string
+		status   int
+		code     cerrors.Code
+	}{
+		{
+			name:     "deactivated wrong password masks status",
+			email:    "deactivated@example.com",
+			password: "wrong",
+			status:   http.StatusUnauthorized,
+			code:     cerrors.CodeUnauthorized,
+		},
+		{
+			name:     "suspended wrong password masks status",
+			email:    "suspended@example.com",
+			password: "wrong",
+			status:   http.StatusUnauthorized,
+			code:     cerrors.CodeUnauthorized,
+		},
+		{
+			name:     "deactivated correct password is typed",
+			email:    "deactivated@example.com",
+			password: password,
+			status:   http.StatusForbidden,
+			code:     cerrors.CodeAccountDeactivated,
+		},
+		{
+			name:     "suspended correct password is typed",
+			email:    "suspended@example.com",
+			password: password,
+			status:   http.StatusForbidden,
+			code:     cerrors.CodeAccountSuspended,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginBody(tt.email, tt.password)))
+			res := httptest.NewRecorder()
+
+			env.handler.Login(res, req)
+
+			if res.Code != tt.status {
+				t.Fatalf("Login status = %d, want %d, body=%s", res.Code, tt.status, res.Body.String())
+			}
+			assertErrorCode(t, res, tt.code)
+		})
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginBody("active@example.com", password)))
+	res := httptest.NewRecorder()
+	env.handler.Login(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("active Login status = %d, want 200, body=%s", res.Code, res.Body.String())
+	}
+	if env.users.users[activeID].Status != entity.UserStatusActive {
+		t.Fatalf("active user status changed")
+	}
+	if env.users.users[deactivatedID].Status != entity.UserStatusDeactivated {
+		t.Fatalf("deactivated user status changed")
+	}
+	if env.users.users[suspendedID].Status != entity.UserStatusSuspended {
+		t.Fatalf("suspended user status changed")
+	}
+}
+
+func TestReactivateAndLoginStatusCodes(t *testing.T) {
+	env := newAuthHandlerTestEnv(t)
+	password := "Password1!"
+	deactivatedID := env.addCredentialedUser(t, "deactivated@example.com", password, entity.UserStatusDeactivated)
+	now := time.Now().UTC()
+	env.users.users[deactivatedID].DeactivatedAt = &now
+	env.addCredentialedUser(t, "active@example.com", password, entity.UserStatusActive)
+	env.addCredentialedUser(t, "suspended@example.com", password, entity.UserStatusSuspended)
+
+	tests := []struct {
+		name     string
+		email    string
+		password string
+		status   int
+		code     cerrors.Code
+	}{
+		{
+			name:     "wrong password masks deactivated status",
+			email:    "deactivated@example.com",
+			password: "wrong",
+			status:   http.StatusUnauthorized,
+			code:     cerrors.CodeUnauthorized,
+		},
+		{
+			name:     "active correct password is not deactivated",
+			email:    "active@example.com",
+			password: password,
+			status:   http.StatusForbidden,
+			code:     cerrors.CodeNotDeactivated,
+		},
+		{
+			name:     "suspended correct password is typed",
+			email:    "suspended@example.com",
+			password: password,
+			status:   http.StatusForbidden,
+			code:     cerrors.CodeAccountSuspended,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/reactivate-and-login", strings.NewReader(loginBody(tt.email, tt.password)))
+			res := httptest.NewRecorder()
+
+			env.handler.ReactivateAndLogin(res, req)
+
+			if res.Code != tt.status {
+				t.Fatalf("ReactivateAndLogin status = %d, want %d, body=%s", res.Code, tt.status, res.Body.String())
+			}
+			assertErrorCode(t, res, tt.code)
+		})
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/reactivate-and-login", strings.NewReader(loginBody("deactivated@example.com", password)))
+	res := httptest.NewRecorder()
+	env.handler.ReactivateAndLogin(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("ReactivateAndLogin status = %d, want 200, body=%s", res.Code, res.Body.String())
+	}
+	var tokens tokenResponse
+	if err := json.Unmarshal(res.Body.Bytes(), &tokens); err != nil {
+		t.Fatalf("decode token response: %v", err)
+	}
+	if tokens.AccessToken == "" || tokens.RefreshToken == "" || tokens.SessionID == "" || tokens.ExpiresIn == 0 {
+		t.Fatalf("token response missing fields: %+v", tokens)
+	}
+	user := env.users.users[deactivatedID]
+	if user.Status != entity.UserStatusActive {
+		t.Fatalf("Status = %q, want active", user.Status)
+	}
+	if user.DeactivatedAt != nil {
+		t.Fatalf("DeactivatedAt = %v, want nil", user.DeactivatedAt)
+	}
+}
+
 func TestLogoutRevokesOwnSession(t *testing.T) {
 	env := newAuthHandlerTestEnv(t)
 	userID := env.addUser(t)
@@ -281,6 +431,27 @@ func (e *authHandlerTestEnv) addUser(t *testing.T) uuid.UUID {
 		Locale:      "en",
 	}
 	return userID
+}
+
+func (e *authHandlerTestEnv) addCredentialedUser(t *testing.T, email, password string, status entity.UserStatus) uuid.UUID {
+	t.Helper()
+	user, err := e.svc.Register(context.Background(), email, password, "Test User")
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	user.Status = status
+	if status == entity.UserStatusDeactivated {
+		now := time.Now().UTC()
+		user.DeactivatedAt = &now
+	}
+	if err := e.users.Update(context.Background(), user); err != nil {
+		t.Fatalf("Update returned error: %v", err)
+	}
+	return user.ID
+}
+
+func loginBody(email, password string) string {
+	return `{"email":"` + email + `","password":"` + password + `","device_info":"test ua"}`
 }
 
 func (e *authHandlerTestEnv) createSession(t *testing.T, userID uuid.UUID, userAgent, ip string) string {

@@ -1,0 +1,1926 @@
+openapi: 3.0.3
+info:
+  title: Aloqa Backend API
+  version: '1.0.0'
+  description: |
+    Hand-authored OpenAPI 3.0 spec covering the backend routes Phase 3 + Phase 4
+    consume (per AD-7 in docs/plan/p3_parallel-tracks-plan.md and AD-9 in
+    docs/plan/p4_parallel-tracks-plan.md). The spec is the source of truth;
+    `tooling/api-codegen` runs `openapi-typescript` against it to emit
+    `packages/core/src/api/generated/_generated.ts`.
+
+    Pinned to `aloqa-claude@3f92356` — see `PINNED_BACKEND.txt`. Re-pinning is
+    its own PR.
+
+    Excluded from this spec (post-Phase-4 roadmap): `/api/v1/recordings/*`,
+    `/api/v1/breakout-rooms/*`, waiting-room, top-level `/media-session/*`
+    (admin/SFU surface — distinct from per-call sub-paths, which ARE vendored),
+    `admin/{media,observability,storage}`.
+
+servers:
+  - url: http://localhost:8080
+    description: Local dev backend.
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+paths:
+  # -- Auth -----------------------------------------------------------------
+  /api/v1/auth/register:
+    post:
+      summary: Register a new user account
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+      responses:
+        '200':
+          description: New user + tokens
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthSession' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/auth/login:
+    post:
+      summary: Exchange credentials for an access + refresh token
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Authenticated session
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthSession' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Account is deactivated or suspended. Error code is `ACCOUNT_DEACTIVATED` or `ACCOUNT_SUSPENDED`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /api/v1/auth/reactivate-and-login:
+    post:
+      summary: Reactivate a deactivated account and issue a session
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Reactivated authenticated session
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthSession' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Account is suspended, already active, or otherwise ineligible for reactivation.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /api/v1/auth/refresh:
+    post:
+      summary: Rotate the refresh token and return a new access token
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+      responses:
+        '200':
+          description: Refreshed access + refresh tokens
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthSession' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/auth/logout:
+    post:
+      summary: Invalidate a refresh-token session
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                session_id: { $ref: '#/components/schemas/UUID' }
+      responses:
+        '204': { description: Logged out }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { description: Session revocation failed }
+
+  /api/v1/auth/logout-all:
+    post:
+      summary: Invalidate every refresh token for the current user
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: All sessions invalidated }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { description: Session revocation failed }
+
+  /api/v1/auth/logout-others:
+    post:
+      summary: Invalidate every refresh token except the caller's current session
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Other sessions invalidated }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { description: Session revocation failed }
+
+  /api/v1/auth/sessions:
+    get:
+      summary: List active sessions for the current user
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Session list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AuthSessionListEntry' }
+
+  # -- Users / Account ------------------------------------------------------
+  /api/v1/users/me:
+    get:
+      summary: Current user profile
+      tags: [users]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    patch:
+      summary: Update display name / locale / avatar
+      tags: [users]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateUserRequest' }
+      responses:
+        '200':
+          description: Updated profile
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+
+  /api/v1/users/me/deactivate:
+    post:
+      summary: Deactivate the authenticated user's account
+      tags: [users]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Account deactivated and sessions revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Account is not allowed to self-deactivate.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '500': { description: Deactivation failed }
+
+  # -- Workspaces -----------------------------------------------------------
+  /api/v1/workspaces:
+    get:
+      summary: List workspaces the user is a member of
+      tags: [workspaces]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Workspace list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Workspace' }
+    post:
+      summary: Create a new organization workspace
+      tags: [workspaces]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateWorkspaceRequest' }
+      responses:
+        '201':
+          description: Created workspace
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Workspace' }
+
+  /api/v1/workspaces/{workspaceID}:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+    get:
+      summary: Fetch a single workspace by id
+      tags: [workspaces]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Workspace
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Workspace' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # -- Personal workspace ---------------------------------------------------
+  /api/v1/personal:
+    get:
+      summary: Fetch the caller's personal workspace
+      tags: [workspaces]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Personal workspace
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Workspace' }
+
+  # -- Workspace member directory (non-admin) ------------------------------
+  /api/v1/workspaces/{workspaceID}/members:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+    get:
+      summary: List workspace members (callable by any member)
+      tags: [workspaces]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Members
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/WorkspaceMember' }
+
+  # -- Channels (workspace-scoped) -----------------------------------------
+  /api/v1/workspaces/{workspaceID}/channels:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+    get:
+      summary: List channels in a workspace
+      tags: [channels]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Channels
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Channel' }
+    post:
+      summary: Create a channel in a workspace
+      tags: [channels]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateChannelRequest' }
+      responses:
+        '201':
+          description: Created channel
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Channel' }
+
+  /api/v1/workspaces/{workspaceID}/channels/dm:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+    post:
+      summary: Open or fetch a DM channel
+      tags: [channels]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateDmRequest' }
+      responses:
+        '200':
+          description: DM channel
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Channel' }
+
+  /api/v1/workspaces/{workspaceID}/channels/unread:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+    get:
+      summary: Per-channel unread counts for the caller
+      tags: [channels]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Unread counts
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ChannelUnreadCount' }
+
+  /api/v1/workspaces/{workspaceID}/channels/{channelID}:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/ChannelID'
+    get:
+      summary: Fetch a channel
+      tags: [channels]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Channel
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Channel' }
+    put:
+      summary: Update a channel (name / topic / archived)
+      tags: [channels]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateChannelRequest' }
+      responses:
+        '200':
+          description: Updated channel
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Channel' }
+
+  /api/v1/workspaces/{workspaceID}/channels/{channelID}/read:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/ChannelID'
+    post:
+      summary: Mark the channel read at the given message
+      tags: [channels]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MarkReadRequest' }
+      responses:
+        '204': { description: Marked read }
+
+  # -- Messages -------------------------------------------------------------
+  /api/v1/workspaces/{workspaceID}/channels/{channelID}/messages:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/ChannelID'
+    get:
+      summary: List channel messages (paginated)
+      tags: [messages]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: before
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Messages, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Message' }
+    post:
+      summary: Send a message to a channel
+      tags: [messages]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SendMessageRequest' }
+      responses:
+        '201':
+          description: Created message
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Message' }
+
+  /api/v1/workspaces/{workspaceID}/channels/{channelID}/messages/{messageID}:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/ChannelID'
+      - $ref: '#/components/parameters/MessageID'
+    put:
+      summary: Edit a message (author only)
+      tags: [messages]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EditMessageRequest' }
+      responses:
+        '200':
+          description: Updated message
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Message' }
+    delete:
+      summary: Delete a message
+      tags: [messages]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Deleted }
+
+  /api/v1/workspaces/{workspaceID}/channels/{channelID}/messages/{messageID}/thread:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/ChannelID'
+      - $ref: '#/components/parameters/MessageID'
+    get:
+      summary: List thread replies for a message
+      tags: [messages]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Thread replies
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Message' }
+
+  /api/v1/workspaces/{workspaceID}/channels/{channelID}/messages/{messageID}/pin:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/ChannelID'
+      - $ref: '#/components/parameters/MessageID'
+    post:
+      summary: Pin a message
+      tags: [messages]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Pinned }
+    delete:
+      summary: Unpin a message
+      tags: [messages]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Unpinned }
+
+  # -- Reactions ------------------------------------------------------------
+  /api/v1/workspaces/{workspaceID}/channels/{channelID}/messages/{messageID}/reactions:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/ChannelID'
+      - $ref: '#/components/parameters/MessageID'
+    post:
+      summary: Add a reaction to a message
+      tags: [reactions]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddReactionRequest' }
+      responses:
+        '201':
+          description: Created reaction
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reaction' }
+
+  /api/v1/workspaces/{workspaceID}/channels/{channelID}/messages/{messageID}/reactions/{emoji}:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/ChannelID'
+      - $ref: '#/components/parameters/MessageID'
+      - name: emoji
+        in: path
+        required: true
+        schema: { type: string }
+    delete:
+      summary: Remove the caller's reaction matching the emoji
+      tags: [reactions]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Removed }
+
+  # -- Attachments ----------------------------------------------------------
+  /api/v1/workspaces/{workspaceID}/channels/{channelID}/messages/{messageID}/attachments:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/ChannelID'
+      - $ref: '#/components/parameters/MessageID'
+    post:
+      summary: Upload an attachment for a message (multipart)
+      tags: [attachments]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+              required: [file]
+      responses:
+        '201':
+          description: Created attachment
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Attachment' }
+
+  # -- Presence -------------------------------------------------------------
+  /api/v1/workspaces/{workspaceID}/presence:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+    get:
+      summary: List currently-online users in a workspace
+      tags: [presence]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Presence list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PresenceEntry' }
+    put:
+      summary: Set the caller's presence status
+      tags: [presence]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetPresenceRequest' }
+      responses:
+        '204': { description: Status set }
+
+  # -- Notifications --------------------------------------------------------
+  /api/v1/workspaces/{workspaceID}/notifications:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+    get:
+      summary: List notifications for the caller
+      tags: [notifications]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Notifications
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Notification' }
+
+  /api/v1/workspaces/{workspaceID}/notifications/read-all:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+    post:
+      summary: Mark every notification read
+      tags: [notifications]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Marked read }
+
+  /api/v1/workspaces/{workspaceID}/notifications/unread-count:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+    get:
+      summary: Unread notification count
+      tags: [notifications]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Count
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UnreadCountResponse' }
+
+  /api/v1/workspaces/{workspaceID}/notifications/{notificationID}/read:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - name: notificationID
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      summary: Mark a single notification read
+      tags: [notifications]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Marked read }
+
+  # -- Search ---------------------------------------------------------------
+  /api/v1/workspaces/{workspaceID}/search:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+    get:
+      summary: Server-side search across messages and channels
+      tags: [search]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string, minLength: 1 }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: Search hits
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SearchResponse' }
+
+  # -- Invites --------------------------------------------------------------
+  /api/v1/workspaces/{workspaceID}/invites:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+    get:
+      summary: List active invites in a workspace
+      tags: [invites]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Invites
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/GuestInvite' }
+    post:
+      summary: Create a guest invite
+      tags: [invites]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateInviteRequest' }
+      responses:
+        '201':
+          description: Created invite
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GuestInvite' }
+
+  /api/v1/workspaces/{workspaceID}/invites/{inviteID}:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - name: inviteID
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      summary: Revoke an invite
+      tags: [invites]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Revoked }
+
+  /api/v1/invites/{token}/redeem:
+    parameters:
+      - name: token
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      summary: Redeem a guest invite token (public)
+      tags: [invites]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RedeemInviteRequest' }
+      responses:
+        '200':
+          description: Redemption result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthSession' }
+
+  # -- Admin (members / roles / audit-log only) -----------------------------
+  /api/v1/workspaces/{workspaceID}/admin/members:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+    get:
+      summary: List workspace members
+      tags: [admin]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Members
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/WorkspaceMember' }
+    post:
+      summary: Invite a new member
+      tags: [admin]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InviteMemberRequest' }
+      responses:
+        '201':
+          description: Pending member
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceMember' }
+
+  /api/v1/workspaces/{workspaceID}/admin/roles:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+    get:
+      summary: List workspace role definitions
+      tags: [admin]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Roles
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/WorkspaceRoleDefinition' }
+    post:
+      summary: Create a custom role
+      tags: [admin]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateRoleRequest' }
+      responses:
+        '201':
+          description: Created role
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceRoleDefinition' }
+
+  /api/v1/workspaces/{workspaceID}/admin/roles/{roleID}:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - name: roleID
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      summary: Update a role
+      tags: [admin]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateRoleRequest' }
+      responses:
+        '200':
+          description: Updated role
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceRoleDefinition' }
+    delete:
+      summary: Delete a role
+      tags: [admin]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Deleted }
+
+  /api/v1/workspaces/{workspaceID}/admin/audit-log:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+    get:
+      summary: List recent audit-log entries
+      tags: [admin]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: before
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Audit entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AuditEntry' }
+
+  # -- Calls (AD-9) ---------------------------------------------------------
+  /api/v1/workspaces/{workspaceID}/calls:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+    post:
+      summary: Start a call (1:1 or group) in the workspace
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StartCallRequest' }
+      responses:
+        '201':
+          description: Created call
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Call' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    get:
+      summary: List active calls in the workspace
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Active calls
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Call' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/workspaces/{workspaceID}/calls/{callID}:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/CallID'
+    get:
+      summary: Fetch a call (status, settings, owner)
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Call details
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Call' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/workspaces/{workspaceID}/calls/{callID}/participants:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/CallID'
+    get:
+      summary: Fetch the current participant roster
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Participant roster
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CallParticipant' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/workspaces/{workspaceID}/calls/{callID}/join:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/CallID'
+    post:
+      summary: Current user joins the call
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Joined participant entry
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CallParticipant' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/workspaces/{workspaceID}/calls/{callID}/leave:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/CallID'
+    post:
+      summary: Current user leaves the call
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Left }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/workspaces/{workspaceID}/calls/{callID}/media:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/CallID'
+    put:
+      summary: Toggle audio/video/screen-share for the current participant
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateCallMediaRequest' }
+      responses:
+        '204': { description: Media state updated }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # The /turn-credentials path was originally vendored straight into
+  # _generated.ts (commit 5fef4db) without a corresponding YAML entry; re-add
+  # the spec block so the codegen regen preserves the typed path consumed by
+  # webrtc/engine.ts and exercised by api/__tests__/calls.test.ts.
+  /api/v1/workspaces/{workspaceID}/calls/{callID}/turn-credentials:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/CallID'
+    post:
+      summary: Fetch short-lived TURN credentials for the call
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: TURN URLs and ephemeral credentials
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TurnCredentials' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/workspaces/{workspaceID}/calls/{callID}/media-session/token:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/CallID'
+    post:
+      summary: Mint an SFU per-call session token (engine-internal)
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Session token and SFU routing metadata
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MediaSessionToken' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/workspaces/{workspaceID}/calls/{callID}/media-session/offer:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/CallID'
+    post:
+      summary: Exchange SDP offer for SDP answer (engine-internal)
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MediaSessionOfferRequest' }
+      responses:
+        '200':
+          description: SFU SDP answer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SdpAnswer' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/workspaces/{workspaceID}/calls/{callID}/media-session/ice-candidate:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/CallID'
+    post:
+      summary: Trickle a local ICE candidate to the SFU (engine-internal)
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MediaSessionIceCandidateRequest' }
+      responses:
+        '204': { description: Candidate accepted }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+# ---------------------------------------------------------------------------
+# Reusable parameters / responses
+# ---------------------------------------------------------------------------
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    WorkspaceID:
+      name: workspaceID
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ChannelID:
+      name: channelID
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    MessageID:
+      name: messageID
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    CallID:
+      name: callID
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    BadRequest:
+      description: Validation failed
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Unauthorized:
+      description: Authentication required or refresh token rejected
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Forbidden:
+      description: Caller lacks permission
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Conflict:
+      description: Resource already exists or precondition failed
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  # -- Schemas --------------------------------------------------------------
+  schemas:
+    UUID: { type: string, format: uuid }
+    IsoDatetime: { type: string, format: date-time }
+
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+
+    User:
+      type: object
+      required: [id, email, display_name, status, locale, created_at, updated_at]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        email: { type: string }
+        display_name: { type: string }
+        avatar_url: { type: string, nullable: true }
+        status:
+          type: string
+          enum: [active, suspended, deactivated]
+        locale: { type: string }
+        created_at: { $ref: '#/components/schemas/IsoDatetime' }
+        updated_at: { $ref: '#/components/schemas/IsoDatetime' }
+
+    UpdateUserRequest:
+      type: object
+      properties:
+        display_name: { type: string }
+        avatar_url: { type: string, nullable: true }
+        locale: { type: string }
+
+    Workspace:
+      type: object
+      required: [id, name, kind, created_at, updated_at]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        name: { type: string }
+        slug: { type: string }
+        kind:
+          type: string
+          enum: [personal, organization]
+        owner_id: { $ref: '#/components/schemas/UUID' }
+        created_at: { $ref: '#/components/schemas/IsoDatetime' }
+        updated_at: { $ref: '#/components/schemas/IsoDatetime' }
+
+    CreateWorkspaceRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1 }
+        slug: { type: string }
+
+    Channel:
+      type: object
+      required: [id, workspace_id, name, type, created_by, archived, created_at, updated_at]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        workspace_id: { $ref: '#/components/schemas/UUID' }
+        name: { type: string }
+        topic: { type: string, nullable: true }
+        type:
+          type: string
+          enum: [public, private, dm, group_dm]
+        created_by: { $ref: '#/components/schemas/UUID' }
+        archived: { type: boolean }
+        created_at: { $ref: '#/components/schemas/IsoDatetime' }
+        updated_at: { $ref: '#/components/schemas/IsoDatetime' }
+        # Populated only for `type` in (dm, group_dm) so the client can render
+        # the counterpart user without an extra round-trip per row. Backend
+        # leaves the field unset for public/private channels.
+        members:
+          type: array
+          items: { $ref: '#/components/schemas/UUID' }
+
+    CreateChannelRequest:
+      type: object
+      required: [name, type]
+      properties:
+        name: { type: string, minLength: 1 }
+        topic: { type: string }
+        type:
+          type: string
+          enum: [public, private]
+
+    UpdateChannelRequest:
+      type: object
+      properties:
+        name: { type: string }
+        topic: { type: string, nullable: true }
+        archived: { type: boolean }
+
+    CreateDmRequest:
+      type: object
+      required: [user_ids]
+      properties:
+        user_ids:
+          type: array
+          items: { $ref: '#/components/schemas/UUID' }
+
+    ChannelUnreadCount:
+      type: object
+      required: [channel_id, unread_count]
+      properties:
+        channel_id: { $ref: '#/components/schemas/UUID' }
+        unread_count: { type: integer }
+        last_read_at: { $ref: '#/components/schemas/IsoDatetime' }
+
+    MarkReadRequest:
+      type: object
+      required: [last_read_message_id]
+      properties:
+        last_read_message_id: { $ref: '#/components/schemas/UUID' }
+
+    Message:
+      type: object
+      required: [id, channel_id, user_id, content, type, edited, pinned, created_at, updated_at]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        channel_id: { $ref: '#/components/schemas/UUID' }
+        user_id: { $ref: '#/components/schemas/UUID' }
+        parent_id: { $ref: '#/components/schemas/UUID', nullable: true }
+        content: { type: string }
+        type:
+          type: string
+          enum: [text, system, file]
+        edited: { type: boolean }
+        edited_at: { $ref: '#/components/schemas/IsoDatetime', nullable: true }
+        pinned: { type: boolean }
+        pinned_by: { $ref: '#/components/schemas/UUID', nullable: true }
+        pinned_at: { $ref: '#/components/schemas/IsoDatetime', nullable: true }
+        created_at: { $ref: '#/components/schemas/IsoDatetime' }
+        updated_at: { $ref: '#/components/schemas/IsoDatetime' }
+        deleted_at: { $ref: '#/components/schemas/IsoDatetime', nullable: true }
+        reply_count: { type: integer, nullable: true }
+        reactions:
+          type: array
+          nullable: true
+          items: { $ref: '#/components/schemas/Reaction' }
+        attachments:
+          type: array
+          nullable: true
+          items: { $ref: '#/components/schemas/Attachment' }
+        user:
+          allOf:
+            - $ref: '#/components/schemas/User'
+          nullable: true
+
+    SendMessageRequest:
+      type: object
+      required: [content]
+      properties:
+        content: { type: string, minLength: 1 }
+        type:
+          type: string
+          enum: [text, file]
+        parent_id: { $ref: '#/components/schemas/UUID' }
+
+    EditMessageRequest:
+      type: object
+      required: [content]
+      properties:
+        content: { type: string, minLength: 1 }
+
+    Reaction:
+      type: object
+      required: [id, message_id, user_id, emoji, created_at]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        message_id: { $ref: '#/components/schemas/UUID' }
+        user_id: { $ref: '#/components/schemas/UUID' }
+        emoji: { type: string }
+        created_at: { $ref: '#/components/schemas/IsoDatetime' }
+
+    AddReactionRequest:
+      type: object
+      required: [emoji]
+      properties:
+        emoji: { type: string, minLength: 1 }
+
+    Attachment:
+      type: object
+      required: [id, message_id, file_name, file_size, mime_type, created_at]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        message_id: { $ref: '#/components/schemas/UUID' }
+        file_name: { type: string }
+        file_size: { type: integer }
+        mime_type: { type: string }
+        url: { type: string, nullable: true }
+        created_at: { $ref: '#/components/schemas/IsoDatetime' }
+
+    PresenceEntry:
+      type: object
+      required: [user_id, status, last_seen_at]
+      properties:
+        user_id: { $ref: '#/components/schemas/UUID' }
+        status:
+          type: string
+          enum: [online, away, dnd, offline]
+        last_seen_at: { $ref: '#/components/schemas/IsoDatetime' }
+
+    SetPresenceRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [online, away, dnd, offline]
+
+    Notification:
+      type: object
+      required: [id, user_id, kind, payload, read, created_at]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        user_id: { $ref: '#/components/schemas/UUID' }
+        kind: { type: string }
+        payload:
+          type: object
+          additionalProperties: true
+        read: { type: boolean }
+        created_at: { $ref: '#/components/schemas/IsoDatetime' }
+
+    UnreadCountResponse:
+      type: object
+      required: [count]
+      properties:
+        count: { type: integer }
+
+    SearchResponse:
+      type: object
+      required: [hits]
+      properties:
+        hits:
+          type: array
+          items: { $ref: '#/components/schemas/SearchHit' }
+        total: { type: integer }
+
+    SearchHit:
+      type: object
+      required: [kind, id, score]
+      properties:
+        kind:
+          type: string
+          enum: [message, channel, user]
+        id: { $ref: '#/components/schemas/UUID' }
+        score: { type: number }
+        snippet: { type: string, nullable: true }
+        message:
+          allOf:
+            - $ref: '#/components/schemas/Message'
+          nullable: true
+        channel:
+          allOf:
+            - $ref: '#/components/schemas/Channel'
+          nullable: true
+
+    GuestInvite:
+      type: object
+      required: [id, workspace_id, channel_id, status, token, created_at]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        workspace_id: { $ref: '#/components/schemas/UUID' }
+        channel_id: { $ref: '#/components/schemas/UUID' }
+        invited_by: { $ref: '#/components/schemas/UUID' }
+        status:
+          type: string
+          enum: [pending, accepted, revoked, expired]
+        token: { type: string }
+        expires_at: { $ref: '#/components/schemas/IsoDatetime', nullable: true }
+        created_at: { $ref: '#/components/schemas/IsoDatetime' }
+
+    CreateInviteRequest:
+      type: object
+      required: [channel_id]
+      properties:
+        channel_id: { $ref: '#/components/schemas/UUID' }
+        email: { type: string }
+        expires_at: { $ref: '#/components/schemas/IsoDatetime' }
+
+    RedeemInviteRequest:
+      type: object
+      required: [display_name]
+      properties:
+        display_name: { type: string, minLength: 1 }
+
+    WorkspaceMember:
+      type: object
+      required: [id, workspace_id, user_id, role, joined_at]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        workspace_id: { $ref: '#/components/schemas/UUID' }
+        user_id: { $ref: '#/components/schemas/UUID' }
+        role:
+          type: string
+          enum: [owner, admin, member, guest]
+        joined_at: { $ref: '#/components/schemas/IsoDatetime' }
+        user:
+          allOf:
+            - $ref: '#/components/schemas/User'
+          nullable: true
+
+    InviteMemberRequest:
+      type: object
+      required: [email, role]
+      properties:
+        email: { type: string }
+        role:
+          type: string
+          enum: [admin, member, guest]
+
+    WorkspaceRoleDefinition:
+      type: object
+      required: [id, workspace_id, name, permissions, created_at]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        workspace_id: { $ref: '#/components/schemas/UUID' }
+        name: { type: string }
+        permissions:
+          type: array
+          items: { type: string }
+        created_at: { $ref: '#/components/schemas/IsoDatetime' }
+
+    CreateRoleRequest:
+      type: object
+      required: [name, permissions]
+      properties:
+        name: { type: string, minLength: 1 }
+        permissions:
+          type: array
+          items: { type: string }
+
+    UpdateRoleRequest:
+      type: object
+      properties:
+        name: { type: string }
+        permissions:
+          type: array
+          items: { type: string }
+
+    AuditEntry:
+      type: object
+      required: [id, workspace_id, action, actor_id, target_type, target_id, created_at]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        workspace_id: { $ref: '#/components/schemas/UUID' }
+        action: { type: string }
+        actor_id: { $ref: '#/components/schemas/UUID' }
+        target_type: { type: string }
+        target_id: { type: string }
+        metadata:
+          type: object
+          additionalProperties: true
+          nullable: true
+        created_at: { $ref: '#/components/schemas/IsoDatetime' }
+
+    # -- Auth --------------------------------------------------------------
+    RegisterRequest:
+      type: object
+      required: [email, password, display_name]
+      properties:
+        email: { type: string }
+        password: { type: string, minLength: 8 }
+        display_name: { type: string }
+        locale: { type: string }
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string }
+        password: { type: string }
+
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token: { type: string }
+
+    AuthSession:
+      type: object
+      required: [user, access_token, refresh_token, expires_at]
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        access_token: { type: string }
+        refresh_token: { type: string }
+        expires_at: { $ref: '#/components/schemas/IsoDatetime' }
+
+    AuthSessionListEntry:
+      type: object
+      required: [id, user_agent, created_at]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        user_agent: { type: string }
+        ip: { type: string, nullable: true }
+        is_current: { type: boolean }
+        device_label: { type: string, nullable: false }
+        browser_label: { type: string, nullable: false }
+        os_label: { type: string, nullable: false }
+        created_at: { $ref: '#/components/schemas/IsoDatetime' }
+        last_active_at: { $ref: '#/components/schemas/IsoDatetime' }
+
+    # -- Calls (AD-9) ------------------------------------------------------
+    CallType:
+      type: string
+      description: Call shape (1:1 vs group/meeting/webinar/selector lobby).
+      enum: [one_to_one, group, meeting, webinar, selector]
+
+    CallStatus:
+      type: string
+      description: Lifecycle state of the call.
+      enum: [ringing, active, ended]
+
+    CallRole:
+      type: string
+      description: Participant's role in the call (separate from connection status).
+      enum: [host, co_host, presenter, participant, viewer]
+
+    ParticipantStatus:
+      type: string
+      description: Connection status of a participant inside the call.
+      enum: [invited, waiting, joining, connected, disconnected]
+
+    CallSettings:
+      type: object
+      description: Per-call feature toggles. Mirrors aloqa-claude entity.CallSettings.
+      required:
+        [
+          waiting_room,
+          mute_on_join,
+          recording,
+          screen_sharing,
+          chat,
+          breakout_rooms,
+          max_participants,
+          e2ee,
+          watermark,
+        ]
+      properties:
+        waiting_room:
+          type: boolean
+          description: Hold joiners in a lobby until admitted.
+        mute_on_join:
+          type: boolean
+          description: Force participants to join muted.
+        recording:
+          type: boolean
+          description: Recording is permitted.
+        screen_sharing:
+          type: boolean
+          description: Screen-sharing is permitted.
+        chat:
+          type: boolean
+          description: In-call chat is enabled.
+        breakout_rooms:
+          type: boolean
+          description: Breakout-rooms are enabled.
+        max_participants:
+          type: integer
+          description: Hard cap on simultaneous participants.
+        e2ee:
+          type: boolean
+          description: End-to-end encryption is required.
+        watermark:
+          type: boolean
+          description: Render a per-user watermark on video tiles.
+
+    StartCallSettings:
+      type: object
+      description: Partial call settings accepted by POST /workspaces/{workspaceID}/calls.
+      properties:
+        waiting_room:
+          type: boolean
+          description: Hold joiners in a lobby until admitted.
+        mute_on_join:
+          type: boolean
+          description: Force participants to join muted.
+        recording:
+          type: boolean
+          description: Recording is permitted.
+        screen_sharing:
+          type: boolean
+          description: Screen-sharing is permitted.
+        chat:
+          type: boolean
+          description: In-call chat is enabled.
+        breakout_rooms:
+          type: boolean
+          description: Breakout-rooms are enabled.
+        max_participants:
+          type: integer
+          description: Hard cap on simultaneous participants.
+        e2ee:
+          type: boolean
+          description: End-to-end encryption is required.
+        watermark:
+          type: boolean
+          description: Render a per-user watermark on video tiles.
+
+    Call:
+      type: object
+      description: A real-time call. Mirrors aloqa-claude entity.Call.
+      required: [id, workspace_id, type, status, created_by, settings, created_at]
+      properties:
+        id:
+          allOf:
+            - $ref: '#/components/schemas/UUID'
+          description: Unique call identifier.
+        workspace_id:
+          allOf:
+            - $ref: '#/components/schemas/UUID'
+          description: Workspace that owns the call.
+        channel_id:
+          allOf:
+            - $ref: '#/components/schemas/UUID'
+          nullable: true
+          description: Channel the call is bound to; absent/null for ad-hoc calls.
+        type:
+          allOf:
+            - $ref: '#/components/schemas/CallType'
+          description: Call shape selected at creation time.
+        status:
+          allOf:
+            - $ref: '#/components/schemas/CallStatus'
+          description: Current lifecycle state.
+        title:
+          type: string
+          nullable: true
+          description: Optional human-readable title.
+        created_by:
+          allOf:
+            - $ref: '#/components/schemas/UUID'
+          description: User who created the call.
+        settings:
+          allOf:
+            - $ref: '#/components/schemas/CallSettings'
+          description: Feature toggles captured for this call.
+        started_at:
+          allOf:
+            - $ref: '#/components/schemas/IsoDatetime'
+          nullable: true
+          description: When the call became active; absent/null while still ringing.
+        ended_at:
+          allOf:
+            - $ref: '#/components/schemas/IsoDatetime'
+          nullable: true
+          description: When the call ended; absent/null while active.
+        created_at:
+          allOf:
+            - $ref: '#/components/schemas/IsoDatetime'
+          description: When the call record was created.
+
+    CallParticipant:
+      type: object
+      description: A participant in a call. Mirrors aloqa-claude entity.CallParticipant.
+      required: [id, call_id, user_id, role, status, audio_muted, video_muted, screen_sharing]
+      properties:
+        id:
+          allOf:
+            - $ref: '#/components/schemas/UUID'
+          description: Unique participant-row identifier.
+        call_id:
+          allOf:
+            - $ref: '#/components/schemas/UUID'
+          description: Call this participant belongs to.
+        user_id:
+          allOf:
+            - $ref: '#/components/schemas/UUID'
+          description: User represented by this participant entry.
+        breakout_room_id:
+          allOf:
+            - $ref: '#/components/schemas/UUID'
+          nullable: true
+          description: Breakout room the participant is currently in; absent/null in main room.
+        role:
+          allOf:
+            - $ref: '#/components/schemas/CallRole'
+          description: Participant's permission role in the call.
+        status:
+          allOf:
+            - $ref: '#/components/schemas/ParticipantStatus'
+          description: Participant's connection state.
+        audio_muted:
+          type: boolean
+          description: Microphone is muted.
+        video_muted:
+          type: boolean
+          description: Camera is off.
+        screen_sharing:
+          type: boolean
+          description: Participant is sharing their screen.
+        joined_at:
+          allOf:
+            - $ref: '#/components/schemas/IsoDatetime'
+          nullable: true
+          description: When this participant joined.
+        left_at:
+          allOf:
+            - $ref: '#/components/schemas/IsoDatetime'
+          nullable: true
+          description: When this participant left; absent/null while connected.
+
+    StartCallRequest:
+      type: object
+      description: Body for POST /workspaces/{workspaceID}/calls.
+      required: [type]
+      properties:
+        type:
+          allOf:
+            - $ref: '#/components/schemas/CallType'
+          description: Call shape to create.
+        channel_id:
+          allOf:
+            - $ref: '#/components/schemas/UUID'
+          nullable: true
+          description: Optional channel to bind the call to.
+        title:
+          type: string
+          description: Optional title for the call.
+        settings:
+          allOf:
+            - $ref: '#/components/schemas/StartCallSettings'
+          description: Optional feature toggles; omitted fields decode to backend defaults.
+
+    UpdateCallMediaRequest:
+      type: object
+      description: Body for PUT /workspaces/{workspaceID}/calls/{callID}/media.
+      properties:
+        audio_muted:
+          type: boolean
+          description: Patch microphone mute state; omitted means leave unchanged.
+        video_muted:
+          type: boolean
+          description: Patch camera mute state; omitted means leave unchanged.
+        screen_sharing:
+          type: boolean
+          description: Patch screen-sharing state; omitted means leave unchanged.
+
+    TurnCredentials:
+      type: object
+      description: Short-lived TURN credentials (per AD-5; 30-minute TTL).
+      required: [urls, username, credential, ttl]
+      properties:
+        urls:
+          type: array
+          description: TURN server URLs.
+          items: { type: string }
+        username:
+          type: string
+          description: HMAC-derived username.
+        credential:
+          type: string
+          description: HMAC-derived credential.
+        ttl:
+          type: integer
+          description: Time-to-live in seconds.
+
+    MediaSessionToken:
+      type: object
+      description: Per-call SFU session token. Mirrors aloqa-claude frontend API shape.
+      required: [token, role, expires_at]
+      properties:
+        token:
+          type: string
+          description: Opaque session token used by media-session offer and ICE endpoints.
+        role:
+          type: string
+          description: Whether this participant is allowed to publish media.
+          enum: [presenter, viewer]
+        expires_at:
+          allOf:
+            - $ref: '#/components/schemas/IsoDatetime'
+          description: Expiration timestamp for the media token.
+        node_id:
+          type: string
+          description: SFU node identifier.
+        region:
+          type: string
+          nullable: true
+          description: SFU region (for example, eu-west-1).
+        control_url:
+          type: string
+          nullable: true
+          description: SFU control-plane endpoint.
+        media_url:
+          type: string
+          nullable: true
+          description: SFU media-plane endpoint.
+        routing_mode:
+          type: string
+          nullable: true
+          description: SFU routing mode.
+        fanout_strategy:
+          type: string
+          nullable: true
+          description: Outbound stream fanout strategy.
+        overflow_policy:
+          type: string
+          nullable: true
+          description: Behaviour when capacity is reached.
+        screen_share_priority:
+          type: string
+          nullable: true
+          description: Screen-share QoS priority.
+        turn_strategy:
+          type: string
+          nullable: true
+          description: Client-side TURN preference relayed by the SFU.
+          enum: [stun_only, stun_first, turn_first, turn_only, regional_turn_pool]
+
+    SdpOffer:
+      type: object
+      description: WebRTC SDP offer (RFC 8829).
+      required: [type, sdp]
+      properties:
+        type:
+          type: string
+          description: SDP message kind.
+          enum: [offer]
+        sdp:
+          type: string
+          description: SDP payload.
+
+    SdpAnswer:
+      type: object
+      description: WebRTC SDP answer (RFC 8829).
+      required: [type, sdp]
+      properties:
+        type:
+          type: string
+          description: SDP message kind.
+          enum: [answer]
+        sdp:
+          type: string
+          description: SDP payload.
+
+    IceCandidate:
+      type: object
+      description: WebRTC ICE candidate (RFC 8839). Backend DTOs tag SDP metadata with omitempty.
+      required: [candidate]
+      properties:
+        candidate:
+          type: string
+          description: Candidate attribute line.
+        sdp_mid:
+          type: string
+          nullable: true
+          description: Media stream identification for the candidate; omitted when absent.
+        sdp_mline_index:
+          type: integer
+          nullable: true
+          description: Media-line index for the candidate; omitted when absent.
+
+    MediaSessionOfferRequest:
+      type: object
+      description: Body for POST /calls/{callID}/media-session/offer.
+      required: [token, sdp]
+      properties:
+        token:
+          type: string
+          description: Media-session token minted by the token endpoint.
+        sdp:
+          type: string
+          description: Local offer SDP.
+        type:
+          type: string
+          description: SDP message kind when supplied by legacy clients.
+          enum: [offer]
+
+    MediaSessionIceCandidateRequest:
+      type: object
+      description: Body for POST /calls/{callID}/media-session/ice-candidate.
+      required: [token, candidate]
+      properties:
+        token:
+          type: string
+          description: Media-session token minted by the token endpoint.
+        candidate:
+          type: string
+          description: Candidate attribute line.
+        sdp_mid:
+          type: string
+          nullable: true
+          description: Media stream identification for the candidate; omitted when absent.
+        sdp_mline_index:
+          type: integer
+          nullable: true
+          description: Media-line index for the candidate; omitted when absent.

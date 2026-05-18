@@ -63,6 +63,15 @@ func (h *AccountHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, user)
 }
 
+func (h *AccountHandler) Deactivate(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.UserIDFromContext(r.Context())
+	if err := h.svc.Deactivate(r.Context(), userID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeNoContent(w)
+}
+
 func (h *AccountHandler) ListWorkspaces(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 

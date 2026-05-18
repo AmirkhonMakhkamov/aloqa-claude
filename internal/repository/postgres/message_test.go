@@ -22,12 +22,21 @@ type messageRepoTestEnv struct {
 	userID      uuid.UUID
 }
 
-func TestMessageRepoSoftDeleteClearsForwardedFrom(t *testing.T) {
+func TestMessageRepoSoftDeleteClearsForwardedFromAndQuoteFields(t *testing.T) {
 	ctx, pool := setupMessageRepoPostgresTest(t)
 	env := setupMessageRepoTestEnv(t, ctx, pool)
 	repo := NewMessageRepo(pool)
 	msg := newMessageRepoTestMessage(env.channelID, env.userID, messageRepoTestUUID(1), "forward")
 	msg.ForwardedFrom = json.RawMessage(`{"message_id":"source","snapshot":{"content":"secret"}}`)
+	quotedMessageID := messageRepoTestUUID(2)
+	parentMessageID := messageRepoTestUUID(3)
+	msg.QuotedMessageID = &quotedMessageID
+	msg.QuotedSnapshot = &entity.QuotedSnapshot{
+		UserID:          env.userID,
+		ContentExcerpt:  "quoted secret",
+		CreatedAt:       time.Now().UTC(),
+		ParentMessageID: &parentMessageID,
+	}
 
 	if err := repo.Create(ctx, msg); err != nil {
 		t.Fatalf("create message: %v", err)
@@ -44,6 +53,115 @@ func TestMessageRepoSoftDeleteClearsForwardedFrom(t *testing.T) {
 	}
 	if got.ForwardedFrom != nil {
 		t.Fatalf("forwarded_from = %s, want nil after soft delete", got.ForwardedFrom)
+	}
+	if got.QuotedMessageID != nil {
+		t.Fatalf("quoted_message_id = %s, want nil after soft delete", got.QuotedMessageID)
+	}
+	if got.QuotedSnapshot != nil {
+		t.Fatalf("quoted_snapshot = %+v, want nil after soft delete", got.QuotedSnapshot)
+	}
+}
+
+func TestMessageRepoSoftDeleteWithCascadeMarksQuotedSnapshotsDeleted(t *testing.T) {
+	ctx, pool := setupMessageRepoPostgresTest(t)
+	env := setupMessageRepoTestEnv(t, ctx, pool)
+	repo := NewMessageRepo(pool)
+	source := newMessageRepoTestMessage(env.channelID, env.userID, messageRepoTestUUID(10), "source")
+	if err := repo.Create(ctx, source); err != nil {
+		t.Fatalf("create source message: %v", err)
+	}
+
+	quotedIDs := []uuid.UUID{
+		messageRepoTestUUID(11),
+		messageRepoTestUUID(12),
+		messageRepoTestUUID(13),
+	}
+	for _, quotedID := range quotedIDs {
+		msg := newMessageRepoTestMessage(env.channelID, env.userID, quotedID, "quote")
+		msg.QuotedMessageID = &source.ID
+		msg.QuotedSnapshot = &entity.QuotedSnapshot{
+			UserID:         env.userID,
+			ContentExcerpt: "source",
+			CreatedAt:      source.CreatedAt,
+		}
+		if err := repo.Create(ctx, msg); err != nil {
+			t.Fatalf("create quoted message %s: %v", quotedID, err)
+		}
+	}
+
+	affected, err := repo.SoftDeleteWithCascade(ctx, source.ID)
+	if err != nil {
+		t.Fatalf("soft delete with cascade: %v", err)
+	}
+	if len(affected) != len(quotedIDs) {
+		t.Fatalf("affected IDs = %v, want %d IDs", affected, len(quotedIDs))
+	}
+	affectedSet := map[uuid.UUID]bool{}
+	for _, id := range affected {
+		affectedSet[id] = true
+	}
+	for _, id := range quotedIDs {
+		if !affectedSet[id] {
+			t.Fatalf("affected IDs = %v, missing %s", affected, id)
+		}
+		got, err := repo.GetByID(ctx, id)
+		if err != nil {
+			t.Fatalf("get quoted message %s: %v", id, err)
+		}
+		if got.QuotedSnapshot == nil || got.QuotedSnapshot.Deleted == nil || !*got.QuotedSnapshot.Deleted {
+			t.Fatalf("quoted_snapshot.deleted for %s = %+v, want true", id, got.QuotedSnapshot)
+		}
+	}
+}
+
+func TestMessageRepoSoftDeleteWithCascadeFailureRollsBackPrimaryInOuterTx(t *testing.T) {
+	ctx, pool := setupMessageRepoPostgresTest(t)
+	env := setupMessageRepoTestEnv(t, ctx, pool)
+	repo := NewMessageRepo(pool)
+	source := newMessageRepoTestMessage(env.channelID, env.userID, messageRepoTestUUID(20), "source")
+	if err := repo.Create(ctx, source); err != nil {
+		t.Fatalf("create source message: %v", err)
+	}
+	quoted := newMessageRepoTestMessage(env.channelID, env.userID, messageRepoTestUUID(21), "quote")
+	quoted.QuotedMessageID = &source.ID
+	quoted.QuotedSnapshot = &entity.QuotedSnapshot{
+		UserID:         env.userID,
+		ContentExcerpt: "source",
+		CreatedAt:      source.CreatedAt,
+	}
+	if err := repo.Create(ctx, quoted); err != nil {
+		t.Fatalf("create quoted message: %v", err)
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer func() {
+		_ = tx.Rollback(context.Background())
+	}()
+	const constraintName = "message_repo_quote_deleted_block"
+	if _, err := tx.Exec(ctx, fmt.Sprintf(`
+		ALTER TABLE messages
+		ADD CONSTRAINT %s CHECK ((quoted_snapshot ->> 'deleted') IS DISTINCT FROM 'true')`, constraintName)); err != nil {
+		t.Fatalf("add cascade failure constraint: %v", err)
+	}
+
+	txRepo := repo.withTx(tx)
+	if _, err := txRepo.SoftDeleteWithCascade(ctx, source.ID); err == nil {
+		t.Fatalf("soft delete with cascade unexpectedly succeeded")
+	}
+	_ = tx.Rollback(context.Background())
+
+	got, err := repo.GetByID(ctx, source.ID)
+	if err != nil {
+		t.Fatalf("get source after rollback: %v", err)
+	}
+	if got.DeletedAt != nil {
+		t.Fatalf("source deleted_at = %v, want nil after cascade rollback", got.DeletedAt)
+	}
+	if got.Content != source.Content {
+		t.Fatalf("source content = %q, want %q after cascade rollback", got.Content, source.Content)
 	}
 }
 
@@ -129,6 +247,116 @@ func TestMessageForwardedFromMigrationUpDownIdempotent(t *testing.T) {
 	}
 	if !messageRepoColumnExists(ctx, t, tx, "forwarded_from") {
 		t.Fatalf("forwarded_from column does not exist after idempotent up migration")
+	}
+}
+
+func TestMessageQuoteFieldsMigrationUpDownIdempotent(t *testing.T) {
+	ctx, pool := setupMessageRepoPostgresTest(t)
+	env := setupMessageRepoTestEnv(t, ctx, pool)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin migration test tx: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = tx.Rollback(context.Background())
+	})
+
+	up := readRepoRootFile(t, "migrations/036_messages_quote_fields.sql")
+	down := readRepoRootFile(t, "migrations/down/036_messages_quote_fields.down.sql")
+	if _, err := tx.Exec(ctx, down); err != nil {
+		t.Fatalf("reset migration down: %v", err)
+	}
+	if messageRepoColumnExists(ctx, t, tx, "quoted_message_id") {
+		t.Fatalf("quoted_message_id column exists before migration up")
+	}
+	if messageRepoColumnExists(ctx, t, tx, "quoted_snapshot") {
+		t.Fatalf("quoted_snapshot column exists before migration up")
+	}
+	if messageRepoIndexExists(ctx, t, tx, "idx_messages_quoted_message_id") {
+		t.Fatalf("quoted_message_id index exists before migration up")
+	}
+
+	existingMessageID := messageRepoTestUUID(30)
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO messages (id, channel_id, user_id, content, type, created_at, updated_at)
+		VALUES ($1, $2, $3, 'existing message', 'text', $4, $4)`,
+		existingMessageID,
+		env.channelID,
+		env.userID,
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("insert existing pre-migration message: %v", err)
+	}
+
+	if _, err := tx.Exec(ctx, up); err != nil {
+		t.Fatalf("apply migration up: %v", err)
+	}
+	if !messageRepoColumnExists(ctx, t, tx, "quoted_message_id") {
+		t.Fatalf("quoted_message_id column does not exist after up migration")
+	}
+	if !messageRepoColumnExists(ctx, t, tx, "quoted_snapshot") {
+		t.Fatalf("quoted_snapshot column does not exist after up migration")
+	}
+	if !messageRepoIndexExists(ctx, t, tx, "idx_messages_quoted_message_id") {
+		t.Fatalf("quoted_message_id index does not exist after up migration")
+	}
+	var (
+		content         string
+		messageType     entity.MessageType
+		quotedMessageID *uuid.UUID
+		quotedSnapshot  json.RawMessage
+	)
+	if err := tx.QueryRow(ctx, `
+		SELECT content, type, quoted_message_id, quoted_snapshot
+		FROM messages
+		WHERE id = $1`,
+		existingMessageID,
+	).Scan(&content, &messageType, &quotedMessageID, &quotedSnapshot); err != nil {
+		t.Fatalf("query existing message after migration up: %v", err)
+	}
+	if content != "existing message" || messageType != entity.MessageTypeText {
+		t.Fatalf("existing message after up = content %q type %q, want original values", content, messageType)
+	}
+	if quotedMessageID != nil {
+		t.Fatalf("quoted_message_id for existing row = %s, want NULL", *quotedMessageID)
+	}
+	if quotedSnapshot != nil {
+		t.Fatalf("quoted_snapshot for existing row = %s, want NULL", quotedSnapshot)
+	}
+	if _, err := tx.Exec(ctx, down); err != nil {
+		t.Fatalf("apply migration down: %v", err)
+	}
+	if messageRepoColumnExists(ctx, t, tx, "quoted_message_id") {
+		t.Fatalf("quoted_message_id column still exists after down migration")
+	}
+	if messageRepoColumnExists(ctx, t, tx, "quoted_snapshot") {
+		t.Fatalf("quoted_snapshot column still exists after down migration")
+	}
+	if messageRepoIndexExists(ctx, t, tx, "idx_messages_quoted_message_id") {
+		t.Fatalf("quoted_message_id index still exists after down migration")
+	}
+	if err := tx.QueryRow(ctx, `
+		SELECT content, type
+		FROM messages
+		WHERE id = $1`,
+		existingMessageID,
+	).Scan(&content, &messageType); err != nil {
+		t.Fatalf("query existing message after migration down: %v", err)
+	}
+	if content != "existing message" || messageType != entity.MessageTypeText {
+		t.Fatalf("existing message after down = content %q type %q, want original values", content, messageType)
+	}
+	if _, err := tx.Exec(ctx, up); err != nil {
+		t.Fatalf("reapply migration up: %v", err)
+	}
+	if _, err := tx.Exec(ctx, up); err != nil {
+		t.Fatalf("reapply migration up second time: %v", err)
+	}
+	if !messageRepoColumnExists(ctx, t, tx, "quoted_message_id") || !messageRepoColumnExists(ctx, t, tx, "quoted_snapshot") {
+		t.Fatalf("quote columns do not exist after idempotent up migration")
+	}
+	if !messageRepoIndexExists(ctx, t, tx, "idx_messages_quoted_message_id") {
+		t.Fatalf("quoted_message_id index does not exist after idempotent up migration")
 	}
 }
 
@@ -246,6 +474,22 @@ func messageRepoColumnExists(ctx context.Context, t *testing.T, q messageRepoCol
 				AND column_name = $1
 		)`, column).Scan(&exists); err != nil {
 		t.Fatalf("check column %s: %v", column, err)
+	}
+	return exists
+}
+
+func messageRepoIndexExists(ctx context.Context, t *testing.T, q messageRepoColumnQueryer, index string) bool {
+	t.Helper()
+	var exists bool
+	if err := q.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM pg_indexes
+			WHERE schemaname = 'public'
+				AND tablename = 'messages'
+				AND indexname = $1
+		)`, index).Scan(&exists); err != nil {
+		t.Fatalf("check index %s: %v", index, err)
 	}
 	return exists
 }

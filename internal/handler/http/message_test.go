@@ -137,6 +137,204 @@ func TestMessageCreatedEventIncludesForwardedFrom(t *testing.T) {
 	}
 }
 
+func TestMessagePostQuoteFieldsCases(t *testing.T) {
+	t.Run("quote fields echo and omit deleted", func(t *testing.T) {
+		f := newMessageHTTPFixture()
+		quotedMessageID := uuid.New()
+		quotedUserID := uuid.New()
+		parentMessageID := uuid.New()
+		createdAt := time.Now().UTC()
+		res := f.serve(http.MethodPost, "/channels/"+f.channelID.String()+"/messages", quotePostBody(t, "reply", quotedMessageID, quotedUserID, createdAt, &parentMessageID, "quoted text"))
+		if res.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want 201; body=%s", res.Code, res.Body.String())
+		}
+		var body map[string]json.RawMessage
+		if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		var gotQuotedMessageID uuid.UUID
+		if err := json.Unmarshal(body["quoted_message_id"], &gotQuotedMessageID); err != nil {
+			t.Fatalf("decode quoted_message_id: %v", err)
+		}
+		if gotQuotedMessageID != quotedMessageID {
+			t.Fatalf("quoted_message_id = %s, want %s", gotQuotedMessageID, quotedMessageID)
+		}
+		var snapshot map[string]json.RawMessage
+		if err := json.Unmarshal(body["quoted_snapshot"], &snapshot); err != nil {
+			t.Fatalf("decode quoted_snapshot: %v", err)
+		}
+		if _, ok := snapshot["deleted"]; ok {
+			t.Fatalf("quoted_snapshot.deleted present in response: %s", body["quoted_snapshot"])
+		}
+		if string(snapshot["content_excerpt"]) != `"quoted text"` {
+			t.Fatalf("content_excerpt = %s, want quoted text", snapshot["content_excerpt"])
+		}
+	})
+
+	t.Run("partial quote fields rejected", func(t *testing.T) {
+		f := newMessageHTTPFixture()
+		body, err := json.Marshal(map[string]any{
+			"content":           "reply",
+			"quoted_message_id": uuid.New().String(),
+		})
+		if err != nil {
+			t.Fatalf("marshal body: %v", err)
+		}
+		res := f.serve(http.MethodPost, "/channels/"+f.channelID.String()+"/messages", string(body))
+		if res.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400; body=%s", res.Code, res.Body.String())
+		}
+		if !strings.Contains(res.Body.String(), "INVALID_INPUT") {
+			t.Fatalf("body = %s, want INVALID_INPUT", res.Body.String())
+		}
+	})
+
+	t.Run("deleted spoof rejected at decode boundary", func(t *testing.T) {
+		f := newMessageHTTPFixture()
+		body := `{"content":"reply","quoted_message_id":"` + uuid.New().String() + `","quoted_snapshot":{"user_id":"` + f.userID.String() + `","content_excerpt":"quoted","created_at":"` + time.Now().UTC().Format(time.RFC3339) + `","deleted":true}}`
+		res := f.serve(http.MethodPost, "/channels/"+f.channelID.String()+"/messages", body)
+		if res.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400; body=%s", res.Code, res.Body.String())
+		}
+		var envelope errorBody
+		if err := json.Unmarshal(res.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("decode error envelope: %v", err)
+		}
+		if envelope.Error.Code != string(cerrors.CodeInvalidInput) {
+			t.Fatalf("error code = %s, want INVALID_INPUT", envelope.Error.Code)
+		}
+		if len(f.messages.messages) != 0 {
+			t.Fatalf("messages inserted = %d, want 0", len(f.messages.messages))
+		}
+	})
+}
+
+func TestMessageGetIncludesQuoteFieldsAfterSend(t *testing.T) {
+	f := newMessageHTTPFixture()
+	quotedMessageID := uuid.New()
+	quotedUserID := uuid.New()
+	createdAt := time.Now().UTC()
+	post := f.serve(http.MethodPost, "/channels/"+f.channelID.String()+"/messages", quotePostBody(t, "reply", quotedMessageID, quotedUserID, createdAt, nil, "quoted text"))
+	if post.Code != http.StatusCreated {
+		t.Fatalf("post status = %d, want 201; body=%s", post.Code, post.Body.String())
+	}
+	var created entity.Message
+	if err := json.Unmarshal(post.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created message: %v", err)
+	}
+	res := f.serve(http.MethodGet, "/messages/"+created.ID.String(), "")
+	if res.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want 200; body=%s", res.Code, res.Body.String())
+	}
+	var got entity.Message
+	if err := json.Unmarshal(res.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode get response: %v", err)
+	}
+	if got.QuotedMessageID == nil || *got.QuotedMessageID != quotedMessageID {
+		t.Fatalf("quoted_message_id = %v, want %s", got.QuotedMessageID, quotedMessageID)
+	}
+	if got.QuotedSnapshot == nil || got.QuotedSnapshot.ContentExcerpt != "quoted text" {
+		t.Fatalf("quoted_snapshot = %+v, want quoted text", got.QuotedSnapshot)
+	}
+}
+
+func TestMessageCreatedEventIncludesQuoteFields(t *testing.T) {
+	f := newMessageHTTPFixture()
+	quotedMessageID := uuid.New()
+	quotedUserID := uuid.New()
+	createdAt := time.Now().UTC()
+	res := f.serve(http.MethodPost, "/channels/"+f.channelID.String()+"/messages", quotePostBody(t, "reply", quotedMessageID, quotedUserID, createdAt, nil, "quoted text"))
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", res.Code, res.Body.String())
+	}
+	if len(f.publisher.events) != 2 {
+		t.Fatalf("published events = %d, want channel + workspace message.created events", len(f.publisher.events))
+	}
+
+	var envelope struct {
+		Type    eventpkg.Type `json:"type"`
+		Payload struct {
+			Message entity.Message `json:"message"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(f.publisher.events[0], &envelope); err != nil {
+		t.Fatalf("decode event: %v", err)
+	}
+	if envelope.Type != eventpkg.TypeMessageCreated {
+		t.Fatalf("event type = %s, want %s", envelope.Type, eventpkg.TypeMessageCreated)
+	}
+	if envelope.Payload.Message.QuotedMessageID == nil || *envelope.Payload.Message.QuotedMessageID != quotedMessageID {
+		t.Fatalf("event quoted_message_id = %v, want %s", envelope.Payload.Message.QuotedMessageID, quotedMessageID)
+	}
+	if envelope.Payload.Message.QuotedSnapshot == nil || envelope.Payload.Message.QuotedSnapshot.ContentExcerpt != "quoted text" {
+		t.Fatalf("event quoted_snapshot = %+v, want quoted text", envelope.Payload.Message.QuotedSnapshot)
+	}
+}
+
+func TestMessageDeletePublishesCascadeQuoteUpdatedEvents(t *testing.T) {
+	f := newMessageHTTPFixture()
+	sourceID := uuid.New()
+	now := time.Now().UTC()
+	f.messages.messages[sourceID] = &entity.Message{
+		ID:        sourceID,
+		ChannelID: f.channelID,
+		UserID:    f.userID,
+		Content:   "source",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	quotedIDs := []uuid.UUID{uuid.New(), uuid.New()}
+	for _, id := range quotedIDs {
+		f.messages.messages[id] = &entity.Message{
+			ID:              id,
+			ChannelID:       f.channelID,
+			UserID:          f.userID,
+			Content:         "quote",
+			QuotedMessageID: &sourceID,
+			QuotedSnapshot: &entity.QuotedSnapshot{
+				UserID:         f.userID,
+				ContentExcerpt: "source",
+				CreatedAt:      now,
+			},
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+	}
+
+	res := f.serve(http.MethodDelete, "/messages/"+sourceID.String(), "")
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", res.Code, res.Body.String())
+	}
+
+	updated := map[uuid.UUID]entity.Message{}
+	for _, raw := range f.publisher.events {
+		var envelope struct {
+			Type    eventpkg.Type `json:"type"`
+			Payload struct {
+				Message entity.Message `json:"message"`
+			} `json:"payload"`
+		}
+		if err := json.Unmarshal(raw, &envelope); err != nil {
+			t.Fatalf("decode event: %v", err)
+		}
+		if envelope.Type == eventpkg.TypeMessageUpdated {
+			updated[envelope.Payload.Message.ID] = envelope.Payload.Message
+		}
+	}
+	if len(updated) != len(quotedIDs) {
+		t.Fatalf("message.updated events = %d, want %d", len(updated), len(quotedIDs))
+	}
+	for _, id := range quotedIDs {
+		msg, ok := updated[id]
+		if !ok {
+			t.Fatalf("missing message.updated for %s", id)
+		}
+		if msg.QuotedSnapshot == nil || msg.QuotedSnapshot.Deleted == nil || !*msg.QuotedSnapshot.Deleted {
+			t.Fatalf("quoted_snapshot.deleted for %s = %+v, want true", id, msg.QuotedSnapshot)
+		}
+	}
+}
+
 type messageHTTPFixture struct {
 	workspaceID uuid.UUID
 	channelID   uuid.UUID
@@ -176,6 +374,7 @@ func newMessageHTTPFixture() messageHTTPFixture {
 	})
 	router.Post("/channels/{channelID}/messages", handler.Send)
 	router.Get("/messages/{messageID}", handler.Get)
+	router.Delete("/messages/{messageID}", handler.Delete)
 
 	return messageHTTPFixture{
 		workspaceID: workspaceID,
@@ -278,7 +477,44 @@ func (r *messageHTTPMessageRepo) HasActiveMessage(context.Context, uuid.UUID) (b
 	return false, nil
 }
 func (r *messageHTTPMessageRepo) Update(context.Context, *entity.Message) error { return nil }
-func (r *messageHTTPMessageRepo) SoftDelete(context.Context, uuid.UUID) error   { return nil }
+func (r *messageHTTPMessageRepo) SoftDelete(_ context.Context, id uuid.UUID) error {
+	msg := r.messages[id]
+	if msg == nil {
+		return cerrors.NotFound("message not found")
+	}
+	now := time.Now().UTC()
+	msg.Content = ""
+	msg.Edited = false
+	msg.EditedAt = nil
+	msg.Pinned = false
+	msg.PinnedBy = nil
+	msg.PinnedAt = nil
+	msg.ForwardedFrom = nil
+	msg.QuotedMessageID = nil
+	msg.QuotedSnapshot = nil
+	msg.UpdatedAt = now
+	msg.DeletedAt = &now
+	return nil
+}
+func (r *messageHTTPMessageRepo) SoftDeleteWithCascade(ctx context.Context, id uuid.UUID) ([]uuid.UUID, error) {
+	if err := r.SoftDelete(ctx, id); err != nil {
+		return nil, err
+	}
+	deleted := true
+	var affected []uuid.UUID
+	for _, msg := range r.messages {
+		if msg.QuotedMessageID == nil || *msg.QuotedMessageID != id {
+			continue
+		}
+		if msg.QuotedSnapshot == nil {
+			msg.QuotedSnapshot = &entity.QuotedSnapshot{}
+		}
+		msg.QuotedSnapshot.Deleted = &deleted
+		msg.UpdatedAt = time.Now().UTC()
+		affected = append(affected, msg.ID)
+	}
+	return affected, nil
+}
 func (r *messageHTTPMessageRepo) Pin(context.Context, uuid.UUID, uuid.UUID) error {
 	return nil
 }
@@ -328,4 +564,25 @@ func jsonValueEqual(a, b any) bool {
 	ab, _ := json.Marshal(a)
 	bb, _ := json.Marshal(b)
 	return string(ab) == string(bb)
+}
+
+func quotePostBody(t *testing.T, content string, quotedMessageID, quotedUserID uuid.UUID, createdAt time.Time, parentMessageID *uuid.UUID, excerpt string) string {
+	t.Helper()
+	snapshot := map[string]any{
+		"user_id":         quotedUserID.String(),
+		"content_excerpt": excerpt,
+		"created_at":      createdAt.Format(time.RFC3339),
+	}
+	if parentMessageID != nil {
+		snapshot["parent_message_id"] = parentMessageID.String()
+	}
+	body, err := json.Marshal(map[string]any{
+		"content":           content,
+		"quoted_message_id": quotedMessageID.String(),
+		"quoted_snapshot":   snapshot,
+	})
+	if err != nil {
+		t.Fatalf("marshal quote body: %v", err)
+	}
+	return string(body)
 }

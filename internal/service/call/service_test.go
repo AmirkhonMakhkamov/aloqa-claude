@@ -570,8 +570,15 @@ type noopPublisher struct{}
 func (noopPublisher) Publish(context.Context, string, []byte) error { return nil }
 
 type capturingPublisher struct {
-	called  bool
+	called   bool
+	subject  string
+	body     []byte
+	captures []capturedPublish
+}
+
+type capturedPublish struct {
 	subject string
+	body    []byte
 }
 
 type fakeCallCollabChecker struct {
@@ -583,9 +590,14 @@ func (f fakeCallCollabChecker) AuthorizeCall(context.Context, uuid.UUID, uuid.UU
 	return f.decision, f.err
 }
 
-func (p *capturingPublisher) Publish(_ context.Context, subject string, _ []byte) error {
+func (p *capturingPublisher) Publish(_ context.Context, subject string, body []byte) error {
 	p.called = true
 	p.subject = subject
+	p.body = append([]byte(nil), body...)
+	p.captures = append(p.captures, capturedPublish{
+		subject: subject,
+		body:    append([]byte(nil), body...),
+	})
 	return nil
 }
 

@@ -48,6 +48,9 @@ const (
 	TypeCallQualityAdapted     Type = "call.quality.adapted"
 	TypeCallMessageCreated     Type = "call.message.created"
 	TypeCallMessageDeleted     Type = "call.message.deleted"
+	TypeCallHandRaised         Type = "call.participant.hand_raised"
+	TypeCallHandLowered        Type = "call.participant.hand_lowered"
+	TypeCallReaction           Type = "call.reaction.added"
 
 	// Waiting room events.
 	TypeWaitingRoomJoined   Type = "waiting_room.joined"
@@ -108,7 +111,8 @@ type Definition struct {
 
 func DefinitionForType(t Type) Definition {
 	switch t {
-	case TypeTypingStarted, TypeSignalOffer, TypeSignalAnswer, TypeSignalCandidate:
+	case TypeTypingStarted, TypeSignalOffer, TypeSignalAnswer, TypeSignalCandidate,
+		TypeCallHandRaised, TypeCallHandLowered, TypeCallReaction:
 		return Definition{
 			Version:          CurrentVersion,
 			DeliverySemantic: DeliveryEphemeral,
@@ -232,6 +236,17 @@ type CallQualityPayload struct {
 	TargetVideoBufferMs int       `json:"target_video_buffer_ms"`
 	LipSyncWindowMs     int       `json:"lip_sync_window_ms"`
 	Reasons             []string  `json:"reasons,omitempty"`
+}
+
+type CallHandPayload struct {
+	CallID uuid.UUID `json:"call_id"`
+	UserID uuid.UUID `json:"user_id"`
+}
+
+type CallReactionPayload struct {
+	CallID uuid.UUID `json:"call_id"`
+	UserID uuid.UUID `json:"user_id"`
+	Emoji  string    `json:"emoji"`
 }
 
 type BreakoutRoomPayload struct {

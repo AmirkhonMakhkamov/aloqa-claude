@@ -62,6 +62,109 @@ func TestMessageRepoSoftDeleteClearsForwardedFromAndQuoteFields(t *testing.T) {
 	}
 }
 
+func TestMessageRepoSoftDeleteWithCascadeMarksQuotedSnapshotsDeleted(t *testing.T) {
+	ctx, pool := setupMessageRepoPostgresTest(t)
+	env := setupMessageRepoTestEnv(t, ctx, pool)
+	repo := NewMessageRepo(pool)
+	source := newMessageRepoTestMessage(env.channelID, env.userID, messageRepoTestUUID(10), "source")
+	if err := repo.Create(ctx, source); err != nil {
+		t.Fatalf("create source message: %v", err)
+	}
+
+	quotedIDs := []uuid.UUID{
+		messageRepoTestUUID(11),
+		messageRepoTestUUID(12),
+		messageRepoTestUUID(13),
+	}
+	for _, quotedID := range quotedIDs {
+		msg := newMessageRepoTestMessage(env.channelID, env.userID, quotedID, "quote")
+		msg.QuotedMessageID = &source.ID
+		msg.QuotedSnapshot = &entity.QuotedSnapshot{
+			UserID:         env.userID,
+			ContentExcerpt: "source",
+			CreatedAt:      source.CreatedAt,
+		}
+		if err := repo.Create(ctx, msg); err != nil {
+			t.Fatalf("create quoted message %s: %v", quotedID, err)
+		}
+	}
+
+	affected, err := repo.SoftDeleteWithCascade(ctx, source.ID)
+	if err != nil {
+		t.Fatalf("soft delete with cascade: %v", err)
+	}
+	if len(affected) != len(quotedIDs) {
+		t.Fatalf("affected IDs = %v, want %d IDs", affected, len(quotedIDs))
+	}
+	affectedSet := map[uuid.UUID]bool{}
+	for _, id := range affected {
+		affectedSet[id] = true
+	}
+	for _, id := range quotedIDs {
+		if !affectedSet[id] {
+			t.Fatalf("affected IDs = %v, missing %s", affected, id)
+		}
+		got, err := repo.GetByID(ctx, id)
+		if err != nil {
+			t.Fatalf("get quoted message %s: %v", id, err)
+		}
+		if got.QuotedSnapshot == nil || got.QuotedSnapshot.Deleted == nil || !*got.QuotedSnapshot.Deleted {
+			t.Fatalf("quoted_snapshot.deleted for %s = %+v, want true", id, got.QuotedSnapshot)
+		}
+	}
+}
+
+func TestMessageRepoSoftDeleteWithCascadeFailureRollsBackPrimaryInOuterTx(t *testing.T) {
+	ctx, pool := setupMessageRepoPostgresTest(t)
+	env := setupMessageRepoTestEnv(t, ctx, pool)
+	repo := NewMessageRepo(pool)
+	source := newMessageRepoTestMessage(env.channelID, env.userID, messageRepoTestUUID(20), "source")
+	if err := repo.Create(ctx, source); err != nil {
+		t.Fatalf("create source message: %v", err)
+	}
+	quoted := newMessageRepoTestMessage(env.channelID, env.userID, messageRepoTestUUID(21), "quote")
+	quoted.QuotedMessageID = &source.ID
+	quoted.QuotedSnapshot = &entity.QuotedSnapshot{
+		UserID:         env.userID,
+		ContentExcerpt: "source",
+		CreatedAt:      source.CreatedAt,
+	}
+	if err := repo.Create(ctx, quoted); err != nil {
+		t.Fatalf("create quoted message: %v", err)
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer func() {
+		_ = tx.Rollback(context.Background())
+	}()
+	const constraintName = "message_repo_quote_deleted_block"
+	if _, err := tx.Exec(ctx, fmt.Sprintf(`
+		ALTER TABLE messages
+		ADD CONSTRAINT %s CHECK ((quoted_snapshot ->> 'deleted') IS DISTINCT FROM 'true')`, constraintName)); err != nil {
+		t.Fatalf("add cascade failure constraint: %v", err)
+	}
+
+	txRepo := repo.withTx(tx)
+	if _, err := txRepo.SoftDeleteWithCascade(ctx, source.ID); err == nil {
+		t.Fatalf("soft delete with cascade unexpectedly succeeded")
+	}
+	_ = tx.Rollback(context.Background())
+
+	got, err := repo.GetByID(ctx, source.ID)
+	if err != nil {
+		t.Fatalf("get source after rollback: %v", err)
+	}
+	if got.DeletedAt != nil {
+		t.Fatalf("source deleted_at = %v, want nil after cascade rollback", got.DeletedAt)
+	}
+	if got.Content != source.Content {
+		t.Fatalf("source content = %q, want %q after cascade rollback", got.Content, source.Content)
+	}
+}
+
 func TestMessageForwardedFromMigrationUpDownIdempotent(t *testing.T) {
 	ctx, pool := setupMessageRepoPostgresTest(t)
 	env := setupMessageRepoTestEnv(t, ctx, pool)

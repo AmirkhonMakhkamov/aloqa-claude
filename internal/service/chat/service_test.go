@@ -967,9 +967,14 @@ func (r *fakeMessageRepo) SoftDelete(_ context.Context, id uuid.UUID) error {
 	msg.PinnedBy = nil
 	msg.PinnedAt = nil
 	msg.ForwardedFrom = nil
+	msg.QuotedMessageID = nil
+	msg.QuotedSnapshot = nil
 	msg.UpdatedAt = now
 	msg.DeletedAt = &now
 	return nil
+}
+func (r *fakeMessageRepo) SoftDeleteWithCascade(ctx context.Context, id uuid.UUID) ([]uuid.UUID, error) {
+	return nil, r.SoftDelete(ctx, id)
 }
 func (r *fakeMessageRepo) ListPinned(context.Context, uuid.UUID) ([]entity.Message, error) {
 	return nil, nil

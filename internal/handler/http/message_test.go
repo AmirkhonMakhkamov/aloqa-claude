@@ -279,6 +279,9 @@ func (r *messageHTTPMessageRepo) HasActiveMessage(context.Context, uuid.UUID) (b
 }
 func (r *messageHTTPMessageRepo) Update(context.Context, *entity.Message) error { return nil }
 func (r *messageHTTPMessageRepo) SoftDelete(context.Context, uuid.UUID) error   { return nil }
+func (r *messageHTTPMessageRepo) SoftDeleteWithCascade(context.Context, uuid.UUID) ([]uuid.UUID, error) {
+	return nil, nil
+}
 func (r *messageHTTPMessageRepo) Pin(context.Context, uuid.UUID, uuid.UUID) error {
 	return nil
 }

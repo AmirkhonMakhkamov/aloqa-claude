@@ -221,6 +221,23 @@ func TestMoveOccurrenceHandler_409ConcurrentUpdate_WithToken(t *testing.T) {
 	}
 }
 
+func TestMoveOccurrenceRouteRegistered(t *testing.T) {
+	router := NewRouter(RouterDeps{
+		Calendar:  &CalendarHandler{},
+		Validator: fakeTokenValidator{userID: uuid.New()},
+	})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/workspaces/"+uuid.NewString()+"/events/"+uuid.NewString()+"/occurrences/move",
+		strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	res := httptest.NewRecorder()
+	router.ServeHTTP(res, req)
+	if res.Code == http.StatusNotFound {
+		t.Fatal("route not registered: 404")
+	}
+}
+
 type fakeMoveCalHTTPTxManager struct {
 	repo *fakeMoveCalendarRepo
 }

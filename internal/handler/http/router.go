@@ -361,6 +361,7 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 			r.Delete("/", deps.Calendar.DeleteEvent)
 			r.Put("/rsvp", deps.Calendar.UpsertRsvp)
 			r.Post("/start-call", deps.Calendar.StartCallFromEvent)
+			r.Post("/occurrences/move", deps.Calendar.MoveOccurrence)
 		})
 	})
 }

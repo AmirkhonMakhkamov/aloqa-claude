@@ -2,7 +2,7 @@
 
 > Branch: `feature/ALOQA-239-occurrence-move` off `origin/develop @ 2d6f955`
 > Spec: `docs/superpowers/specs/2026-05-15-calendar-design-parity-design.md §4` (lines 73–272)
-> Budget: Tasks 0–11, one commit per task.
+> Budget: Tasks 0–11 + Task 5a, one commit per task.
 
 ## Architecture
 
@@ -10,12 +10,14 @@ New route: `POST /workspaces/{wsID}/events/{eventID}/occurrences/move`
 
 | Layer | Action |
 |---|---|
-| `internal/pkg/rrule/recurrence_split.go` | NEW — 4 helpers: SetUntil, SetDtstart, IsMember, ShiftBounds |
-| `internal/pkg/rrule/recurrence_split_test.go` | NEW — 21 tests |
+| `internal/pkg/rrule/recurrence_split.go` | NEW — 4 helpers: SetUntil, NormalizeRule, IsMember, ShiftBounds |
+| `internal/pkg/rrule/recurrence_split_test.go` | NEW — 22 tests |
+| `internal/domain/repository/interfaces.go` | MODIFIED — add CreateEventTx, UpdateEventTx to CalendarRepository |
+| `internal/repository/postgres/calendar_repo.go` | MODIFIED — implement CreateEventTx, UpdateEventTx, updateEventRowTx |
 | `internal/service/calendar/service.go` | MODIFIED — types + MoveEventOccurrence + 3 branch methods |
-| `internal/service/calendar/service_test.go` | MODIFIED — 13 new tests |
+| `internal/service/calendar/service_test.go` | MODIFIED — 15 new tests |
 | `internal/handler/http/calendar.go` | MODIFIED — MoveOccurrence handler |
-| `internal/handler/http/calendar_test.go` | NEW — 4 handler tests |
+| `internal/handler/http/calendar_test.go` | NEW — 6 handler tests |
 | `internal/handler/http/router.go` | MODIFIED — 1-line wiring |
 
 No migrations (spec §4.9). No new dependencies.
@@ -31,8 +33,17 @@ No migrations (spec §4.9). No new dependencies.
 - `INVALID_DURATION` → `cerrors.InvalidInput("INVALID_DURATION: ...")`
 - `INVALID_SCOPE` → `cerrors.InvalidInput("INVALID_SCOPE: ...")`
 - `FORBIDDEN_NOT_ORGANIZER` → `cerrors.Forbidden("FORBIDDEN_NOT_ORGANIZER: ...")`
+- `CONCURRENT_UPDATE` → `cerrors.Conflict("CONCURRENT_UPDATE: ...")` (HTTP 409)
 
-**Transaction pattern**: `s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error { ... })` using `scope.Calendars()`, mirroring `ListAndDispatchReminders` (service.go:527). For scope=this and scope=this_and_following: guard `if s.tx == nil { return nil, cerrors.Unavailable("...") }`.
+**Transaction pattern**: `s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error { ... })` using `scope.Calendars()`, mirroring `ListAndDispatchReminders` (service.go:527). For scope=this and scope=this_and_following: guard `if s.tx == nil { return nil, cerrors.Unavailable("...") }` placed **after** the first-occurrence shortcut in `moveOccurrenceThisAndFollowing`.
+
+**`NormalizeRule`** (renamed from `SetDtstart`): validates an RRULE string and returns its canonical form. The `time.Time` parameter is dropped — DTSTART is always derived from `CalendarEvent.ScheduledAt`. All service code and tests use `NormalizeRule`.
+
+**`ShiftBounds` signature**: `ShiftBounds(rule string, parentDtstart, originalInstance, newInstance time.Time)` — the `parentDtstart` parameter is the event's `ScheduledAt.UTC()` (the series root). It is passed to `Expand` in the COUNT case to correctly count remaining occurrences from the original series root, not from `originalInstance` (which would restart the COUNT from a wrong dtstart).
+
+**Tx-aware repo methods** (`CreateEventTx`, `UpdateEventTx`): added to `CalendarRepository` interface and implemented on `*CalendarRepo` using `r.db` directly — no inner `pool.BeginTx`. This ensures atomicity inside `txscope.Manager.WithinTx`. The existing `CreateEvent`/`UpdateEvent` open their own inner transactions and must NOT be called from within `WithinTx`.
+
+**Optimistic concurrency**: `MoveOccurrenceInput.ExpectedUpdatedAt *time.Time` passed through to `UpdateEventTx`. When non-nil, the UPDATE adds `AND updated_at = $16` to WHERE; if 0 rows affected, returns `cerrors.Conflict("CONCURRENT_UPDATE: ...")` (HTTP 409).
 
 **Import alias needed in service.go**: `calrrule "aloqa/internal/pkg/rrule"` (already present in service_test.go, confirming module path).
 
@@ -161,17 +172,17 @@ func SetUntil(rule string, until time.Time) (string, error) {
 
 ---
 
-## Task 2 — `SetDtstart`
+## Task 2 — `NormalizeRule`
 
 **Files:** same
 
-**Goal**: Normalize a rule string for a new DTSTART. DTSTART is stored in `CalendarEvent.ScheduledAt`, not in the rule string; this helper validates parseability and returns the canonical RRULE string without embedding DTSTART.
+**Goal**: Normalize a rule string. Validates parseability and returns the canonical RRULE string. DTSTART is stored in `CalendarEvent.ScheduledAt`, never in the rule string; this helper does not embed DTSTART.
 
 ### Step 1 — Failing tests
 
 ```go
-func TestSetDtstart_ReturnsParsedRule(t *testing.T) {
-    got, err := SetDtstart("FREQ=WEEKLY;BYDAY=MO;COUNT=5", time.Now())
+func TestNormalizeRule_ReturnsParsedRule(t *testing.T) {
+    got, err := NormalizeRule("FREQ=WEEKLY;BYDAY=MO;COUNT=5")
     if err != nil {
         t.Fatal(err)
     }
@@ -183,25 +194,24 @@ func TestSetDtstart_ReturnsParsedRule(t *testing.T) {
     }
 }
 
-func TestSetDtstart_ErrorOnMalformed(t *testing.T) {
-    if _, err := SetDtstart("GARBAGE", time.Now()); err == nil {
+func TestNormalizeRule_ErrorOnMalformed(t *testing.T) {
+    if _, err := NormalizeRule("GARBAGE"); err == nil {
         t.Fatal("expected error")
     }
 }
 
-func TestSetDtstart_StableOnRepeatCalls(t *testing.T) {
+func TestNormalizeRule_StableOnRepeatCalls(t *testing.T) {
     rule := "FREQ=DAILY;INTERVAL=2;UNTIL=20260601T100000Z"
-    dt := time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC)
-    first, _ := SetDtstart(rule, dt)
-    second, _ := SetDtstart(first, dt.AddDate(0, 0, 1))
+    first, _ := NormalizeRule(rule)
+    second, _ := NormalizeRule(first)
     if first != second {
         t.Fatalf("%q vs %q", first, second)
     }
 }
 
-func TestSetDtstart_PreservesComponents(t *testing.T) {
+func TestNormalizeRule_PreservesComponents(t *testing.T) {
     rule := "FREQ=MONTHLY;BYDAY=-1MO;COUNT=3"
-    got, err := SetDtstart(rule, time.Now())
+    got, err := NormalizeRule(rule)
     if err != nil {
         t.Fatal(err)
     }
@@ -214,9 +224,9 @@ func TestSetDtstart_PreservesComponents(t *testing.T) {
 ### Step 2 — Implementation
 
 ```go
-// SetDtstart validates a rule and returns its canonical RRULE string.
+// NormalizeRule validates a rule and returns its canonical RRULE string.
 // DTSTART is stored in CalendarEvent.ScheduledAt, never in the rule string.
-func SetDtstart(rule string, _ time.Time) (string, error) {
+func NormalizeRule(rule string) (string, error) {
     opt, err := teambitionrrule.StrToROption(rule)
     if err != nil {
         return "", err
@@ -226,7 +236,7 @@ func SetDtstart(rule string, _ time.Time) (string, error) {
 }
 ```
 
-**Commit:** `feat(rrule): SetDtstart helper [ALOQA-239]`
+**Commit:** `feat(rrule): NormalizeRule helper [ALOQA-239]`
 **Compile state:** GREEN
 
 ---
@@ -316,9 +326,11 @@ func IsMember(rule string, dtstart, instance time.Time, exdates []time.Time) (bo
 
 **Files:** same
 
-**Goal**: Compute child rule for a `this_and_following` split. UNTIL → shift by delta. COUNT → count remaining occurrences from `originalInstance` via `Expand`. Unbounded → return rule unchanged.
+**Goal**: Compute child rule for a `this_and_following` split. UNTIL → shift by delta. COUNT → count remaining occurrences from `originalInstance` (using `parentDtstart` as series root) via `Expand`. Unbounded → return rule unchanged.
 
 ### Step 1 — Failing tests
+
+Note: `ShiftBounds` now takes `parentDtstart` as the second positional parameter (the event's `ScheduledAt`). In UNTIL-bounded and unbounded tests, `parentDtstart` is unused by the logic but must still be passed. Those tests can pass `original` as a convenient placeholder.
 
 ```go
 func TestShiftBounds_UNTILBounded(t *testing.T) {
@@ -327,7 +339,7 @@ func TestShiftBounds_UNTILBounded(t *testing.T) {
     until := time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)
     rule := "FREQ=DAILY;UNTIL=" + until.UTC().Format("20060102T150405Z")
 
-    newRule, result, err := ShiftBounds(rule, original, newInst)
+    newRule, result, err := ShiftBounds(rule, original, original, newInst)
     if err != nil {
         t.Fatal(err)
     }
@@ -345,13 +357,13 @@ func TestShiftBounds_UNTILBounded(t *testing.T) {
 }
 
 func TestShiftBounds_COUNTBounded(t *testing.T) {
-    // Daily COUNT=5. originalInstance = May 3 (3rd occ). Remaining: May3,4,5 = 3.
+    // Daily COUNT=5 starting May 1. originalInstance = May 3 (3rd occ).
+    // Remaining from May 3 inclusive: May3, May4, May5 = 3.
     start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
     original := time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
     newInst := time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC)
 
-    newRule, result, err := ShiftBounds("FREQ=DAILY;COUNT=5", original, newInst)
-    _ = start
+    newRule, result, err := ShiftBounds("FREQ=DAILY;COUNT=5", start, original, newInst)
     if err != nil {
         t.Fatal(err)
     }
@@ -369,7 +381,7 @@ func TestShiftBounds_COUNTBounded(t *testing.T) {
 func TestShiftBounds_Unbounded(t *testing.T) {
     original := time.Date(2026, 5, 5, 10, 0, 0, 0, time.UTC)
     newInst := time.Date(2026, 5, 6, 10, 0, 0, 0, time.UTC)
-    newRule, result, err := ShiftBounds("FREQ=DAILY", original, newInst)
+    newRule, result, err := ShiftBounds("FREQ=DAILY", original, original, newInst)
     if err != nil {
         t.Fatal(err)
     }
@@ -385,7 +397,7 @@ func TestShiftBounds_ZeroDelta(t *testing.T) {
     original := time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
     until := time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)
     rule := "FREQ=DAILY;UNTIL=" + until.UTC().Format("20060102T150405Z")
-    _, result, err := ShiftBounds(rule, original, original)
+    _, result, err := ShiftBounds(rule, original, original, original)
     if err != nil {
         t.Fatal(err)
     }
@@ -399,7 +411,7 @@ func TestShiftBounds_NegativeDelta(t *testing.T) {
     newInst := time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC) // 1 day earlier
     until := time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)
     rule := "FREQ=DAILY;UNTIL=" + until.UTC().Format("20060102T150405Z")
-    _, result, err := ShiftBounds(rule, original, newInst)
+    _, result, err := ShiftBounds(rule, original, original, newInst)
     if err != nil {
         t.Fatal(err)
     }
@@ -410,10 +422,11 @@ func TestShiftBounds_NegativeDelta(t *testing.T) {
 }
 
 func TestShiftBounds_LastOccurrenceCount(t *testing.T) {
-    // COUNT=3, split at 3rd (last). Remaining=1.
+    // COUNT=3 starting May 1; split at 3rd (last) occurrence May 3. Remaining=1.
+    start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
     original := time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
     newInst := time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)
-    newRule, result, err := ShiftBounds("FREQ=DAILY;COUNT=3", original, newInst)
+    newRule, result, err := ShiftBounds("FREQ=DAILY;COUNT=3", start, original, newInst)
     if err != nil {
         t.Fatal(err)
     }
@@ -431,7 +444,7 @@ func TestShiftBounds_UNTILWinsOverCOUNT(t *testing.T) {
     newInst := time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC)
     until := time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)
     rule := "FREQ=DAILY;COUNT=20;UNTIL=" + until.UTC().Format("20060102T150405Z")
-    newRule, result, err := ShiftBounds(rule, original, newInst)
+    newRule, result, err := ShiftBounds(rule, original, original, newInst)
     if err != nil {
         t.Fatal(err)
     }
@@ -457,8 +470,10 @@ type BoundsShiftResult struct {
 }
 
 // ShiftBounds computes the child RRULE for a this_and_following split (spec §4.6).
+// parentDtstart is the event's ScheduledAt (series root); it is used as dtstart when
+// expanding the COUNT series to correctly count remaining occurrences from originalInstance.
 // Returned newRule is a plain RRULE string; caller sets child.ScheduledAt = newInstance.
-func ShiftBounds(rule string, originalInstance, newInstance time.Time) (string, BoundsShiftResult, error) {
+func ShiftBounds(rule string, parentDtstart, originalInstance, newInstance time.Time) (string, BoundsShiftResult, error) {
     opt, err := teambitionrrule.StrToROption(rule)
     if err != nil {
         return "", BoundsShiftResult{}, err
@@ -478,7 +493,9 @@ func ShiftBounds(rule string, originalInstance, newInstance time.Time) (string, 
 
     case result.HadCount:
         far := originalInstance.UTC().AddDate(50, 0, 0)
-        remaining, err := Expand(rule, originalInstance.UTC(), nil, originalInstance.UTC().Add(-time.Millisecond), far)
+        // Use parentDtstart (not originalInstance) so Expand walks the series from
+        // its root and COUNT is consumed correctly before the from window.
+        remaining, err := Expand(rule, parentDtstart.UTC(), nil, originalInstance.UTC().Add(-time.Millisecond), far)
         if err != nil {
             return "", BoundsShiftResult{}, err
         }
@@ -509,7 +526,7 @@ func ShiftBounds(rule string, originalInstance, newInstance time.Time) (string, 
 
 ### Step 1 — Failing tests
 
-Add to `service_test.go` (also add helpers `assertForbidden` and `assertInvalidInput` at the bottom):
+Add to `service_test.go` (also add helpers `assertForbidden`, `assertInvalidInput`, and `assertConflict` at the bottom):
 
 ```go
 func TestMoveEventOccurrence_NonRecurring_All_OK(t *testing.T) {
@@ -607,7 +624,7 @@ func TestMoveEventOccurrence_NonOrganizer_Forbidden(t *testing.T) {
     _, err := svc.MoveEventOccurrence(ctx, wsID, eventID, other, MoveOccurrenceInput{
         InstanceAt: now, Scope: MoveScopeAll, NewScheduledAt: now.Add(time.Hour),
     })
-    assertForbidden(t, err)
+    assertForbidden(t, err, "FORBIDDEN_NOT_ORGANIZER")
 }
 
 func TestMoveEventOccurrence_InvalidScope_BadRequest(t *testing.T) {
@@ -645,11 +662,14 @@ func TestMoveEventOccurrence_DurationOutOfRange_BadRequest(t *testing.T) {
 }
 
 // helpers — add at bottom of service_test.go
-func assertForbidden(t *testing.T, err error) {
+func assertForbidden(t *testing.T, err error, fragment string) {
     t.Helper()
     ae, ok := cerrors.AsAppError(err)
     if !ok || ae.Code != cerrors.CodeForbidden {
         t.Fatalf("want Forbidden, got %v", err)
+    }
+    if !strings.Contains(ae.Message, fragment) {
+        t.Fatalf("message %q missing fragment %q", ae.Message, fragment)
     }
 }
 
@@ -661,6 +681,17 @@ func assertInvalidInput(t *testing.T, err error, fragment string) {
     }
     if !strings.Contains(ae.Message, fragment) {
         t.Fatalf("message %q missing %q", ae.Message, fragment)
+    }
+}
+
+func assertConflict(t *testing.T, err error, fragment string) {
+    t.Helper()
+    ae, ok := cerrors.AsAppError(err)
+    if !ok || ae.Code != cerrors.CodeConflict {
+        t.Fatalf("want Conflict, got %v", err)
+    }
+    if !strings.Contains(ae.Message, fragment) {
+        t.Fatalf("message %q missing fragment %q", ae.Message, fragment)
     }
 }
 ```
@@ -679,10 +710,11 @@ const (
 )
 
 type MoveOccurrenceInput struct {
-    InstanceAt         time.Time
-    Scope              MoveOccurrenceScope
-    NewScheduledAt     time.Time
-    NewDurationMinutes *int
+    InstanceAt          time.Time
+    Scope               MoveOccurrenceScope
+    NewScheduledAt      time.Time
+    NewDurationMinutes  *int
+    ExpectedUpdatedAt   *time.Time
 }
 
 type MoveOccurrenceResult struct {
@@ -757,6 +789,203 @@ Stub the other two methods returning `cerrors.Unavailable("not yet implemented")
 
 **Commit:** `feat(calendar): MoveEventOccurrence types + scope=all [ALOQA-239]`
 **Compile state:** GREEN (Tasks 6–7 tests not yet written; stubs keep compiler happy)
+
+---
+
+## Task 5a — `CreateEventTx` / `UpdateEventTx` — tx-aware repository methods
+
+**Files:** MODIFY `internal/domain/repository/interfaces.go`, MODIFY `internal/repository/postgres/calendar_repo.go`, MODIFY `internal/service/calendar/service_test.go`
+
+**Goal**: Add `CreateEventTx` and `UpdateEventTx` to `CalendarRepository` so that callers inside `txscope.Manager.WithinTx` use the outer transaction's connection (`r.db`) directly rather than opening a nested `pool.BeginTx` (which would break atomicity). `UpdateEventTx` supports optional optimistic concurrency via `expectedUpdatedAt`.
+
+### Step 1 — Failing tests
+
+Add to `service_test.go` after the Task 5 helpers:
+
+```go
+func TestCreateEventTx_StoresEvent(t *testing.T) {
+    ctx := context.Background()
+    repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{}}
+    eventID := uuid.New()
+    wsID := uuid.New()
+    now := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+    ev := &entity.CalendarEvent{
+        ID: eventID, WorkspaceID: wsID,
+        Title: "T", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+        ScheduledAt: now, DurationMinutes: 30,
+    }
+    got, err := repo.CreateEventTx(ctx, ev)
+    if err != nil {
+        t.Fatal(err)
+    }
+    if got.ID != eventID {
+        t.Fatalf("ID=%v want=%v", got.ID, eventID)
+    }
+    if _, ok := repo.events[eventID]; !ok {
+        t.Fatal("event not stored")
+    }
+}
+
+func TestUpdateEventTx_UpdatesEvent(t *testing.T) {
+    ctx := context.Background()
+    now := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+    eventID := uuid.New()
+    wsID := uuid.New()
+    repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+        eventID: {ID: eventID, WorkspaceID: wsID,
+            Title: "Old", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+            ScheduledAt: now, DurationMinutes: 30, UpdatedAt: now},
+    }}
+    ev := &entity.CalendarEvent{
+        ID: eventID, WorkspaceID: wsID,
+        Title: "New", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+        ScheduledAt: now.Add(time.Hour), DurationMinutes: 45, UpdatedAt: now,
+    }
+    got, err := repo.UpdateEventTx(ctx, ev, nil)
+    if err != nil {
+        t.Fatal(err)
+    }
+    if got.Title != "New" {
+        t.Fatalf("Title=%q want=New", got.Title)
+    }
+}
+
+func TestUpdateEventTx_OptimisticLock_Conflict(t *testing.T) {
+    ctx := context.Background()
+    now := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+    stale := now.Add(-time.Second) // wrong expected updated_at
+    eventID := uuid.New()
+    wsID := uuid.New()
+    repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+        eventID: {ID: eventID, WorkspaceID: wsID,
+            Title: "X", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+            ScheduledAt: now, DurationMinutes: 30, UpdatedAt: now},
+    }}
+    ev := &entity.CalendarEvent{
+        ID: eventID, WorkspaceID: wsID,
+        Title: "Y", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+        ScheduledAt: now, DurationMinutes: 30,
+    }
+    _, err := repo.UpdateEventTx(ctx, ev, &stale)
+    assertConflict(t, err, "CONCURRENT_UPDATE")
+}
+```
+
+### Step 2 — Implementation
+
+**`internal/domain/repository/interfaces.go`** — add two methods to `CalendarRepository` after `UpdateEvent`:
+
+```go
+// CreateEventTx inserts an event using the current connection (r.db).
+// Must be called from within txscope.Manager.WithinTx; does not open a nested transaction.
+CreateEventTx(ctx context.Context, event *entity.CalendarEvent) (*entity.CalendarEvent, error)
+
+// UpdateEventTx updates an event using the current connection (r.db).
+// If expectedUpdatedAt is non-nil, adds AND updated_at = expectedUpdatedAt to WHERE;
+// returns cerrors.Conflict("CONCURRENT_UPDATE: ...") if 0 rows were affected.
+UpdateEventTx(ctx context.Context, event *entity.CalendarEvent, expectedUpdatedAt *time.Time) (*entity.CalendarEvent, error)
+```
+
+**`internal/repository/postgres/calendar_repo.go`** — add three methods:
+
+```go
+// updateEventRowTx updates the event row using r.db (no inner BeginTx).
+// When expectedUpdatedAt is non-nil, appends AND updated_at = $16 to WHERE.
+// Returns cerrors.Conflict("CONCURRENT_UPDATE: ...") when 0 rows affected with expected timestamp.
+func (r *CalendarRepo) updateEventRowTx(ctx context.Context, event *entity.CalendarEvent, expectedUpdatedAt *time.Time) error {
+    rrule, exdates := recurrenceColumns(event.Recurrence)
+    args := []any{
+        event.ID, event.CalendarID, event.ChannelID, event.Title, event.Description,
+        event.Location.Type, event.Location.Value, event.ScheduledAt,
+        originatorTZOrDefault(event.OriginatorTZ), event.DurationMinutes,
+        event.AllDay, rrule, exdates, event.CallID, event.WorkspaceID,
+    }
+    sql := `
+        UPDATE calendar_events
+        SET calendar_id=$2, channel_id=$3, title=$4, description=$5,
+            location_type=$6, location_value=$7, scheduled_at=$8, originator_tz=$9,
+            duration_minutes=$10, all_day=$11, recurrence_rrule=$12,
+            recurrence_exdates=$13, call_id=$14, updated_at=NOW()
+        WHERE id=$1 AND workspace_id=$15`
+    if expectedUpdatedAt != nil {
+        sql += " AND updated_at=$16"
+        args = append(args, expectedUpdatedAt.UTC())
+    }
+    sql += `
+        RETURNING id, calendar_id, workspace_id, channel_id, organizer_id, title,
+                  description, location_type, location_value, scheduled_at, originator_tz,
+                  duration_minutes, all_day, recurrence_rrule, recurrence_exdates,
+                  call_id, created_at, updated_at`
+    row := r.db.QueryRow(ctx, sql, args...)
+    updated, err := scanCalendarEvent(row)
+    if err != nil {
+        if errors.Is(err, pgx.ErrNoRows) {
+            if expectedUpdatedAt != nil {
+                return cerrors.Conflict("CONCURRENT_UPDATE: event was modified concurrently")
+            }
+            return cerrors.NotFound("event not found")
+        }
+        return err
+    }
+    event.CreatedAt = updated.CreatedAt
+    event.UpdatedAt = updated.UpdatedAt
+    return nil
+}
+
+// CreateEventTx inserts event + attendees + reminders using r.db (no nested BeginTx).
+func (r *CalendarRepo) CreateEventTx(ctx context.Context, event *entity.CalendarEvent) (*entity.CalendarEvent, error) {
+    if err := r.insertEvent(ctx, event); err != nil {
+        return nil, err
+    }
+    if err := r.replaceAttendees(ctx, event.ID, event.Attendees); err != nil {
+        return nil, err
+    }
+    if err := r.replaceReminders(ctx, event.ID, event.Reminders); err != nil {
+        return nil, err
+    }
+    return r.GetEvent(ctx, event.ID)
+}
+
+// UpdateEventTx updates event + attendees + reminders using r.db (no nested BeginTx).
+func (r *CalendarRepo) UpdateEventTx(ctx context.Context, event *entity.CalendarEvent, expectedUpdatedAt *time.Time) (*entity.CalendarEvent, error) {
+    if err := r.updateEventRowTx(ctx, event, expectedUpdatedAt); err != nil {
+        return nil, err
+    }
+    if err := r.replaceAttendees(ctx, event.ID, event.Attendees); err != nil {
+        return nil, err
+    }
+    if err := r.replaceReminders(ctx, event.ID, event.Reminders); err != nil {
+        return nil, err
+    }
+    return r.GetEvent(ctx, event.ID)
+}
+```
+
+**`internal/service/calendar/service_test.go`** — add to `fakeCalendarRepo` (auto-promoted to `txCalendarRepo` via embedding):
+
+```go
+func (r *fakeCalendarRepo) CreateEventTx(ctx context.Context, eventEntity *entity.CalendarEvent) (*entity.CalendarEvent, error) {
+    return r.CreateEvent(ctx, eventEntity)
+}
+
+func (r *fakeCalendarRepo) UpdateEventTx(ctx context.Context, eventEntity *entity.CalendarEvent, expectedUpdatedAt *time.Time) (*entity.CalendarEvent, error) {
+    if expectedUpdatedAt != nil {
+        existing, err := r.GetEvent(ctx, eventEntity.ID)
+        if err != nil {
+            return nil, err
+        }
+        if !existing.UpdatedAt.UTC().Equal(expectedUpdatedAt.UTC()) {
+            return nil, cerrors.Conflict("CONCURRENT_UPDATE: event was modified concurrently")
+        }
+    }
+    return r.UpdateEvent(ctx, eventEntity)
+}
+```
+
+Note: `txCalendarRepo` embeds `*fakeCalendarRepo`, so both new methods are automatically available on `txCalendarRepo` without any additional code.
+
+**Commit:** `feat(calendar): CreateEventTx/UpdateEventTx tx-aware repo methods [ALOQA-239]`
+**Compile state:** GREEN
 
 ---
 
@@ -882,6 +1111,31 @@ func TestMoveEventOccurrence_InstanceAlreadyExdated_BadRequest(t *testing.T) {
     })
     assertInvalidInput(t, err, "INVALID_INSTANCE")
 }
+
+func TestMoveEventOccurrence_ConcurrentUpdate_Conflict_409(t *testing.T) {
+    ctx := context.Background()
+    wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
+    start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+    instance := time.Date(2026, 5, 2, 10, 0, 0, 0, time.UTC)
+    storedUpdatedAt := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
+    staleExpected := storedUpdatedAt.Add(-time.Second) // wrong — triggers conflict
+    repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+        eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+            Title: "D", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+            ScheduledAt: start, DurationMinutes: 30, UpdatedAt: storedUpdatedAt,
+            Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=5"}},
+    }}
+    txMgr := newCalendarReminderTxManager(repo)
+    svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
+    svc.SetTransactionManager(txMgr)
+
+    _, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+        InstanceAt: instance, Scope: MoveScopeThis,
+        NewScheduledAt: instance.Add(24 * time.Hour),
+        ExpectedUpdatedAt: &staleExpected,
+    })
+    assertConflict(t, err, "CONCURRENT_UPDATE")
+}
 ```
 
 ### Step 2 — Implement (replace stub)
@@ -978,13 +1232,13 @@ func (s *Service) moveOccurrenceThis(ctx context.Context, existing *entity.Calen
             Exdates: append(append([]time.Time(nil), existing.Recurrence.Exdates...), input.InstanceAt.UTC()),
         }
         parent.UpdatedAt = time.Now().UTC()
-        updated, err := scope.Calendars().UpdateEvent(ctx, parent)
+        updated, err := scope.Calendars().UpdateEventTx(ctx, parent, input.ExpectedUpdatedAt)
         if err != nil {
             return err
         }
         parentAfter = updated
         child := buildOccurrenceChild(existing, input.NewScheduledAt, deriveDuration(existing, input))
-        inserted, err := scope.Calendars().CreateEvent(ctx, child)
+        inserted, err := scope.Calendars().CreateEventTx(ctx, child)
         if err != nil {
             return err
         }
@@ -1008,7 +1262,7 @@ func (s *Service) moveOccurrenceThis(ctx context.Context, existing *entity.Calen
 
 **Files:** same
 
-**Goal**: Clamp parent RRULE `UNTIL = instanceAt - 1ms`; partition exdates; build child with `ShiftBounds` rrule + shifted future exdates. First-occurrence degenerates to `scope=all`.
+**Goal**: Clamp parent RRULE `UNTIL = instanceAt - 1ms`; partition exdates; build child with `ShiftBounds` rrule + shifted future exdates. First-occurrence degenerates to `scope=all`. `IsMember` check occurs before the first-occurrence shortcut.
 
 ### Step 1 — Failing tests
 
@@ -1126,23 +1380,43 @@ func TestMoveEventOccurrence_Recurring_ThisAndFollowing_LastOccurrence_OK(t *tes
         t.Fatalf("child rrule must be COUNT=1: %+v", res.Created.Recurrence)
     }
 }
+
+func TestMoveEventOccurrence_Recurring_ThisAndFollowing_FirstOccurrenceAlreadyExdated_BadRequest(t *testing.T) {
+    // IsMember check on start occurrence (exdated) returns false → INVALID_INSTANCE.
+    // This test proves IsMember fires BEFORE the first-occurrence shortcut.
+    ctx := context.Background()
+    wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
+    start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+    repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+        eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+            Title: "D", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+            ScheduledAt: start, DurationMinutes: 30,
+            Recurrence: &entity.RecurrenceRule{
+                RRule:   "FREQ=DAILY;COUNT=5",
+                Exdates: []time.Time{start}, // start occurrence is exdated
+            }},
+    }}
+    txMgr := newCalendarReminderTxManager(repo)
+    svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
+    svc.SetTransactionManager(txMgr)
+
+    _, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+        InstanceAt: start, Scope: MoveScopeThisAndFollowing,
+        NewScheduledAt: start.Add(time.Hour),
+    })
+    assertInvalidInput(t, err, "INVALID_INSTANCE")
+}
 ```
 
 ### Step 2 — Implement (replace stub)
 
 ```go
 func (s *Service) moveOccurrenceThisAndFollowing(ctx context.Context, existing *entity.CalendarEvent, input MoveOccurrenceInput) (*MoveOccurrenceResult, error) {
-    // Degenerate: first occurrence → scope=all (spec §4.5.this_and_following).
-    if input.InstanceAt.UTC().Equal(existing.ScheduledAt.UTC()) {
-        return s.moveOccurrenceAll(ctx, existing, input)
-    }
-    if s.tx == nil {
-        return nil, cerrors.Unavailable("transaction manager required for scope=this_and_following")
-    }
     loc, _ := time.LoadLocation(existing.OriginatorTZ)
     if loc == nil {
         loc = time.UTC
     }
+    // IsMember check BEFORE first-occurrence shortcut (B3 fix).
     ok, err := calrrule.IsMember(existing.Recurrence.RRule, existing.ScheduledAt.In(loc), input.InstanceAt.UTC(), existing.Recurrence.Exdates)
     if err != nil {
         return nil, err
@@ -1150,7 +1424,14 @@ func (s *Service) moveOccurrenceThisAndFollowing(ctx context.Context, existing *
     if !ok {
         return nil, cerrors.InvalidInput("INVALID_INSTANCE: instance_at is not a member of the series")
     }
-
+    // Degenerate: first occurrence → scope=all (spec §4.5.this_and_following).
+    if input.InstanceAt.UTC().Equal(existing.ScheduledAt.UTC()) {
+        return s.moveOccurrenceAll(ctx, existing, input)
+    }
+    // tx guard is after shortcut because scope=all does not need a tx manager.
+    if s.tx == nil {
+        return nil, cerrors.Unavailable("transaction manager required for scope=this_and_following")
+    }
     delta := input.NewScheduledAt.UTC().Sub(input.InstanceAt.UTC())
     parentUntil := input.InstanceAt.UTC().Add(-time.Millisecond)
 
@@ -1164,7 +1445,7 @@ func (s *Service) moveOccurrenceThisAndFollowing(ctx context.Context, existing *
         }
     }
 
-    childRule, _, err := calrrule.ShiftBounds(existing.Recurrence.RRule, input.InstanceAt.UTC(), input.NewScheduledAt.UTC())
+    childRule, _, err := calrrule.ShiftBounds(existing.Recurrence.RRule, existing.ScheduledAt.UTC(), input.InstanceAt.UTC(), input.NewScheduledAt.UTC())
     if err != nil {
         return nil, err
     }
@@ -1181,14 +1462,14 @@ func (s *Service) moveOccurrenceThisAndFollowing(ctx context.Context, existing *
         parent := cloneEvent(existing)
         parent.Recurrence = &entity.RecurrenceRule{RRule: parentRRule, Exdates: parentExdates}
         parent.UpdatedAt = time.Now().UTC()
-        updated, err := scope.Calendars().UpdateEvent(ctx, parent)
+        updated, err := scope.Calendars().UpdateEventTx(ctx, parent, input.ExpectedUpdatedAt)
         if err != nil {
             return err
         }
         parentAfter = updated
         child := buildOccurrenceChild(existing, input.NewScheduledAt, deriveDuration(existing, input))
         child.Recurrence = &entity.RecurrenceRule{RRule: childRule, Exdates: childExdates}
-        inserted, err := scope.Calendars().CreateEvent(ctx, child)
+        inserted, err := scope.Calendars().CreateEventTx(ctx, child)
         if err != nil {
             return err
         }
@@ -1212,7 +1493,7 @@ func (s *Service) moveOccurrenceThisAndFollowing(ctx context.Context, existing *
 
 **Files:** MODIFY `internal/handler/http/calendar.go`, CREATE `internal/handler/http/calendar_test.go`
 
-**Goal**: Decode `instance_at`, `scope`, `new_scheduled_at`, `new_duration_minutes`; call `MoveEventOccurrence`; return `{ updated, created }`.
+**Goal**: Decode `instance_at`, `scope`, `new_scheduled_at`, `new_duration_minutes`, `expected_updated_at`; call `MoveEventOccurrence`; return `{ updated, created }`. Handler tests decode the `{"error":{"code":"...","message":"..."}}` error body and assert both the HTTP status and message fragment.
 
 ### Step 1 — Failing tests
 
@@ -1236,10 +1517,10 @@ import (
     "aloqa/internal/domain/entity"
     "aloqa/internal/middleware"
     "aloqa/internal/pkg/cerrors"
+    "aloqa/internal/platform/txscope"
     calendarservice "aloqa/internal/service/calendar"
 )
 
-// fakeCalendarService wraps a fakeCalendarRepo for handler tests.
 type calendarHTTPFixture struct {
     wsID   uuid.UUID
     userID uuid.UUID
@@ -1275,6 +1556,21 @@ func (f calendarHTTPFixture) serve(eventID uuid.UUID, body string) *httptest.Res
     res := httptest.NewRecorder()
     f.router.ServeHTTP(res, req)
     return res
+}
+
+// decodeErrBody decodes {"error":{"code":"...","message":"..."}} response shapes.
+func decodeErrBody(t *testing.T, res *httptest.ResponseRecorder) (code, message string) {
+    t.Helper()
+    var body struct {
+        Error struct {
+            Code    string `json:"code"`
+            Message string `json:"message"`
+        } `json:"error"`
+    }
+    if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+        t.Fatalf("decode error body: %v (raw=%s)", err, res.Body.String())
+    }
+    return body.Error.Code, body.Error.Message
 }
 
 func TestMoveOccurrenceHandler_200OK(t *testing.T) {
@@ -1314,6 +1610,10 @@ func TestMoveOccurrenceHandler_400InvalidScope(t *testing.T) {
     if res.Code != http.StatusBadRequest {
         t.Fatalf("status=%d", res.Code)
     }
+    _, msg := decodeErrBody(t, res)
+    if !strings.Contains(msg, "INVALID_SCOPE") {
+        t.Fatalf("message=%q missing INVALID_SCOPE", msg)
+    }
 }
 
 func TestMoveOccurrenceHandler_400MissingFields(t *testing.T) {
@@ -1327,6 +1627,10 @@ func TestMoveOccurrenceHandler_400MissingFields(t *testing.T) {
     res := f.serve(eventID, `{}`)
     if res.Code != http.StatusBadRequest {
         t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+    }
+    _, msg := decodeErrBody(t, res)
+    if msg == "" {
+        t.Fatal("expected non-empty error message")
     }
 }
 
@@ -1345,18 +1649,84 @@ func TestMoveOccurrenceHandler_403NonOrganizer(t *testing.T) {
     if res.Code != http.StatusForbidden {
         t.Fatalf("status=%d", res.Code)
     }
+    _, msg := decodeErrBody(t, res)
+    if !strings.Contains(msg, "FORBIDDEN_NOT_ORGANIZER") {
+        t.Fatalf("message=%q missing FORBIDDEN_NOT_ORGANIZER", msg)
+    }
 }
+
+// fakeConflictTxManager returns cerrors.Conflict without executing fn.
+// Used to test that the handler maps 409 conflict correctly.
+type fakeConflictTxManager struct{}
+
+func (fakeConflictTxManager) WithinTx(_ context.Context, _ func(context.Context, txscope.Scope) error) error {
+    return cerrors.Conflict("CONCURRENT_UPDATE: event was modified concurrently")
+}
+
+func TestMoveOccurrenceHandler_409ConcurrentUpdate(t *testing.T) {
+    wsID := uuid.New()
+    userID := uuid.New()
+    repo := &fakeMoveCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{}}
+    svc := calendarservice.NewService(repo, fakeCalHTTPMembers{wsID: wsID, userID: userID}, nil, noopCalHTTPPublisher{})
+    svc.SetTransactionManager(fakeConflictTxManager{})
+    handler := NewCalendarHandler(svc)
+    router := chi.NewRouter()
+    router.Use(func(next http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            ctx := context.WithValue(r.Context(), middleware.WorkspaceIDKey, wsID)
+            ctx = context.WithValue(ctx, middleware.UserIDKey, userID)
+            next.ServeHTTP(w, r.WithContext(ctx))
+        })
+    })
+    router.Post("/events/{eventID}/occurrences/move", handler.MoveOccurrence)
+
+    eventID := uuid.New()
+    start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+    instance := time.Date(2026, 5, 2, 10, 0, 0, 0, time.UTC)
+    repo.events[eventID] = &entity.CalendarEvent{
+        ID: eventID, WorkspaceID: wsID, OrganizerID: userID,
+        Title: "D", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+        ScheduledAt: start, DurationMinutes: 30,
+        Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=5"},
+    }
+    body := `{"instance_at":"2026-05-02T10:00:00Z","scope":"this","new_scheduled_at":"2026-05-10T10:00:00Z"}`
+    req := httptest.NewRequest(http.MethodPost, "/events/"+eventID.String()+"/occurrences/move", strings.NewReader(body))
+    req.Header.Set("Content-Type", "application/json")
+    res := httptest.NewRecorder()
+    router.ServeHTTP(res, req)
+    if res.Code != http.StatusConflict {
+        t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+    }
+    _, msg := decodeErrBody(t, res)
+    if !strings.Contains(msg, "CONCURRENT_UPDATE") {
+        t.Fatalf("message=%q missing CONCURRENT_UPDATE", msg)
+    }
+}
+
+// fakeMoveCalendarRepo satisfies repository.CalendarRepository.
+// GetEvent, CreateEvent, UpdateEvent, CreateEventTx, UpdateEventTx have real behaviour.
+// All other methods are stubs returning zero values.
+// (full method stubs follow the pattern of fakeCalendarRepo in service_test.go)
 ```
 
-At the bottom of `calendar_test.go`, add minimal fakes that satisfy `calendarservice.NewService` interfaces (they can delegate to the `fakeCalendarRepo` pattern from `service_test.go` — copy the necessary method stubs). Also add:
+At the bottom of `calendar_test.go`, implement the supporting fakes:
 
 ```go
-// fakeMoveCalendarRepo satisfies repository.CalendarRepository.
-// Embed fakeCalendarRepo and override as needed.
-// Add all required methods delegating to an internal fakeCalendarRepo.
+// fakeCalHTTPMembers implements repository.WorkspaceRepository.
+// Only GetMember has real behaviour (checks wsID+userID match).
+// All other methods panic with "not implemented" or return nil.
+type fakeCalHTTPMembers struct {
+    wsID   uuid.UUID
+    userID uuid.UUID
+}
+
+// noopCalHTTPPublisher implements calendarservice.EventPublisher.
+type noopCalHTTPPublisher struct{}
+
+func (noopCalHTTPPublisher) Publish(_ context.Context, _ string, _ []byte) error { return nil }
 ```
 
-The full fake implementation follows the pattern of `fakeCalendarRepo` in `service_test.go` — delegate every required interface method; only `GetEvent`, `UpdateEvent`, `CreateEvent` need real behaviour.
+The full method stubs for `fakeMoveCalendarRepo` (implementing all `CalendarRepository` methods) and `fakeCalHTTPMembers` (implementing all `WorkspaceRepository` methods with only `GetMember` returning real data) follow the established pattern from `service_test.go`. `fakeMoveCalendarRepo` must implement both `CreateEventTx` and `UpdateEventTx` (delegates to `CreateEvent`/`UpdateEvent`).
 
 ### Step 2 — Implement handler
 
@@ -1364,10 +1734,11 @@ In `calendar.go`:
 
 ```go
 type moveOccurrenceRequest struct {
-    InstanceAt         time.Time                           `json:"instance_at"`
-    Scope              calendarservice.MoveOccurrenceScope `json:"scope"`
-    NewScheduledAt     time.Time                           `json:"new_scheduled_at"`
-    NewDurationMinutes *int                                `json:"new_duration_minutes"`
+    InstanceAt          time.Time                           `json:"instance_at"`
+    Scope               calendarservice.MoveOccurrenceScope `json:"scope"`
+    NewScheduledAt      time.Time                           `json:"new_scheduled_at"`
+    NewDurationMinutes  *int                                `json:"new_duration_minutes"`
+    ExpectedUpdatedAt   *time.Time                          `json:"expected_updated_at"`
 }
 
 type moveOccurrenceResponse struct {
@@ -1401,6 +1772,7 @@ func (h *CalendarHandler) MoveOccurrence(w http.ResponseWriter, r *http.Request)
         Scope:              req.Scope,
         NewScheduledAt:     req.NewScheduledAt.UTC(),
         NewDurationMinutes: req.NewDurationMinutes,
+        ExpectedUpdatedAt:  req.ExpectedUpdatedAt,
     })
     if err != nil {
         writeErr(w, err)
@@ -1427,7 +1799,10 @@ In `calendar_test.go`, add:
 
 ```go
 func TestMoveOccurrenceRouteRegistered(t *testing.T) {
-    router := NewRouter(RouterDeps{Calendar: &CalendarHandler{}})
+    router := NewRouter(RouterDeps{
+        Calendar:  &CalendarHandler{},
+        Validator: fakeTokenValidator{userID: uuid.New()},
+    })
     req := httptest.NewRequest(http.MethodPost,
         "/api/v1/workspaces/"+uuid.NewString()+"/events/"+uuid.NewString()+"/occurrences/move",
         strings.NewReader(`{}`))
@@ -1439,6 +1814,8 @@ func TestMoveOccurrenceRouteRegistered(t *testing.T) {
     }
 }
 ```
+
+Note: `fakeTokenValidator` is already defined in `router_personal_test.go` (same package `http`) with the signature `ValidateToken(string) (uuid.UUID, string, error)`. It is reused here to satisfy `RouterDeps.Validator` so that the auth middleware can pass the request through.
 
 ### Step 2 — Wire route
 
@@ -1542,10 +1919,11 @@ Fix any findings (lint, vet, formatting). If changes required:
 |---|---|---|
 | 0 | — | GREEN baseline |
 | 1 `SetUntil` | `recurrence_split.go` + test | GREEN |
-| 2 `SetDtstart` | same | GREEN |
+| 2 `NormalizeRule` | same | GREEN |
 | 3 `IsMember` | same | GREEN |
 | 4 `ShiftBounds` | same | GREEN |
 | 5 types + scope=all | `service.go` + test | GREEN |
+| 5a `CreateEventTx`/`UpdateEventTx` | `interfaces.go` + `calendar_repo.go` + test | GREEN |
 | 6 scope=this | `service.go` + test | GREEN |
 | 7 scope=this_and_following | `service.go` + test | GREEN |
 | 8 handler | `calendar.go` + `calendar_test.go` | GREEN |
@@ -1557,59 +1935,81 @@ Fix any findings (lint, vet, formatting). If changes required:
 
 ## Test Plan Checklist
 
-**rrule helpers** (21 tests):
+**rrule helpers** (22 tests):
 - [ ] SetUntil: replaces existing UNTIL
 - [ ] SetUntil: adds UNTIL when absent
 - [ ] SetUntil: strips COUNT
 - [ ] SetUntil: error on malformed
 - [ ] SetUntil: idempotent
-- [ ] SetDtstart: returns parsed rule without DTSTART
-- [ ] SetDtstart: error on malformed
-- [ ] SetDtstart: stable on repeat calls
-- [ ] SetDtstart: preserves all components
+- [ ] NormalizeRule: returns parsed rule without DTSTART
+- [ ] NormalizeRule: error on malformed
+- [ ] NormalizeRule: stable on repeat calls
+- [ ] NormalizeRule: preserves all components
 - [ ] IsMember: in series
 - [ ] IsMember: not in series
 - [ ] IsMember: excluded by exdate
 - [ ] IsMember: boundary at UNTIL (inclusive)
 - [ ] IsMember: unbounded rule
 - [ ] ShiftBounds: UNTIL-bounded shifts by delta
-- [ ] ShiftBounds: COUNT-bounded counts remaining
+- [ ] ShiftBounds: COUNT-bounded counts remaining (uses parentDtstart)
 - [ ] ShiftBounds: unbounded unchanged
 - [ ] ShiftBounds: zero delta idempotent
 - [ ] ShiftBounds: negative delta
 - [ ] ShiftBounds: last occurrence COUNT=1
 - [ ] ShiftBounds: UNTIL wins over COUNT
+- [ ] (NormalizeRule replaces SetDtstart; same 4 test cases, renamed)
 
-**Service** (13 tests):
+**Service** (15 tests):
 - [ ] NonRecurring_All_OK (duration preserved)
 - [ ] NonRecurring_This_DegeneratesToAll
 - [ ] Recurring_All_OK (recurrence preserved)
 - [ ] Recurring_This_OK (exdate + child + RSVP reset + new IDs)
 - [ ] InstanceNotInSeries_BadRequest
 - [ ] InstanceAlreadyExdated_BadRequest
+- [ ] ConcurrentUpdate_Conflict_409
+- [ ] CreateEventTx_StoresEvent
+- [ ] UpdateEventTx_UpdatesEvent
+- [ ] UpdateEventTx_OptimisticLock_Conflict
 - [ ] Recurring_ThisAndFollowing_OK (UNTIL + shifted rrule + shifted exdates)
 - [ ] ThisAndFollowing_FirstOccurrence_DegeneratesToAll
 - [ ] ThisAndFollowing_LastOccurrence_OK (child COUNT=1)
-- [ ] NonOrganizer_Forbidden
+- [ ] ThisAndFollowing_FirstOccurrenceAlreadyExdated_BadRequest
+- [ ] NonOrganizer_Forbidden (asserts FORBIDDEN_NOT_ORGANIZER fragment)
 - [ ] InvalidScope_BadRequest
 - [ ] DurationOutOfRange_BadRequest
 - [ ] RealtimePublishedCorrectly
 
-**HTTP** (5 tests):
-- [ ] 200 OK response shape
-- [ ] 400 invalid scope
-- [ ] 400 missing required fields
-- [ ] 403 non-organizer
-- [ ] Route registered (smoke)
+**HTTP** (6 tests):
+- [ ] 200 OK response shape (Updated non-nil)
+- [ ] 400 invalid scope (error body contains INVALID_SCOPE)
+- [ ] 400 missing required fields (error body non-empty message)
+- [ ] 403 non-organizer (error body contains FORBIDDEN_NOT_ORGANIZER)
+- [ ] 409 concurrent update (error body contains CONCURRENT_UPDATE)
+- [ ] Route registered (smoke, with fakeTokenValidator)
 
 ---
 
 ## Self-Review Checklist
 
 - [ ] All new helpers in `internal/pkg/rrule/recurrence_split.go`; `expand.go` untouched
+- [ ] Helper is `NormalizeRule(rule string) (string, error)` — no `time.Time` parameter (m8)
+- [ ] `ShiftBounds` signature: `(rule string, parentDtstart, originalInstance, newInstance time.Time)` (B1)
+- [ ] COUNT case uses `Expand(rule, parentDtstart.UTC(), nil, originalInstance.UTC().Add(-time.Millisecond), far)` (B1)
+- [ ] `CreateEventTx`/`UpdateEventTx` added to `CalendarRepository` interface (B2)
+- [ ] `CalendarRepo.CreateEventTx`/`UpdateEventTx` use `r.db` directly — no inner `pool.BeginTx` (B2)
+- [ ] `fakeCalendarRepo` implements `CreateEventTx`/`UpdateEventTx`; auto-promoted to `txCalendarRepo` (B2)
+- [ ] `moveOccurrenceThisAndFollowing`: `IsMember` check is BEFORE first-occurrence shortcut (B3)
+- [ ] `s.tx == nil` guard is AFTER first-occurrence shortcut (B3)
+- [ ] `MoveOccurrenceInput.ExpectedUpdatedAt *time.Time` field present (B4)
+- [ ] `moveOccurrenceRequest.ExpectedUpdatedAt *time.Time` JSON field present (B4)
+- [ ] `UpdateEventTx` uses optimistic lock when `expectedUpdatedAt != nil`; returns `cerrors.Conflict("CONCURRENT_UPDATE: ...")` on mismatch (B4)
+- [ ] `assertForbidden` checks both `CodeForbidden` and `FORBIDDEN_NOT_ORGANIZER` message fragment (M5)
+- [ ] `assertConflict` helper added (M5)
+- [ ] All handler tests call `decodeErrBody` and assert message fragment (M6)
+- [ ] Router smoke test provides `fakeTokenValidator{userID: uuid.New()}` in `RouterDeps.Validator` (m7)
 - [ ] `cerrors.InvalidInput` for all 400s; no invented constructor
-- [ ] `cerrors.Forbidden` for non-organizer
-- [ ] `s.tx.WithinTx` for scope=this and scope=this_and_following; `if s.tx == nil` guard
+- [ ] `cerrors.Forbidden` for non-organizer; `cerrors.Conflict` for concurrent update
+- [ ] `s.tx.WithinTx` for scope=this and scope=this_and_following; scope=all does NOT use WithinTx
 - [ ] scope=this first-occurrence NOT degenerated (parent gets exdate + child created)
 - [ ] scope=this_and_following first-occurrence degenerates to scope=all
 - [ ] `buildOccurrenceChild`: `call_id=nil`, `recurrence=nil`, fresh timestamps
@@ -1627,10 +2027,31 @@ Fix any findings (lint, vet, formatting). If changes required:
 
 ## Spec Gaps
 
-1. **`SetDtstart` semantics**: Spec §4.6 says "replaces or adds DTSTART= and rebuilds the rrule string." In this codebase DTSTART never lives in the rule string (stored in `ScheduledAt`). `SetDtstart` therefore normalizes without embedding DTSTART — intentional divergence consistent with how `expand.go` operates.
+1. **`NormalizeRule` semantics**: Spec §4.6 references a "SetDtstart" helper. Renamed to `NormalizeRule` throughout; DTSTART is never embedded in the rule string in this codebase (stored in `CalendarEvent.ScheduledAt`). The `time.Time` parameter is dropped — the function is purely a canonicalization validator.
 
 2. **`IsMember` 1ms window vs full expand**: A 1ms precision window may produce false-negatives for occurrences whose computed time differs by sub-millisecond due to DST arithmetic edge cases. The window is sufficient for the UTC timestamps this codebase stores; a full-series expand fallback is not needed.
 
 3. **`OccurrenceIndex` for COUNT series**: Approximated via `opt.Count - len(remaining) + 1`. Used only in diagnostics/logs; callers do not depend on it for correctness.
 
 4. **`notify` flag** (mentioned in spec §4.5 prose): Not present in the §4.2 request schema. Out of scope this iteration.
+
+---
+
+## Codex Plan Review R1 — applied
+
+All 8 findings from the R1 review (2026-05-18) have been incorporated into the plan above. Summary:
+
+| ID | Severity | Finding | Resolution |
+|---|---|---|---|
+| B1 | HIGH | `ShiftBounds` COUNT case uses `originalInstance` as `Expand` dtstart, producing wrong remaining count because COUNT is consumed from a non-root start | Added `parentDtstart time.Time` as 2nd param; COUNT `Expand` call uses `parentDtstart.UTC()` as dtstart; all 7 test call sites updated |
+| B2 | HIGH | `CreateEvent`/`UpdateEvent` open an inner `pool.BeginTx` internally; calling them from within `WithinTx` breaks atomicity (nested non-joined transaction) | Added `CreateEventTx`/`UpdateEventTx` to `CalendarRepository` interface and `CalendarRepo` using `r.db` directly; Tasks 6 and 7 use `*Tx` variants inside `WithinTx` |
+| B3 | HIGH | `moveOccurrenceThisAndFollowing` performs `IsMember` check AFTER the first-occurrence shortcut; an exdated first occurrence silently degenerates to scope=all instead of returning 400 | Reordered: `IsMember` check is now BEFORE the shortcut; `s.tx == nil` guard is AFTER the shortcut |
+| B4 | MEDIUM | No optimistic concurrency — concurrent DnD moves on the same event silently overwrite each other | Added `ExpectedUpdatedAt *time.Time` to `MoveOccurrenceInput` and `moveOccurrenceRequest`; `updateEventRowTx` adds `AND updated_at=$16` when non-nil; returns `cerrors.Conflict("CONCURRENT_UPDATE: ...")` on mismatch |
+| M5 | MEDIUM | `assertForbidden` only checks error code, not message fragment; `FORBIDDEN_NOT_ORGANIZER` marker can silently drift | Updated `assertForbidden` to accept and assert a message fragment; added `assertConflict` helper with same pattern |
+| M6 | MEDIUM | Handler tests check HTTP status only; `writeErr` shape `{"error":{"code":"...","message":"..."}}` is never decoded in tests | Added `decodeErrBody` helper; all error-path handler tests now assert both status and message fragment; added 409 test with `fakeConflictTxManager` |
+| m7 | LOW | Router smoke test provides no `Validator` in `RouterDeps`; auth middleware short-circuits with 401, making the route registration check a false positive | Updated smoke test to provide `Validator: fakeTokenValidator{userID: uuid.New()}` |
+| m8 | LOW | `SetDtstart` name misleads — it does not embed DTSTART; the `time.Time` parameter is silently ignored | Renamed to `NormalizeRule`; dropped `time.Time` parameter from signature, tests, and all references in Architecture section |
+
+---
+
+*End of plan. Estimated test counts: 22 rrule + 18 service + 6 handler = 46 new tests. Line count: ~1890.*

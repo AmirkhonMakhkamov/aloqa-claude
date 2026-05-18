@@ -245,6 +245,7 @@ func (s *Service) SendMessage(
 | U6 | `SendMessage` with `ForwardedFrom=[]byte("not json")` | 400 `forwarded_from must be valid JSON`. No row inserted. |
 | U7 | `SendMessage` with `ForwardedFrom=[]byte("\"a string\"")` (valid JSON scalar) | Accepted; persisted verbatim. Trust contract per §8.4. |
 | U8 | `SendMessage` with `ForwardedFrom=[]byte("{}")` (empty object) | Accepted; persisted verbatim. |
+| U9 | Soft-delete privacy regression: insert message with `ForwardedFrom=<jsonb>`, call `MessageRepo.SoftDelete(ctx, id)`, then `GetByID(ctx, id)` | Returned Message has `Content=""` AND `ForwardedFrom == nil`. Snapshot must NOT leak through after soft-delete (§8.11). |
 
 ### Integration (handler-level HTTP)
 
@@ -279,6 +280,7 @@ func (s *Service) SendMessage(
 8. **No external dependencies** added.
 9. **Service-level `validate.Struct` is NOT removed for SendMessageInput** — but its `Content` tag is replaced by the manual conditional check in `SendMessage`. Other input structs keep validators. (If the file uses one shared `validate.New()` instance — confirm no cross-impact.)
 10. **`forwarded_from` non-empty implies valid JSON** — service rejects 400 before INSERT; jsonb column never receives garbage. Test U6.
+11. **Soft-delete clears `forwarded_from`** — `MessageRepo.SoftDelete` UPDATE statement extends the existing field reset (`content = ''`, `pinned = false`, etc.) with `forwarded_from = NULL`. Without this, deleted forwarded messages still expose the embedded snapshot content. Test U9.
 
 ---
 

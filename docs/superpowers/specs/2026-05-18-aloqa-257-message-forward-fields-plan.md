@@ -14,10 +14,14 @@ Single small PR. 4 phases × 5 commits. Each phase ends `make lint && make test`
 
 1. Create `migrations/035_messages_forward_from.sql` (per spec §3) with `ALTER TABLE messages ADD COLUMN IF NOT EXISTS forwarded_from jsonb DEFAULT NULL;` + the expression index `CREATE INDEX IF NOT EXISTS idx_messages_forwarded_from_message_id ON messages ((forwarded_from->>'message_id')) WHERE forwarded_from IS NOT NULL;`. Wrap in BEGIN/COMMIT.
 2. Create `migrations/down/035_messages_forward_from.down.sql` per spec §3.
-3. Apply migration locally (matches dev SOP): `make migrate-up` (or whatever the existing target is — verify by reading the Makefile).
-4. Smoke check: `psql ... -c '\d messages'` shows new column.
+3. **Repo has NO Makefile migration recipe** (Makefile declares `migrate-up`/`migrate-down` in `.PHONY` but provides no recipe — verified). Apply locally with explicit psql:
+   ```bash
+   PGPASSWORD=... psql -h localhost -U aloqa -d aloqa_dev -f migrations/035_messages_forward_from.sql
+   ```
+   Per [[vultr_staging_deploy_2026_05_14]] staging deploys via `deploy.sh` which applies SQL files. The migration filename follows the `NNN_<name>.sql` convention used by the deploy script's globbing.
+4. Smoke check: `psql ... -c '\d messages'` shows new `forwarded_from` column.
 
-**Verify:** apply up → apply down → apply up again (idempotent). No data loss.
+**Verify:** apply up → apply down → apply up again (idempotent — `IF NOT EXISTS` on both column and index guarantees this).
 
 Commit: `feat(db): migration 035 messages.forwarded_from jsonb column (ALOQA-257)`.
 
@@ -38,6 +42,21 @@ Commit: `feat(db): migration 035 messages.forwarded_from jsonb column (ALOQA-257
    - Pinned message queries
    - Use `git grep` for `SELECT.*FROM messages` inside `internal/repository/postgres` to enumerate.
 4. **pgxscan struct tag**: confirm `db:"forwarded_from"` tag is respected. If the repo uses positional scans, append to the scan target list in the same column order.
+5. **Soft-delete privacy fix** (`internal/repository/postgres/message.go:370-393` `SoftDelete`): extend the UPDATE statement to also `SET forwarded_from = NULL`. Without this, a soft-deleted forwarded message still exposes the embedded snapshot content via subsequent reads (privacy leak — Codex R1 B2). After the change:
+   ```sql
+   UPDATE messages
+   SET content = '',
+       edited = false,
+       edited_at = NULL,
+       pinned = false,
+       pinned_by = NULL,
+       pinned_at = NULL,
+       forwarded_from = NULL,
+       updated_at = $2,
+       deleted_at = $2
+   WHERE id = $1 AND deleted_at IS NULL
+   ```
+   Add a `MessageRepo.SoftDelete` regression test: insert a message with `forwarded_from = jsonb`, call SoftDelete, GetByID, assert `ForwardedFrom == nil`.
 
 **Verify:** `make lint && go test ./internal/repository/postgres/...` green.
 
@@ -47,7 +66,7 @@ Commit: `feat(repo): persist + project messages.forwarded_from (ALOQA-257)`.
 
 ## Phase C — Service + handler (1 commit)
 
-1. **Service input** (`internal/service/chat/service.go:236-238`): extend `SendMessageInput` to include `ParentID *uuid.UUID` (if not already a field — verify; current state per recon has only `Content`) and `ForwardedFrom json.RawMessage`. Drop the `validate:"required,min=1,max=40000"` tag from `Content` (the rule moves to conditional check in `SendMessage` body).
+1. **Service input** (`internal/service/chat/service.go:236-238`): extend `SendMessageInput` to include `ParentID *uuid.UUID` (if not already a field — verify; current state per recon has only `Content`) and `ForwardedFrom json.RawMessage`. **Drop only the `min=1` part** of the `validate:"required,min=1,max=40000"` tag from `Content` — keep `required,max=40000` so the empty-content gate moves to the manual check. Actually per spec §8.9 the cleanest approach is: remove the entire tag from `Content` (so `validate.Struct(input)` doesn't reject empty content) AND add a manual conditional check in `SendMessage` body. Other input structs in the file keep their validators untouched.
 2. **Service signature** (`internal/service/chat/service.go:625-630`): change to struct input
 
    ```go
@@ -58,9 +77,10 @@ Commit: `feat(repo): persist + project messages.forwarded_from (ALOQA-257)`.
    ) (*entity.Message, error)
    ```
 
-   Update the body:
-   - Replace any `validate.Struct(input)` call with the conditional content validation block per spec §4.4 (length 0 allowed only when `len(input.ForwardedFrom) > 0`; length > 40000 always rejected).
-   - Add JSON-validity probe on `input.ForwardedFrom` when non-empty: `json.Unmarshal(input.ForwardedFrom, &probe)` → 400 on failure.
+   Update the body **preserving the existing `validate.Struct(input)` call** (per spec §8.9 — the call is NOT removed, only the `Content` tag inside the struct is dropped):
+   - Keep `if err := validate.Struct(input); err != nil { return nil, err }` — validates ParentID UUID-ness, any future tags, etc.
+   - Add the conditional content validation per spec §4.4: if `len(input.ForwardedFrom) == 0 && len(input.Content) < 1` → 400 "content is required". If `len(input.Content) > 40000` → 400 "content must be at most 40000 characters".
+   - Add JSON-validity probe on `input.ForwardedFrom` when non-empty: `var probe interface{}; if err := json.Unmarshal(input.ForwardedFrom, &probe); err != nil` → 400 "forwarded_from must be valid JSON".
    - Build the `entity.Message` with `ForwardedFrom: input.ForwardedFrom` (nil propagates to NULL).
    - All other existing logic (channel access via `GetAccessibleChannel`, parent validation, broadcast) unchanged.
 3. **HTTP handler** (`internal/handler/http/message.go:25-28`): extend `sendMessageRequest` to include `ForwardedFrom json.RawMessage \`json:"forwarded_from,omitempty"\``. Remove the `validate:"required,min=1,max=40000"` tag from the handler-struct `Content` field (since validation lives in service now and the request-tag would short-circuit before the service runs — verify that the handler does NOT call validate.Struct on `req`; existing pattern is `decodeJSON` only). Map `*string ParentID` to `*uuid.UUID` and pass the new struct input to `s.svc.SendMessage`.
@@ -78,7 +98,8 @@ Commit: `feat(chat): SendMessage accepts forwarded_from + conditional content ru
 
 1. Extend `internal/service/chat/service_test.go` per spec §7 U1–U8.
 2. Extend the existing HTTP handler test file (find via `git grep -l "TestSendMessage\|sendMessage"` — likely `internal/handler/http/message_test.go` or a sibling) per spec §7 I1–I6. If no test file exists, create one mirroring `call_message_test.go` pattern.
-3. Migration tests M1–M3 — manual or via `migration_test.go` if such a file exists; otherwise verify against `make migrate-up && make migrate-down && make migrate-up` cycle on a dev DB.
+3. **Soft-delete privacy regression** (`internal/repository/postgres/message_test.go` if exists, else service-level integration test): insert message with `forwarded_from = jsonb`, call `SoftDelete`, fetch via `GetByID`, assert returned `ForwardedFrom == nil` AND `Content == ""`.
+4. Migration tests M1–M3 — manual cycle on a dev DB via the explicit `psql -f` commands (no Makefile recipe per Phase A note); document the verification command run in commit message.
 
 **Verify:** `make lint && make test` green end-to-end.
 

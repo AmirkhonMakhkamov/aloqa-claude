@@ -911,6 +911,146 @@ func TestUpdateEventTx_OptimisticLock_Conflict(t *testing.T) {
 	assertConflict(t, err, "CONCURRENT_UPDATE")
 }
 
+func TestMoveEventOccurrence_Recurring_This_OK(t *testing.T) {
+	ctx := context.Background()
+	wsID, orgID := uuid.New(), uuid.New()
+	eventID := uuid.New()
+	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	instance := time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
+	attendeeUID := uuid.New()
+	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+			Title: "Daily", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			ScheduledAt: start, DurationMinutes: 30,
+			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=5"},
+			Attendees: []entity.EventAttendee{{
+				ID: uuid.New(), EventID: eventID, UserID: &attendeeUID,
+				IsRequired: true, RsvpStatus: entity.RsvpStatusGoing,
+			}},
+		},
+	}}
+	txMgr := newCalendarReminderTxManager(repo)
+	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
+	svc.SetTransactionManager(txMgr)
+
+	newAt := time.Date(2026, 5, 10, 14, 0, 0, 0, time.UTC)
+	res, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+		InstanceAt: instance, Scope: MoveScopeThis, NewScheduledAt: newAt,
+	})
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+
+	parent := txMgr.calendars.events[eventID]
+	var hasExdate bool
+	for _, ex := range parent.Recurrence.Exdates {
+		if ex.UTC().Equal(instance.UTC()) {
+			hasExdate = true
+		}
+	}
+	if !hasExdate {
+		t.Fatalf("parent exdates=%v missing instance", parent.Recurrence.Exdates)
+	}
+	if res.Created == nil {
+		t.Fatal("Created must not be nil")
+	}
+	if res.Created.ID == eventID {
+		t.Fatal("Created must have new ID")
+	}
+	if !res.Created.ScheduledAt.Equal(newAt.UTC()) {
+		t.Fatalf("Created.ScheduledAt=%v", res.Created.ScheduledAt)
+	}
+	if res.Created.Recurrence != nil {
+		t.Fatal("Created.Recurrence must be nil")
+	}
+	if res.Created.CallID != nil {
+		t.Fatal("Created.CallID must be nil")
+	}
+	if len(res.Created.Attendees) != 1 {
+		t.Fatalf("attendees=%d want=1", len(res.Created.Attendees))
+	}
+	att := res.Created.Attendees[0]
+	if att.RsvpStatus != entity.RsvpStatusNoResponse {
+		t.Fatalf("RsvpStatus=%q want=no_response", att.RsvpStatus)
+	}
+	if att.RespondedAt != nil {
+		t.Fatal("RespondedAt must be nil")
+	}
+	if att.ID == repo.events[eventID].Attendees[0].ID {
+		t.Fatal("attendee ID must be regenerated")
+	}
+}
+
+func TestMoveEventOccurrence_InstanceNotInSeries_BadRequest(t *testing.T) {
+	ctx := context.Background()
+	wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
+	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+			Title: "D", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			ScheduledAt: start, DurationMinutes: 30,
+			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=3"}},
+	}}
+	txMgr := newCalendarReminderTxManager(repo)
+	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
+	svc.SetTransactionManager(txMgr)
+
+	_, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+		InstanceAt:     time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC),
+		Scope:          MoveScopeThis,
+		NewScheduledAt: time.Date(2026, 5, 11, 10, 0, 0, 0, time.UTC),
+	})
+	assertInvalidInput(t, err, "INVALID_INSTANCE")
+}
+
+func TestMoveEventOccurrence_InstanceAlreadyExdated_BadRequest(t *testing.T) {
+	ctx := context.Background()
+	wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
+	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	exdated := time.Date(2026, 5, 2, 10, 0, 0, 0, time.UTC)
+	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+			Title: "D", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			ScheduledAt: start, DurationMinutes: 30,
+			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=5", Exdates: []time.Time{exdated}}},
+	}}
+	txMgr := newCalendarReminderTxManager(repo)
+	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
+	svc.SetTransactionManager(txMgr)
+
+	_, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+		InstanceAt: exdated, Scope: MoveScopeThis,
+		NewScheduledAt: exdated.Add(24 * time.Hour),
+	})
+	assertInvalidInput(t, err, "INVALID_INSTANCE")
+}
+
+func TestMoveEventOccurrence_ConcurrentUpdate_Conflict_409(t *testing.T) {
+	ctx := context.Background()
+	wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
+	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	instance := time.Date(2026, 5, 2, 10, 0, 0, 0, time.UTC)
+	storedUpdatedAt := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
+	staleExpected := storedUpdatedAt.Add(-time.Second)
+	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+		eventID: {ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+			Title: "D", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			ScheduledAt: start, DurationMinutes: 30, UpdatedAt: storedUpdatedAt,
+			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=5"}},
+	}}
+	txMgr := newCalendarReminderTxManager(repo)
+	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
+	svc.SetTransactionManager(txMgr)
+
+	_, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+		InstanceAt:        instance,
+		Scope:             MoveScopeThis,
+		NewScheduledAt:    instance.Add(24 * time.Hour),
+		ExpectedUpdatedAt: &staleExpected,
+	})
+	assertConflict(t, err, "CONCURRENT_UPDATE")
+}
+
 type fakeCalendarRepo struct {
 	mu                  sync.Mutex
 	calendars           []entity.UserCalendar

@@ -15,6 +15,7 @@ import (
 	"aloqa/internal/domain/repository"
 	"aloqa/internal/pkg/cerrors"
 	"aloqa/internal/pkg/id"
+	calrrule "aloqa/internal/pkg/rrule"
 	"aloqa/internal/platform/txscope"
 )
 
@@ -460,8 +461,124 @@ func (s *Service) moveOccurrenceAll(ctx context.Context, existing *entity.Calend
 	return &MoveOccurrenceResult{Updated: updated}, nil
 }
 
-func (s *Service) moveOccurrenceThis(context.Context, *entity.CalendarEvent, MoveOccurrenceInput) (*MoveOccurrenceResult, error) {
-	return nil, cerrors.Unavailable("not yet implemented")
+func cloneEvent(src *entity.CalendarEvent) *entity.CalendarEvent {
+	c := *src
+	c.Attendees = append([]entity.EventAttendee(nil), src.Attendees...)
+	c.Reminders = append([]entity.EventReminder(nil), src.Reminders...)
+	if src.Recurrence != nil {
+		c.Recurrence = &entity.RecurrenceRule{
+			RRule:   src.Recurrence.RRule,
+			Exdates: append([]time.Time(nil), src.Recurrence.Exdates...),
+		}
+	}
+	return &c
+}
+
+func resetAttendees(src []entity.EventAttendee, newEventID uuid.UUID) []entity.EventAttendee {
+	out := make([]entity.EventAttendee, len(src))
+	for i, a := range src {
+		out[i] = entity.EventAttendee{
+			ID:         id.New(),
+			EventID:    newEventID,
+			UserID:     a.UserID,
+			Email:      a.Email,
+			IsRequired: a.IsRequired,
+			RsvpStatus: entity.RsvpStatusNoResponse,
+		}
+	}
+	return out
+}
+
+func copyReminders(src []entity.EventReminder, newEventID uuid.UUID) []entity.EventReminder {
+	out := make([]entity.EventReminder, len(src))
+	for i, r := range src {
+		out[i] = entity.EventReminder{
+			ID:            id.New(),
+			EventID:       newEventID,
+			UserID:        r.UserID,
+			OffsetMinutes: r.OffsetMinutes,
+			Channel:       r.Channel,
+		}
+	}
+	return out
+}
+
+func buildOccurrenceChild(parent *entity.CalendarEvent, scheduledAt time.Time, durationMinutes int) *entity.CalendarEvent {
+	now := time.Now().UTC()
+	child := &entity.CalendarEvent{
+		ID:              id.New(),
+		CalendarID:      parent.CalendarID,
+		WorkspaceID:     parent.WorkspaceID,
+		ChannelID:       parent.ChannelID,
+		OrganizerID:     parent.OrganizerID,
+		Title:           parent.Title,
+		Description:     parent.Description,
+		Location:        parent.Location,
+		ScheduledAt:     scheduledAt.UTC(),
+		OriginatorTZ:    parent.OriginatorTZ,
+		DurationMinutes: durationMinutes,
+		AllDay:          parent.AllDay,
+		Recurrence:      nil,
+		CallID:          nil,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	child.Attendees = resetAttendees(parent.Attendees, child.ID)
+	child.Reminders = copyReminders(parent.Reminders, child.ID)
+	return child
+}
+
+func recurrenceLocation(originatorTZ string) *time.Location {
+	loc, err := time.LoadLocation(originatorTZ)
+	if err != nil || loc == nil {
+		return time.UTC
+	}
+	return loc
+}
+
+func (s *Service) moveOccurrenceThis(ctx context.Context, existing *entity.CalendarEvent, input MoveOccurrenceInput) (*MoveOccurrenceResult, error) {
+	if s.tx == nil {
+		return nil, cerrors.Unavailable("transaction manager required for scope=this")
+	}
+	loc := recurrenceLocation(existing.OriginatorTZ)
+	ok, err := calrrule.IsMember(existing.Recurrence.RRule, existing.ScheduledAt.In(loc), input.InstanceAt.UTC(), existing.Recurrence.Exdates)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, cerrors.InvalidInput("INVALID_INSTANCE: instance_at is not a member of the series")
+	}
+
+	var parentAfter, created *entity.CalendarEvent
+	if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
+		if scope.Calendars() == nil {
+			return cerrors.Unavailable("calendar transaction scope not configured")
+		}
+		parent := cloneEvent(existing)
+		parent.Recurrence = &entity.RecurrenceRule{
+			RRule:   existing.Recurrence.RRule,
+			Exdates: append(append([]time.Time(nil), existing.Recurrence.Exdates...), input.InstanceAt.UTC()),
+		}
+		parent.UpdatedAt = time.Now().UTC()
+		updated, err := scope.Calendars().UpdateEventTx(ctx, parent, input.ExpectedUpdatedAt)
+		if err != nil {
+			return err
+		}
+		parentAfter = updated
+
+		child := buildOccurrenceChild(existing, input.NewScheduledAt, deriveDuration(existing, input))
+		inserted, err := scope.Calendars().CreateEventTx(ctx, child)
+		if err != nil {
+			return err
+		}
+		created = inserted
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	s.publishEvent(ctx, event.TypeCalendarEventUpdated, *parentAfter, existing.OrganizerID)
+	s.publishEvent(ctx, event.TypeCalendarEventCreated, *created, existing.OrganizerID)
+	return &MoveOccurrenceResult{Updated: parentAfter, Created: created}, nil
 }
 
 func (s *Service) moveOccurrenceThisAndFollowing(context.Context, *entity.CalendarEvent, MoveOccurrenceInput) (*MoveOccurrenceResult, error) {

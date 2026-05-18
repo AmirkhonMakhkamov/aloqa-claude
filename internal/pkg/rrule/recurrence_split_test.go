@@ -156,3 +156,126 @@ func TestIsMember_UnboundedRule(t *testing.T) {
 		t.Fatalf("unbounded: err=%v ok=%v", err, ok)
 	}
 }
+
+func TestShiftBounds_UNTILBounded(t *testing.T) {
+	original := time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC)
+	newInst := time.Date(2026, 5, 5, 11, 0, 0, 0, time.UTC) // +1d+1h
+	until := time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)
+	rule := "FREQ=DAILY;UNTIL=" + until.UTC().Format("20060102T150405Z")
+
+	newRule, result, err := ShiftBounds(rule, original, original, newInst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.HadUntil || result.HadCount {
+		t.Fatalf("flags: %+v", result)
+	}
+	delta := newInst.Sub(original)
+	wantUntil := until.Add(delta).UTC()
+	if result.NewUntil == nil || !result.NewUntil.Equal(wantUntil) {
+		t.Fatalf("NewUntil=%v want=%v", result.NewUntil, wantUntil)
+	}
+	if !containsToken(newRule, "UNTIL") || containsToken(newRule, "COUNT") {
+		t.Fatalf("newRule: %q", newRule)
+	}
+}
+
+func TestShiftBounds_COUNTBounded(t *testing.T) {
+	// Daily COUNT=5 starting May 1. originalInstance = May 3 (3rd occ).
+	// Remaining from May 3 inclusive: May3, May4, May5 = 3.
+	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	original := time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
+	newInst := time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC)
+
+	newRule, result, err := ShiftBounds("FREQ=DAILY;COUNT=5", start, original, newInst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.HadCount || result.HadUntil {
+		t.Fatalf("flags: %+v", result)
+	}
+	if result.NewCount == nil || *result.NewCount != 3 {
+		t.Fatalf("NewCount=%v want=3", result.NewCount)
+	}
+	if !strings.Contains(newRule, "COUNT=3") {
+		t.Fatalf("newRule: %q", newRule)
+	}
+}
+
+func TestShiftBounds_Unbounded(t *testing.T) {
+	original := time.Date(2026, 5, 5, 10, 0, 0, 0, time.UTC)
+	newInst := time.Date(2026, 5, 6, 10, 0, 0, 0, time.UTC)
+	newRule, result, err := ShiftBounds("FREQ=DAILY", original, original, newInst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.HadUntil || result.HadCount {
+		t.Fatalf("unbounded must have no bounds: %+v", result)
+	}
+	if containsToken(newRule, "UNTIL") || containsToken(newRule, "COUNT") {
+		t.Fatalf("newRule must stay unbounded: %q", newRule)
+	}
+}
+
+func TestShiftBounds_ZeroDelta(t *testing.T) {
+	original := time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)
+	rule := "FREQ=DAILY;UNTIL=" + until.UTC().Format("20060102T150405Z")
+	_, result, err := ShiftBounds(rule, original, original, original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NewUntil == nil || !result.NewUntil.Equal(until.UTC()) {
+		t.Fatalf("zero delta must preserve UNTIL: %v", result.NewUntil)
+	}
+}
+
+func TestShiftBounds_NegativeDelta(t *testing.T) {
+	original := time.Date(2026, 5, 5, 10, 0, 0, 0, time.UTC)
+	newInst := time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC) // 1 day earlier
+	until := time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)
+	rule := "FREQ=DAILY;UNTIL=" + until.UTC().Format("20060102T150405Z")
+	_, result, err := ShiftBounds(rule, original, original, newInst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantUntil := until.Add(newInst.Sub(original)).UTC()
+	if result.NewUntil == nil || !result.NewUntil.Equal(wantUntil) {
+		t.Fatalf("NewUntil=%v want=%v", result.NewUntil, wantUntil)
+	}
+}
+
+func TestShiftBounds_LastOccurrenceCount(t *testing.T) {
+	// COUNT=3 starting May 1; split at 3rd (last) occurrence May 3. Remaining=1.
+	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	original := time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
+	newInst := time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)
+	newRule, result, err := ShiftBounds("FREQ=DAILY;COUNT=3", start, original, newInst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NewCount == nil || *result.NewCount != 1 {
+		t.Fatalf("NewCount=%v want=1", result.NewCount)
+	}
+	if !strings.Contains(newRule, "COUNT=1") {
+		t.Fatalf("newRule: %q", newRule)
+	}
+}
+
+func TestShiftBounds_UNTILWinsOverCOUNT(t *testing.T) {
+	// Malformed: both UNTIL and COUNT present. UNTIL must win, COUNT stripped.
+	original := time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
+	newInst := time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)
+	rule := "FREQ=DAILY;COUNT=20;UNTIL=" + until.UTC().Format("20060102T150405Z")
+	newRule, result, err := ShiftBounds(rule, original, original, newInst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.HadUntil {
+		t.Fatal("HadUntil must be true")
+	}
+	if containsToken(newRule, "COUNT") {
+		t.Fatalf("COUNT must be stripped: %q", newRule)
+	}
+}

@@ -27,3 +27,19 @@ func NormalizeRule(rule string) (string, error) {
 	opt.Dtstart = time.Time{}
 	return opt.RRuleString(), nil
 }
+
+// IsMember returns true when instance is in the expanded series (excluding exdates).
+func IsMember(rule string, dtstart, instance time.Time, exdates []time.Time) (bool, error) {
+	from := instance.UTC().Add(-time.Millisecond)
+	to := instance.UTC().Add(time.Millisecond)
+	occurrences, err := Expand(rule, dtstart, exdates, from, to)
+	if err != nil {
+		return false, err
+	}
+	for _, occ := range occurrences {
+		if occ.UTC().Equal(instance.UTC()) {
+			return true, nil
+		}
+	}
+	return false, nil
+}

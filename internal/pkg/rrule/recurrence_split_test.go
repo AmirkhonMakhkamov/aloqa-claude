@@ -110,3 +110,49 @@ func TestNormalizeRule_PreservesComponents(t *testing.T) {
 		t.Fatalf("components lost: %q", got)
 	}
 }
+
+func TestIsMember_InSeries(t *testing.T) {
+	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	instance := time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
+	ok, err := IsMember("FREQ=DAILY;COUNT=5", start, instance, nil)
+	if err != nil || !ok {
+		t.Fatalf("err=%v ok=%v", err, ok)
+	}
+}
+
+func TestIsMember_NotInSeries(t *testing.T) {
+	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	outside := time.Date(2026, 5, 7, 10, 0, 0, 0, time.UTC)
+	ok, err := IsMember("FREQ=DAILY;COUNT=5", start, outside, nil)
+	if err != nil || ok {
+		t.Fatalf("err=%v ok=%v", err, ok)
+	}
+}
+
+func TestIsMember_ExcludedByExdate(t *testing.T) {
+	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	instance := time.Date(2026, 5, 2, 10, 0, 0, 0, time.UTC)
+	ok, err := IsMember("FREQ=DAILY;COUNT=5", start, instance, []time.Time{instance})
+	if err != nil || ok {
+		t.Fatalf("exdated must not be member: err=%v ok=%v", err, ok)
+	}
+}
+
+func TestIsMember_BoundaryAtUNTIL(t *testing.T) {
+	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
+	rule := "FREQ=DAILY;UNTIL=" + until.UTC().Format("20060102T150405Z")
+	ok, err := IsMember(rule, start, until, nil)
+	if err != nil || !ok {
+		t.Fatalf("UNTIL boundary must be inclusive: err=%v ok=%v", err, ok)
+	}
+}
+
+func TestIsMember_UnboundedRule(t *testing.T) {
+	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	far := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+	ok, err := IsMember("FREQ=DAILY", start, far, nil)
+	if err != nil || !ok {
+		t.Fatalf("unbounded: err=%v ok=%v", err, ok)
+	}
+}

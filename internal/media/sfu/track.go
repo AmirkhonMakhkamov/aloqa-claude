@@ -38,11 +38,16 @@ type TrackRouter struct {
 // local static RTP track with the same codec parameters. It immediately
 // starts a forwarding goroutine that copies RTP packets from the remote
 // track to the local track.
+//
+// The outbound local track's StreamID is set to sourceUserID (not the
+// publisher browser's StreamID) so subscribers can map remote streams
+// back to a user via stream.id. See ALOQA-245 / BE-PR3 §B1.
 func NewTrackRouter(sourceUserID string, remoteTrack *webrtc.TrackRemote) (*TrackRouter, error) {
+	outboundStreamID := sourceUserID
 	localTrack, err := webrtc.NewTrackLocalStaticRTP(
 		remoteTrack.Codec().RTPCodecCapability,
 		remoteTrack.ID(),
-		remoteTrack.StreamID(),
+		outboundStreamID,
 	)
 	if err != nil {
 		return nil, err
@@ -53,11 +58,11 @@ func NewTrackRouter(sourceUserID string, remoteTrack *webrtc.TrackRemote) (*Trac
 		SourcePeer: sourceUserID,
 		track:      remoteTrack,
 		localTrack: localTrack,
-		streamID:   remoteTrack.StreamID(),
+		streamID:   outboundStreamID,
 		mimeType:   remoteTrack.Codec().MimeType,
 		observed: ObservedTrack{
 			TrackID:    remoteTrack.ID(),
-			StreamID:   remoteTrack.StreamID(),
+			StreamID:   outboundStreamID,
 			SourcePeer: sourceUserID,
 			MimeType:   remoteTrack.Codec().MimeType,
 		},
@@ -78,8 +83,16 @@ func NewTrackRouter(sourceUserID string, remoteTrack *webrtc.TrackRemote) (*Trac
 
 // NewInjectedTrackRouter creates a local-only track router that can receive
 // RTP from an inter-node relay instead of a local PeerConnection publisher.
+//
+// The streamID parameter is preserved for protocol compatibility with the
+// cross-node RelayTrackDescriptor wire format, but the outbound local
+// track's StreamID is forced to sourceUserID so all SFU nodes expose the
+// same contract to subscribers regardless of the originating publisher.
+// See ALOQA-245 / BE-PR3 §B1.
 func NewInjectedTrackRouter(sourceUserID, trackID, streamID, mimeType string) (*TrackRouter, error) {
-	localTrack, err := webrtc.NewTrackLocalStaticRTP(codecCapabilityForMimeType(mimeType), trackID, streamID)
+	_ = streamID
+	outboundStreamID := sourceUserID
+	localTrack, err := webrtc.NewTrackLocalStaticRTP(codecCapabilityForMimeType(mimeType), trackID, outboundStreamID)
 	if err != nil {
 		return nil, err
 	}
@@ -87,11 +100,11 @@ func NewInjectedTrackRouter(sourceUserID, trackID, streamID, mimeType string) (*
 		ID:         trackID,
 		SourcePeer: sourceUserID,
 		localTrack: localTrack,
-		streamID:   streamID,
+		streamID:   outboundStreamID,
 		mimeType:   mimeType,
 		observed: ObservedTrack{
 			TrackID:    trackID,
-			StreamID:   streamID,
+			StreamID:   outboundStreamID,
 			SourcePeer: sourceUserID,
 			MimeType:   mimeType,
 		},

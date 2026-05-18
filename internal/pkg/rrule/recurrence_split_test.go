@@ -202,6 +202,26 @@ func TestShiftBounds_COUNTBounded(t *testing.T) {
 	}
 }
 
+func TestShiftBounds_COUNTBounded_LongRunningSeries(t *testing.T) {
+	// R6 regression: 50-year window truncated YEARLY series. Verify exact count.
+	parentDtstart := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	originalInstance := time.Date(2028, 5, 1, 10, 0, 0, 0, time.UTC)
+	newInstance := time.Date(2028, 5, 2, 10, 0, 0, 0, time.UTC)
+	_, result, err := ShiftBounds("FREQ=YEARLY;COUNT=100", parentDtstart, originalInstance, newInstance)
+	if err != nil {
+		t.Fatalf("ShiftBounds: %v", err)
+	}
+	if !result.HadCount {
+		t.Fatal("HadCount must be true")
+	}
+	if result.NewCount == nil {
+		t.Fatal("NewCount must be non-nil")
+	}
+	if *result.NewCount != 98 {
+		t.Fatalf("NewCount=%d want=98", *result.NewCount)
+	}
+}
+
 func TestShiftBounds_Unbounded(t *testing.T) {
 	original := time.Date(2026, 5, 5, 10, 0, 0, 0, time.UTC)
 	newInst := time.Date(2026, 5, 6, 10, 0, 0, 0, time.UTC)

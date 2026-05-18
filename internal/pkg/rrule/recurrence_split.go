@@ -1,6 +1,7 @@
 package rrule
 
 import (
+	"fmt"
 	"time"
 
 	teambitionrrule "github.com/teambition/rrule-go"
@@ -76,16 +77,17 @@ func ShiftBounds(rule string, parentDtstart, originalInstance, newInstance time.
 		opt.Count = 0
 
 	case result.HadCount:
-		far := originalInstance.UTC().AddDate(50, 0, 0)
-		// Use parentDtstart (not originalInstance) so Expand walks the series from
-		// its root and COUNT is consumed correctly before the from window.
-		remaining, err := Expand(rule, parentDtstart.UTC(), nil, originalInstance.UTC().Add(-time.Millisecond), far)
+		beforeOccurrences, err := Expand(rule, parentDtstart.UTC(), nil, parentDtstart.UTC(), originalInstance.UTC().Add(-time.Millisecond))
 		if err != nil {
 			return "", BoundsShiftResult{}, err
 		}
-		n := len(remaining)
+		beforeCount := len(beforeOccurrences)
+		n := opt.Count - beforeCount
+		if n <= 0 {
+			return "", BoundsShiftResult{}, fmt.Errorf("rrule: originalInstance is at or after parent COUNT natural end (parent count=%d, before=%d)", opt.Count, beforeCount)
+		}
 		result.NewCount = &n
-		result.OccurrenceIndex = opt.Count - n + 1
+		result.OccurrenceIndex = beforeCount + 1
 		opt.Count = n
 		opt.Until = time.Time{}
 

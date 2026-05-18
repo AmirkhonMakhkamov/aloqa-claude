@@ -16,7 +16,7 @@ Add two paired optional fields on `POST /api/v1/workspaces/{wsId}/channels/{chId
 - `quoted_message_id: *uuid.UUID` — pointer to the original message being quoted.
 - `quoted_snapshot: *QuotedSnapshot` — TYPED struct (not raw json) with frozen reference data:
   - `user_id: uuid.UUID` (original author)
-  - `content_excerpt: string` (≤200 UTF-16 code units, FE-truncated; server defensive cap)
+  - `content_excerpt: string` (≤200 **Unicode codepoints**, FE-truncated; server defensive cap via `utf8.RuneCountInString`). **FE-side Zod schema enforces same codepoint count** via a `.refine((s) => Array.from(s).length <= 200)` rule, NOT `z.string().max(200)` which counts JS UTF-16 units. Codepoint-based parity ensures BE/FE agree on emoji-heavy text. (FE spec §4 / FE plan Phase B must use the codepoint-based validator; this is an architectural alignment point — flag in code-review.)
   - `created_at: time.Time` (original timestamp)
   - `deleted: *bool` (BE-owned, NEVER set by FE on POST; written only by cascade SoftDelete)
   - `parent_message_id: *uuid.UUID` (set when quoted msg lived inside a thread; lets FE build `?m=X&thread=Y` deeplinks)
@@ -40,11 +40,11 @@ Existing fields + ALOQA-257 `ForwardedFrom json.RawMessage`. We add typed `Quote
 
 ### POST handler (`internal/handler/http/message.go:25-28`)
 
-After ALOQA-257 has `Content, ParentID, ForwardedFrom`. We add `QuotedMessageID *string` + `QuotedSnapshot *quotedSnapshotInput` (the restricted-on-input typed struct — no Deleted field, no ParentMessageID resolution into UUID).
+After ALOQA-257 has `Content, ParentID, ForwardedFrom`. We add `QuotedMessageID *string` + `QuotedSnapshot *QuotedSnapshotInput` (the restricted-on-input typed struct — no Deleted field, no ParentMessageID resolution into UUID).
 
 ### Service `SendMessage` (after ALOQA-257)
 
-Now uses struct input `SendMessage(ctx, channelID, userID, input SendMessageInput)`. Extend `SendMessageInput` with `QuotedMessageID *uuid.UUID` + `QuotedSnapshot *quotedSnapshotInput`. Service body:
+Now uses struct input `SendMessage(ctx, channelID, userID, input SendMessageInput)`. Extend `SendMessageInput` with `QuotedMessageID *uuid.UUID` + `QuotedSnapshot *QuotedSnapshotInput`. Service body:
 - Validates pairing (both nil or both set → else 400)
 - Validates `len(content_excerpt) ≤ 200` (defensive cap)
 - Builds `entity.QuotedSnapshot` with `Deleted = nil` explicitly (drops any client-supplied value)
@@ -139,12 +139,17 @@ type Message struct {
 ### 4.2 HTTP handler request (`internal/handler/http/message.go:25-28`)
 
 ```go
-type quotedSnapshotInput struct {
+// QuotedSnapshotInput is EXPORTED so handler (different package) can construct it.
+// The HTTP handler decodes this directly; service reuses the same type (no duplicate
+// definition).
+type QuotedSnapshotInput struct {
     UserID          string  `json:"user_id" validate:"required,uuid"`
-    ContentExcerpt  string  `json:"content_excerpt" validate:"required,max=200"`
+    ContentExcerpt  string  `json:"content_excerpt" validate:"required"` // codepoint cap checked in service body
     CreatedAt       string  `json:"created_at" validate:"required"`
     ParentMessageID *string `json:"parent_message_id" validate:"omitempty,uuid"`
-    // NO Deleted field — service normalizes Deleted = nil regardless.
+    // NO Deleted field. **Existing decodeJSON uses DisallowUnknownFields()**, so a
+    // client sending `deleted: true` is REJECTED at decode (400) before reaching the
+    // service. This is the security boundary — see U7 / I3 expecting 400, not 201.
 }
 
 type sendMessageRequest struct {
@@ -152,16 +157,19 @@ type sendMessageRequest struct {
     ParentID        *string               `json:"parent_id,omitempty"`
     ForwardedFrom   json.RawMessage       `json:"forwarded_from,omitempty"` // ALOQA-257
     QuotedMessageID *string               `json:"quoted_message_id,omitempty" validate:"omitempty,uuid"`
-    QuotedSnapshot  *quotedSnapshotInput  `json:"quoted_snapshot,omitempty"`
+    QuotedSnapshot  *QuotedSnapshotInput  `json:"quoted_snapshot,omitempty"`
 }
 ```
 
-Handler resolves `*string`-typed UUIDs to `*uuid.UUID` and passes the typed `quotedSnapshotInput` to service.
+Handler resolves `*string`-typed UUIDs to `*uuid.UUID`, constructs a `service.SendMessageInput` with the parsed values, passes the SAME `QuotedSnapshotInput` (re-used as the service input type).
 
 ### 4.3 Service input (`internal/service/chat/service.go:236-238`)
 
+**Service uses the SAME exported `QuotedSnapshotInput` defined in handler package** (or in a shared `internal/api/dto` package — implementer's choice). The duplicate parsed-vs-raw distinction is between the handler-decoded form (strings) and the service-resolved form (UUIDs + time):
+
 ```go
-type quotedSnapshotInput struct {
+// In the service package (or shared dto package):
+type ParsedQuotedSnapshotInput struct {
     UserID          uuid.UUID
     ContentExcerpt  string
     CreatedAt       time.Time
@@ -174,9 +182,11 @@ type SendMessageInput struct {
     ParentID        *uuid.UUID
     ForwardedFrom   json.RawMessage      // ALOQA-257
     QuotedMessageID *uuid.UUID
-    QuotedSnapshot  *quotedSnapshotInput
+    QuotedSnapshot  *ParsedQuotedSnapshotInput
 }
 ```
+
+Handler converts `QuotedSnapshotInput` (strings) → `ParsedQuotedSnapshotInput` (typed) using `uuid.Parse` + `time.Parse(time.RFC3339, ...)`. Validation errors at parse → 400.
 
 ### 4.4 Service `SendMessage` body — pairing + normalization
 
@@ -224,38 +234,42 @@ func (s *Service) SendMessage(ctx context.Context, channelID, userID uuid.UUID, 
 - pgx handles `*uuid.UUID` directly; `*entity.QuotedSnapshot` marshals to jsonb via `pgtype.JSONB` or `json.Marshal` then bind as `[]byte`.
 - Every SELECT path that loads Message must project both columns. pgxscan handles `db:"quoted_snapshot"` tag for struct unmarshaling.
 
-### 4.6 Repository `SoftDelete` extension
+### 4.6 Repository `SoftDelete` cascade — new method preserving existing signature
+
+The existing `MessageRepository.SoftDelete(ctx, id) error` interface is unchanged for backward compatibility with non-cascading callers and the `queryable`-scoped transaction abstraction. Instead, the repository gains a NEW method `SoftDeleteWithCascade` that returns the cascade-affected messages so the SERVICE layer emits realtime events:
 
 ```go
-func (r *MessageRepo) SoftDelete(ctx context.Context, id uuid.UUID) error {
-    now := time.Now().UTC()
+// In domain/repository/interfaces.go (extend MessageRepository):
+type MessageRepository interface {
+    // ...existing methods including SoftDelete(ctx, id) error...
     
-    // Transaction: both UPDATEs atomically. Collect affected ids for event emission.
-    var affectedQuoteRows []uuid.UUID
-    err := r.db.BeginTx(ctx, pgx.TxOptions{}, func(tx pgx.Tx) error {
-        // Step 1: existing primary soft-delete + clear sensitive fields including forwarded_from
-        // AND newly: clear quoted_message_id + quoted_snapshot (pairing invariant preservation).
+    // SoftDeleteWithCascade marks the message deleted, clears its own quote fields
+    // (pairing preservation), and cascades quoted_snapshot.deleted=true to all
+    // messages that quoted it. Returns the IDs of cascade-affected rows so the
+    // caller can emit realtime events. Both UPDATEs run in one transaction.
+    SoftDeleteWithCascade(ctx context.Context, id uuid.UUID) (affectedQuoteRowIDs []uuid.UUID, err error)
+}
+
+// In repository/postgres/message.go:
+func (r *MessageRepo) SoftDeleteWithCascade(ctx context.Context, id uuid.UUID) ([]uuid.UUID, error) {
+    now := time.Now().UTC()
+    var affected []uuid.UUID
+
+    err := r.beginTx(ctx, func(tx queryable) error {
+        // Primary UPDATE — extends ALOQA-257 SoftDelete cleanup with quote fields
+        // (pairing preservation: BOTH quoted_message_id and quoted_snapshot go NULL).
         primary := `
             UPDATE messages
-            SET content = '',
-                edited = false,
-                edited_at = NULL,
-                pinned = false,
-                pinned_by = NULL,
-                pinned_at = NULL,
+            SET content = '', edited = false, edited_at = NULL,
+                pinned = false, pinned_by = NULL, pinned_at = NULL,
                 forwarded_from = NULL,
-                quoted_message_id = NULL,
-                quoted_snapshot = NULL,
-                updated_at = $2,
-                deleted_at = $2
+                quoted_message_id = NULL, quoted_snapshot = NULL,
+                updated_at = $2, deleted_at = $2
             WHERE id = $1 AND deleted_at IS NULL`
-        if tag, err := tx.Exec(ctx, primary, id, now); err != nil {
-            return fmt.Errorf("postgres: soft delete message: %w", err)
-        } else if tag.RowsAffected() == 0 {
-            return cerrors.NotFound("message not found")
-        }
+        tag, err := tx.Exec(ctx, primary, id, now)
+        if err != nil { return fmt.Errorf("postgres: soft delete: %w", err) }
+        if tag.RowsAffected() == 0 { return cerrors.NotFound("message not found") }
 
-        // Step 2: cascade UPDATE on every row that quoted this message.
         cascade := `
             UPDATE messages
             SET quoted_snapshot = jsonb_set(quoted_snapshot, '{deleted}', 'true'::jsonb),
@@ -263,35 +277,48 @@ func (r *MessageRepo) SoftDelete(ctx context.Context, id uuid.UUID) error {
             WHERE quoted_message_id = $1 AND deleted_at IS NULL
             RETURNING id`
         rows, err := tx.Query(ctx, cascade, id, now)
-        if err != nil {
-            return fmt.Errorf("postgres: cascade quote-deleted update: %w", err)
-        }
+        if err != nil { return fmt.Errorf("postgres: cascade quote-delete: %w", err) }
         defer rows.Close()
         for rows.Next() {
             var rowID uuid.UUID
-            if err := rows.Scan(&rowID); err != nil {
-                return err
-            }
-            affectedQuoteRows = append(affectedQuoteRows, rowID)
+            if err := rows.Scan(&rowID); err != nil { return err }
+            affected = append(affected, rowID)
         }
         return rows.Err()
     })
-    if err != nil {
-        return err
-    }
+    return affected, err
+}
+```
 
-    // After transaction commits, emit one message.updated event per affected row.
-    for _, rowID := range affectedQuoteRows {
-        msg, _ := r.GetByID(ctx, rowID) // best-effort re-fetch
-        if msg != nil {
-            r.eventBus.Publish(event.MessageUpdated, &event.MessagePayload{Message: msg})
+**Existing `SoftDelete(ctx, id) error` is also extended** with the OWN-row quote clearing (the primary UPDATE in the snippet above, minus the cascade) — preserves the pairing invariant for messages that themselves had a quote. Non-cascading callers continue to use the simple signature.
+
+**Service layer wires the cascade + event emission**:
+
+```go
+// In service/chat/service.go:
+func (s *Service) DeleteMessage(ctx context.Context, messageID, userID uuid.UUID) error {
+    msg, ch, err := s.requireMessageAccessWithCapability(ctx, messageID, userID, accesspolicy.CapabilityDelete)
+    if err != nil { return err }
+    _ = ch
+
+    affected, err := s.repo.SoftDeleteWithCascade(ctx, messageID)
+    if err != nil { return err }
+
+    // Existing MessageDeleted event for the deleted message itself
+    s.eventBus.Publish(event.MessageDeleted, &event.MessagePayload{Message: msg})
+
+    // New: one MessageUpdated event per cascade-affected row so receivers
+    // see the deleted-quote chip state without manual refresh.
+    for _, rowID := range affected {
+        if updated, _ := s.repo.GetByID(ctx, rowID); updated != nil {
+            s.eventBus.Publish(event.MessageUpdated, &event.MessagePayload{Message: updated})
         }
     }
     return nil
 }
 ```
 
-(`eventBus.Publish` placeholder — adapt to actual existing event-emission pattern in the repo; the pattern after ALOQA-257 should be visible via `git grep MessageUpdated`.)
+`eventBus.Publish` matches the existing pattern in the service file — `git grep eventBus.Publish` or `event.Bus` to verify exact API.
 
 ### 4.7 No event payload struct change
 
@@ -301,14 +328,17 @@ func (r *MessageRepo) SoftDelete(ctx context.Context, id uuid.UUID) error {
 
 ## 5. Validation and error responses
 
-| Condition | HTTP | Body |
-|---|---|---|
-| `quoted_message_id` set but `quoted_snapshot` null (or vice versa) | 400 | `{"error":"quoted_message_id and quoted_snapshot must be set together"}` |
-| `quoted_snapshot.content_excerpt` > 200 chars | 400 | `{"error":"quoted_snapshot.content_excerpt must be at most 200 characters"}` |
-| `quoted_message_id` not a valid UUID | 400 | (validator default) |
-| `quoted_snapshot.user_id`/`parent_message_id` not valid UUID | 400 | (validator default) |
-| Target channel send permission fails | 403 | (existing behaviour) |
-| Client sends `deleted: true` in POST body | 201 | Accepted; service ignores the field (constructs entity.QuotedSnapshot with `Deleted = nil`). |
+Existing error envelope shape: `{"error":{"code":"...","message":"..."}}` per `internal/api/helpers/*` (verify via `git grep cerrors.InvalidInput` or the existing handler error path). All error bodies use this shape, not bare `{"error":"..."}`.
+
+| Condition | HTTP | Code | Message |
+|---|---|---|---|
+| `quoted_message_id` set but `quoted_snapshot` null (or vice versa) | 400 | `INVALID_INPUT` | `quoted_message_id and quoted_snapshot must be set together` |
+| `quoted_snapshot.content_excerpt` > 200 codepoints | 400 | `INVALID_INPUT` | `quoted_snapshot.content_excerpt must be at most 200 characters` |
+| `quoted_message_id` not a valid UUID | 400 | `INVALID_INPUT` | (validator default — `quoted_message_id must be a valid UUID`) |
+| `quoted_snapshot.user_id` / `parent_message_id` not valid UUID | 400 | `INVALID_INPUT` | (validator default) |
+| `quoted_snapshot.created_at` not RFC3339 | 400 | `INVALID_INPUT` | (handler `time.Parse` error → wrapped as InvalidInput) |
+| Target channel send permission fails | 403 | (existing behaviour) | (unchanged) |
+| Client sends `quoted_snapshot.deleted: <any>` in POST body | 400 | `INVALID_INPUT` | `unknown field "deleted"` (rejected at `decodeJSON` because `QuotedSnapshotInput` omits the field AND `DisallowUnknownFields()` is enabled — strict decoding is the security boundary, NOT service-layer stripping). |
 
 ---
 
@@ -332,7 +362,7 @@ func (r *MessageRepo) SoftDelete(ctx context.Context, id uuid.UUID) error {
 | U4 | `SendMessage` with `QuotedSnapshot` set but `QuotedMessageID` nil | 400 same error. |
 | U5 | `SendMessage` with `QuotedSnapshot.ContentExcerpt` length 201 chars | 400 `content_excerpt must be at most 200 characters`. |
 | U6 | `SendMessage` with `QuotedSnapshot.ContentExcerpt` exactly 200 chars | 201; persisted with full excerpt. |
-| U7 | **Deleted-spoofing rejection**: POST handler receives `quoted_snapshot.deleted: true` field → service constructs `entity.QuotedSnapshot.Deleted = nil` regardless. Fetch → `Deleted == nil`. |
+| U7 | **Deleted-spoofing rejection at decode boundary**: POST handler receives `quoted_snapshot.deleted: true` → `decodeJSON` returns 400 `unknown field "deleted"` because `QuotedSnapshotInput` omits the field and `DisallowUnknownFields()` is enabled. No row inserted. (This is stricter than the spec's original "201 with ignore" — strict decoding is the security boundary, more defensive.) |
 | U8 | Multi-byte excerpt boundary: `strings.Repeat("я", 200)` → accepted (200 runes ≤ cap); 201 runes → rejected. |
 | U9 | SoftDelete on message that has its OWN quote: `quoted_message_id` AND `quoted_snapshot` NULLed (pairing preserved); content cleared. |
 | U10 | SoftDelete cascade: insert message A; insert messages B, C, D quoting A; SoftDelete A; fetch B/C/D → each has `QuotedSnapshot.Deleted == &true`; affected row count 3. |
@@ -345,7 +375,7 @@ func (r *MessageRepo) SoftDelete(ctx context.Context, id uuid.UUID) error {
 |---|---|---|
 | I1 | `POST` with both quote fields | 201; response echoes `quoted_message_id` + `quoted_snapshot` with `deleted` absent (nil). |
 | I2 | `POST` with partial state | 400. |
-| I3 | `POST` with `quoted_snapshot.deleted: true` (client lies) | 201; fetch → `Deleted == nil`. |
+| I3 | `POST` with `quoted_snapshot.deleted: true` (client lies) | 400 `unknown field "deleted"` rejected at decode (strict JSON decoding via `DisallowUnknownFields`). |
 | I4 | `GET /messages/{id}` after quote-reply send | Response includes both quote fields. |
 | I5 | Realtime `message.created` event after quote-reply send | Payload includes both quote fields. |
 | I6 | DELETE message; receive `message.updated` events on subscribed channel | Each affected row's payload shows `QuotedSnapshot.Deleted == &true`. |
@@ -365,9 +395,9 @@ func (r *MessageRepo) SoftDelete(ctx context.Context, id uuid.UUID) error {
 1. **Migration uses `IF NOT EXISTS`** on both column adds and index. Test M3.
 2. **`omitempty` on quote fields** on JSON response — absent when null. Test I1, U1.
 3. **Pairing invariant enforced server-side**: 400 on partial state. Test U3, U4, I2.
-4. **`Deleted` is BE-owned and POST-stripped**: client-supplied `deleted` is ignored; service constructs `entity.QuotedSnapshot` with `Deleted = nil`. Test U7, I3.
+4. **`Deleted` is BE-owned and POST-rejected-at-decode**: `QuotedSnapshotInput` has no `Deleted` field; existing `decodeJSON` with `DisallowUnknownFields()` returns 400 `unknown field "deleted"` before reaching service. Service additionally constructs `entity.QuotedSnapshot` with `Deleted = nil` defense-in-depth. Cascade SoftDelete is the SOLE writer of `Deleted = &true`. Test U7, I3.
 5. **No source-channel/message read check**: FE trusts snapshot per FE spec §12.18.
-6. **Content excerpt cap 200 chars (rune-counted)**: defensive cap via `utf8.RuneCountInString`. Test U5, U6, U8.
+6. **Content excerpt cap 200 codepoints**: BE defensive cap via `utf8.RuneCountInString` (codepoint count). FE must use `Array.from(s).length <= 200` (codepoint count, NOT `z.string().max(200)` which counts UTF-16 units). **Cross-stack codepoint parity** — flag in FE plan code-review. Test U5, U6, U8.
 7. **SoftDelete primary clears OWN quote fields** to preserve pairing (both NULL together). Test U9.
 8. **SoftDelete cascade UPDATE on `quoted_message_id = $deletedId`**: sets `quoted_snapshot.deleted = true` on all related rows. Atomic with primary. Test U10.
 9. **One `message.updated` event per affected row** in cascade. Test U11.
@@ -394,7 +424,7 @@ func (r *MessageRepo) SoftDelete(ctx context.Context, id uuid.UUID) error {
 | 1 | Legacy POST regression | `POST .../messages` body `{"content":"hi"}` | 201; response identical to pre-ALOQA-274. |
 | 2 | Happy path quote POST | `POST` body with both `quoted_message_id` + `quoted_snapshot` set | 201; response echoes both fields. |
 | 3 | Partial state rejected | `POST` body with only `quoted_message_id` | 400 `must be set together`. |
-| 4 | Deleted-spoofing rejected | `POST` body with `quoted_snapshot.deleted: true` | 201; fetch → `deleted` absent (nil). |
+| 4 | Deleted-spoofing rejected at decode | `POST` body with `quoted_snapshot.deleted: true` | 400 `unknown field "deleted"` from strict JSON decoder. No row created. |
 | 5 | Multi-byte excerpt boundary | `content_excerpt = strings.Repeat("я", 200)` | 201; 201-char rejected. |
 | 6 | Cascade delete | Insert A; insert B, C quoting A; DELETE A; fetch B, C via curl | Both show `quoted_snapshot.deleted: true`. |
 | 7 | Cascade realtime | Subscribe to WS; trigger #6 | Two `message.updated` events arrive. |

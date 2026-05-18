@@ -58,7 +58,7 @@ Commit: `feat(repo): persist + project messages quote fields + clear OWN quote f
        SoftDeleteWithCascade(ctx context.Context, id uuid.UUID) (affectedQuoteRowIDs []uuid.UUID, err error)
    }
    ```
-2. **Implement** in `internal/repository/postgres/message.go` per spec §4.6. Both primary UPDATE (with all field clears including quote fields) AND cascade UPDATE on `quoted_message_id = $deletedId` run inside the same `r.beginTx`. Returns affected row IDs via `RETURNING id` from the cascade UPDATE.
+2. **Implement** in `internal/repository/postgres/message.go` per spec §4.6. **The method does NOT open its own transaction** — it runs BOTH primary UPDATE and cascade UPDATE on the SAME `queryable` it was invoked from (which is the scoped tx-backed queryable from `TxManager.WithinTx` per the existing tx pattern in this repo — see `git grep TxManager.WithinTx` for usage). The service's `DeleteMessage` flow already wraps the whole call in a tx scope; SoftDeleteWithCascade just runs its two SQL statements on the scope's queryable so they share the outer tx for outbox atomicity. Returns affected row IDs via `RETURNING id` from the cascade UPDATE. Without this discipline, the cascade UPDATE would NOT be atomic with `enqueueEventTx` and could leak partial state if the outbox enqueue fails after the cascade succeeds.
 3. **Mocks**: update repo mocks (if any exist) to satisfy the extended interface — `git grep mocks.MessageRepository` to find.
 4. Tests `internal/repository/postgres/message_test.go` for the new method:
    - U9 (own-row pairing) — verifies SoftDelete (the old method) clears both quote fields.
@@ -110,7 +110,7 @@ Commit: `feat(chat): SendMessage accepts quote fields + DeleteMessage cascades m
 ### D1 — Integration + handler tests + decode-boundary regression
 
 1. Extend handler tests (`internal/handler/http/message_test.go` or sibling): I1-I6 per spec §7.
-2. **Decode-boundary regression**: POST body with `quoted_snapshot.deleted: true` → assert 400 `{"error":{"code":"INVALID_INPUT","message":"...unknown field..."}}`. Confirms `DisallowUnknownFields` is the security gate.
+2. **Decode-boundary regression**: POST body with `quoted_snapshot.deleted: true` → assert 400 with `{"error":{"code":"INVALID_INPUT"}}` envelope. The existing `decodeJSON` helper wraps all decoder errors as `cerrors.InvalidInput("invalid request body")` so the test asserts code only, NOT a specific "unknown field" message string. The 400 status confirms `DisallowUnknownFields` is rejecting the spoof attempt; the precise error message is not load-bearing. If we want stronger UX (specific "unknown field deleted" message), open a follow-up to enhance `decodeJSON` to unwrap `*json.SyntaxError` and `*json.UnmarshalTypeError` — out of scope for this PR.
 3. **Pairing 400 cases**: I2 + manual #3.
 4. **Multi-byte boundary**: U8 (200 runes pass, 201 fail).
 5. Realtime cascade I6 — simulate WS subscribe + DELETE → asserts `TypeMessageUpdated` events arrive per affected row.

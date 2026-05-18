@@ -70,6 +70,19 @@ type rsvpRequest struct {
 	Status entity.RsvpStatus `json:"status"`
 }
 
+type moveOccurrenceRequest struct {
+	InstanceAt         time.Time                           `json:"instance_at"`
+	Scope              calendarservice.MoveOccurrenceScope `json:"scope"`
+	NewScheduledAt     time.Time                           `json:"new_scheduled_at"`
+	NewDurationMinutes *int                                `json:"new_duration_minutes"`
+	ExpectedUpdatedAt  *time.Time                          `json:"expected_updated_at"`
+}
+
+type moveOccurrenceResponse struct {
+	Updated *entity.CalendarEvent `json:"updated"`
+	Created *entity.CalendarEvent `json:"created"`
+}
+
 func (h *CalendarHandler) ListCalendars(w http.ResponseWriter, r *http.Request) {
 	wsID := middleware.WorkspaceIDFromContext(r.Context())
 	userID := middleware.UserIDFromContext(r.Context())
@@ -288,6 +301,41 @@ func (h *CalendarHandler) StartCallFromEvent(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeOK(w, callEntity)
+}
+
+func (h *CalendarHandler) MoveOccurrence(w http.ResponseWriter, r *http.Request) {
+	eventID, err := id.Parse(chi.URLParam(r, "eventID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	var req moveOccurrenceRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if req.InstanceAt.IsZero() {
+		writeErr(w, cerrors.InvalidInput("instance_at is required"))
+		return
+	}
+	if req.NewScheduledAt.IsZero() {
+		writeErr(w, cerrors.InvalidInput("new_scheduled_at is required"))
+		return
+	}
+	wsID := middleware.WorkspaceIDFromContext(r.Context())
+	userID := middleware.UserIDFromContext(r.Context())
+	result, err := h.svc.MoveEventOccurrence(r.Context(), wsID, eventID, userID, calendarservice.MoveOccurrenceInput{
+		InstanceAt:         req.InstanceAt.UTC(),
+		Scope:              req.Scope,
+		NewScheduledAt:     req.NewScheduledAt.UTC(),
+		NewDurationMinutes: req.NewDurationMinutes,
+		ExpectedUpdatedAt:  req.ExpectedUpdatedAt,
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w, moveOccurrenceResponse{Updated: result.Updated, Created: result.Created})
 }
 
 func (h *CalendarHandler) ListUpcoming(w http.ResponseWriter, r *http.Request) {

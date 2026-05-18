@@ -105,10 +105,6 @@ type MoveOccurrenceResult struct {
 	Created *entity.CalendarEvent
 }
 
-type calendarEventTxUpdater interface {
-	UpdateEventTx(ctx context.Context, event *entity.CalendarEvent, expectedUpdatedAt *time.Time) (*entity.CalendarEvent, error)
-}
-
 func NewService(
 	calendars repository.CalendarRepository,
 	members repository.WorkspaceRepository,
@@ -447,11 +443,10 @@ func (s *Service) moveOccurrenceAll(ctx context.Context, existing *entity.Calend
 			return nil, cerrors.Unavailable("transaction manager not configured")
 		}
 		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
-			txCalendars, ok := scope.Calendars().(calendarEventTxUpdater)
-			if !ok || txCalendars == nil {
+			if scope.Calendars() == nil {
 				return cerrors.Unavailable("calendars repository not bound to tx")
 			}
-			u, err := txCalendars.UpdateEventTx(ctx, existing, input.ExpectedUpdatedAt)
+			u, err := scope.Calendars().UpdateEventTx(ctx, existing, input.ExpectedUpdatedAt)
 			if err != nil {
 				return err
 			}

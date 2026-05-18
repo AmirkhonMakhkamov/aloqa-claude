@@ -603,6 +603,19 @@ func (r *CalendarRepo) CreateEvent(ctx context.Context, event *entity.CalendarEv
 	return r.GetEvent(ctx, event.ID)
 }
 
+func (r *CalendarRepo) CreateEventTx(ctx context.Context, event *entity.CalendarEvent) (*entity.CalendarEvent, error) {
+	if err := r.insertEvent(ctx, event); err != nil {
+		return nil, err
+	}
+	if err := r.replaceAttendees(ctx, event.ID, event.Attendees); err != nil {
+		return nil, err
+	}
+	if err := r.replaceReminders(ctx, event.ID, event.Reminders); err != nil {
+		return nil, err
+	}
+	return r.GetEvent(ctx, event.ID)
+}
+
 func (r *CalendarRepo) UpdateEvent(ctx context.Context, event *entity.CalendarEvent) (*entity.CalendarEvent, error) {
 	if r.pool == nil {
 		return nil, cerrors.Unavailable("calendar repository transaction support is not configured")
@@ -614,17 +627,24 @@ func (r *CalendarRepo) UpdateEvent(ctx context.Context, event *entity.CalendarEv
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	txRepo := r.withTx(tx)
-	if err := txRepo.updateEventRow(ctx, event); err != nil {
-		return nil, err
-	}
-	if err := txRepo.replaceAttendees(ctx, event.ID, event.Attendees); err != nil {
-		return nil, err
-	}
-	if err := txRepo.replaceReminders(ctx, event.ID, event.Reminders); err != nil {
+	if _, err := txRepo.UpdateEventTx(ctx, event, nil); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("postgres: commit update calendar event tx: %w", err)
+	}
+	return r.GetEvent(ctx, event.ID)
+}
+
+func (r *CalendarRepo) UpdateEventTx(ctx context.Context, event *entity.CalendarEvent, expectedUpdatedAt *time.Time) (*entity.CalendarEvent, error) {
+	if err := r.updateEventRowTx(ctx, event, expectedUpdatedAt); err != nil {
+		return nil, err
+	}
+	if err := r.replaceAttendees(ctx, event.ID, event.Attendees); err != nil {
+		return nil, err
+	}
+	if err := r.replaceReminders(ctx, event.ID, event.Reminders); err != nil {
+		return nil, err
 	}
 	return r.GetEvent(ctx, event.ID)
 }
@@ -731,22 +751,38 @@ func (r *CalendarRepo) insertEvent(ctx context.Context, event *entity.CalendarEv
 }
 
 func (r *CalendarRepo) updateEventRow(ctx context.Context, event *entity.CalendarEvent) error {
+	return r.updateEventRowTx(ctx, event, nil)
+}
+
+func (r *CalendarRepo) updateEventRowTx(ctx context.Context, event *entity.CalendarEvent, expectedUpdatedAt *time.Time) error {
 	rrule, exdates := recurrenceColumns(event.Recurrence)
-	row := r.db.QueryRow(ctx, `
+	args := []any{
+		event.ID, event.CalendarID, event.ChannelID, event.Title, event.Description,
+		event.Location.Type, event.Location.Value, event.ScheduledAt,
+		originatorTZOrDefault(event.OriginatorTZ), event.DurationMinutes,
+		event.AllDay, rrule, exdates, event.CallID, event.WorkspaceID,
+	}
+	sql := `
 		UPDATE calendar_events
 		SET calendar_id = $2, channel_id = $3, title = $4, description = $5,
 		    location_type = $6, location_value = $7, scheduled_at = $8, originator_tz = $9, duration_minutes = $10,
-		    all_day = $11, recurrence_rrule = $12, recurrence_exdates = $13, call_id = $14
-		WHERE id = $1 AND workspace_id = $15
+		    all_day = $11, recurrence_rrule = $12, recurrence_exdates = $13, call_id = $14, updated_at = NOW()
+		WHERE id = $1 AND workspace_id = $15`
+	if expectedUpdatedAt != nil {
+		sql += ` AND updated_at = $16`
+		args = append(args, expectedUpdatedAt.UTC())
+	}
+	sql += `
 		RETURNING id, calendar_id, workspace_id, channel_id, organizer_id, title,
 		          description, location_type, location_value, scheduled_at, originator_tz, duration_minutes,
-		          all_day, recurrence_rrule, recurrence_exdates, call_id, created_at, updated_at`,
-		event.ID, event.CalendarID, event.ChannelID, event.Title, event.Description,
-		event.Location.Type, event.Location.Value, event.ScheduledAt, originatorTZOrDefault(event.OriginatorTZ), event.DurationMinutes,
-		event.AllDay, rrule, exdates, event.CallID, event.WorkspaceID)
+		          all_day, recurrence_rrule, recurrence_exdates, call_id, created_at, updated_at`
+	row := r.db.QueryRow(ctx, sql, args...)
 	updated, err := scanCalendarEvent(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			if expectedUpdatedAt != nil {
+				return cerrors.Conflict("CONCURRENT_UPDATE: event was modified concurrently")
+			}
 			return cerrors.NotFound("event not found")
 		}
 		return err

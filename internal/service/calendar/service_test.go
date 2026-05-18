@@ -844,6 +844,73 @@ func TestMoveEventOccurrence_DurationOutOfRange_BadRequest(t *testing.T) {
 	assertInvalidInput(t, err, "INVALID_DURATION")
 }
 
+func TestCreateEventTx_StoresEvent(t *testing.T) {
+	ctx := context.Background()
+	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{}}
+	eventID := uuid.New()
+	wsID := uuid.New()
+	now := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	ev := &entity.CalendarEvent{
+		ID: eventID, WorkspaceID: wsID,
+		Title: "T", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+		ScheduledAt: now, DurationMinutes: 30,
+	}
+	got, err := repo.CreateEventTx(ctx, ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != eventID {
+		t.Fatalf("ID=%v want=%v", got.ID, eventID)
+	}
+	if _, ok := repo.events[eventID]; !ok {
+		t.Fatal("event not stored")
+	}
+}
+
+func TestUpdateEventTx_UpdatesEvent(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	eventID := uuid.New()
+	wsID := uuid.New()
+	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+		eventID: {ID: eventID, WorkspaceID: wsID,
+			Title: "Old", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			ScheduledAt: now, DurationMinutes: 30, UpdatedAt: now},
+	}}
+	ev := &entity.CalendarEvent{
+		ID: eventID, WorkspaceID: wsID,
+		Title: "New", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+		ScheduledAt: now.Add(time.Hour), DurationMinutes: 45, UpdatedAt: now,
+	}
+	got, err := repo.UpdateEventTx(ctx, ev, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != "New" {
+		t.Fatalf("Title=%q want=New", got.Title)
+	}
+}
+
+func TestUpdateEventTx_OptimisticLock_Conflict(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	stale := now.Add(-time.Second)
+	eventID := uuid.New()
+	wsID := uuid.New()
+	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+		eventID: {ID: eventID, WorkspaceID: wsID,
+			Title: "X", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			ScheduledAt: now, DurationMinutes: 30, UpdatedAt: now},
+	}}
+	ev := &entity.CalendarEvent{
+		ID: eventID, WorkspaceID: wsID,
+		Title: "Y", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+		ScheduledAt: now, DurationMinutes: 30,
+	}
+	_, err := repo.UpdateEventTx(ctx, ev, &stale)
+	assertConflict(t, err, "CONCURRENT_UPDATE")
+}
+
 type fakeCalendarRepo struct {
 	mu                  sync.Mutex
 	calendars           []entity.UserCalendar

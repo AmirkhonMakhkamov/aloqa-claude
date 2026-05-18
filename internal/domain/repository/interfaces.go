@@ -251,6 +251,10 @@ type CalendarRepository interface {
 	LockEventForStartCall(ctx context.Context, eventID uuid.UUID) (*entity.CalendarEvent, error)
 	CreateEvent(ctx context.Context, event *entity.CalendarEvent) (*entity.CalendarEvent, error)
 	UpdateEvent(ctx context.Context, event *entity.CalendarEvent) (*entity.CalendarEvent, error)
+	// CreateEventTx inserts an event using the current connection. It must not open a nested transaction.
+	CreateEventTx(ctx context.Context, event *entity.CalendarEvent) (*entity.CalendarEvent, error)
+	// UpdateEventTx updates an event using the current connection. expectedUpdatedAt enables exact optimistic locking.
+	UpdateEventTx(ctx context.Context, event *entity.CalendarEvent, expectedUpdatedAt *time.Time) (*entity.CalendarEvent, error)
 	DeleteEvent(ctx context.Context, workspaceID, eventID uuid.UUID) error
 	SetEventCallIDIfUnset(ctx context.Context, eventID, callID uuid.UUID) (*entity.CalendarEvent, error)
 	LinkEventAndCall(ctx context.Context, eventID, callID uuid.UUID) error

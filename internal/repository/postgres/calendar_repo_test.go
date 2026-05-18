@@ -3,13 +3,16 @@ package postgres
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"aloqa/internal/domain/entity"
+	"aloqa/internal/pkg/cerrors"
 )
 
 type calendarRepoTestEnv struct {
@@ -150,6 +153,186 @@ func TestCalendarRepoUpdateEventCascadesDispatchOnReminderRemoval(t *testing.T) 
 	}
 	if count := countCalendarRepoTestDispatches(t, ctx, pool, r2ID); count != 0 {
 		t.Fatalf("r2 dispatch count = %d, want 0 after reminder delete cascade", count)
+	}
+}
+
+func TestCreateEventTx_InsertsEvent(t *testing.T) {
+	ctx, pool := setupCalendarRepoPostgresTest(t)
+	defer pool.Close()
+	env := setupCalendarTestEnv(t, ctx, pool)
+	repo := NewCalendarRepo(pool)
+
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	txRepo := repo.withTx(tx)
+
+	ev := newCalendarRepoTestEvent(env, "tx-create", nil)
+	inserted, err := txRepo.CreateEventTx(ctx, ev)
+	if err != nil {
+		t.Fatalf("CreateEventTx: %v", err)
+	}
+	if inserted.ID != ev.ID {
+		t.Fatalf("ID=%v want=%v", inserted.ID, ev.ID)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	fetched, err := repo.GetEvent(ctx, ev.ID)
+	if err != nil {
+		t.Fatalf("GetEvent after commit: %v", err)
+	}
+	if fetched.Title != "tx-create" {
+		t.Fatalf("Title=%q want=tx-create", fetched.Title)
+	}
+}
+
+func TestUpdateEventTx_NilExpected_UpdatesEvent(t *testing.T) {
+	ctx, pool := setupCalendarRepoPostgresTest(t)
+	defer pool.Close()
+	env := setupCalendarTestEnv(t, ctx, pool)
+	repo := NewCalendarRepo(pool)
+
+	seed := newCalendarRepoTestEvent(env, "seed", nil)
+	if _, err := repo.CreateEvent(ctx, seed); err != nil {
+		t.Fatalf("seed CreateEvent: %v", err)
+	}
+
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	txRepo := repo.withTx(tx)
+
+	seed.Title = "updated-nil"
+	seed.UpdatedAt = time.Now().UTC()
+	got, err := txRepo.UpdateEventTx(ctx, seed, nil)
+	if err != nil {
+		t.Fatalf("UpdateEventTx nil-expected: %v", err)
+	}
+	if got.Title != "updated-nil" {
+		t.Fatalf("Title=%q want=updated-nil", got.Title)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+}
+
+func TestUpdateEventTx_MatchingExpected_UpdatesEvent(t *testing.T) {
+	ctx, pool := setupCalendarRepoPostgresTest(t)
+	defer pool.Close()
+	env := setupCalendarTestEnv(t, ctx, pool)
+	repo := NewCalendarRepo(pool)
+
+	seed := newCalendarRepoTestEvent(env, "seed", nil)
+	inserted, err := repo.CreateEvent(ctx, seed)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	expected := inserted.UpdatedAt
+
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	txRepo := repo.withTx(tx)
+
+	inserted.Title = "matching-token"
+	inserted.UpdatedAt = time.Now().UTC()
+	got, err := txRepo.UpdateEventTx(ctx, inserted, &expected)
+	if err != nil {
+		t.Fatalf("UpdateEventTx matching-expected: %v", err)
+	}
+	if got.Title != "matching-token" {
+		t.Fatalf("Title=%q want=matching-token", got.Title)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+}
+
+func TestUpdateEventTx_StaleExpected_ReturnsConflict(t *testing.T) {
+	ctx, pool := setupCalendarRepoPostgresTest(t)
+	defer pool.Close()
+	env := setupCalendarTestEnv(t, ctx, pool)
+	repo := NewCalendarRepo(pool)
+
+	seed := newCalendarRepoTestEvent(env, "seed", nil)
+	inserted, err := repo.CreateEvent(ctx, seed)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	stale := inserted.UpdatedAt.Add(-time.Second)
+
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	txRepo := repo.withTx(tx)
+
+	inserted.Title = "should-fail"
+	inserted.UpdatedAt = time.Now().UTC()
+	_, err = txRepo.UpdateEventTx(ctx, inserted, &stale)
+	if err == nil {
+		t.Fatal("expected conflict error")
+	}
+	ae, ok := cerrors.AsAppError(err)
+	if !ok || ae.Code != cerrors.CodeConflict {
+		t.Fatalf("want Conflict, got %v", err)
+	}
+	if !strings.Contains(ae.Message, "CONCURRENT_UPDATE") {
+		t.Fatalf("message=%q missing CONCURRENT_UPDATE", ae.Message)
+	}
+}
+
+func TestUpdateEventTx_PropagatesOuterTx(t *testing.T) {
+	ctx, pool := setupCalendarRepoPostgresTest(t)
+	defer pool.Close()
+	env := setupCalendarTestEnv(t, ctx, pool)
+	repo := NewCalendarRepo(pool)
+
+	seed := newCalendarRepoTestEvent(env, "seed", nil)
+	inserted, err := repo.CreateEvent(ctx, seed)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	txRepo := repo.withTx(tx)
+
+	inserted.Title = "outer-tx-mutate"
+	inserted.UpdatedAt = time.Now().UTC()
+	if _, err := txRepo.UpdateEventTx(ctx, inserted, nil); err != nil {
+		t.Fatalf("UpdateEventTx: %v", err)
+	}
+
+	snapshot, err := repo.GetEvent(ctx, inserted.ID)
+	if err != nil {
+		t.Fatalf("GetEvent pre-commit: %v", err)
+	}
+	if snapshot.Title != "seed" {
+		t.Fatalf("pre-commit Title=%q want=seed (outer tx leaked)", snapshot.Title)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	after, err := repo.GetEvent(ctx, inserted.ID)
+	if err != nil {
+		t.Fatalf("GetEvent post-commit: %v", err)
+	}
+	if after.Title != "outer-tx-mutate" {
+		t.Fatalf("post-commit Title=%q want=outer-tx-mutate", after.Title)
 	}
 }
 

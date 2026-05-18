@@ -71,3 +71,42 @@ func TestSetUntil_Idempotent(t *testing.T) {
 		t.Fatalf("not idempotent: %q vs %q", first, second)
 	}
 }
+
+func TestNormalizeRule_ReturnsParsedRule(t *testing.T) {
+	got, err := NormalizeRule("FREQ=WEEKLY;BYDAY=MO;COUNT=5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "DTSTART") {
+		t.Fatalf("must not embed DTSTART: %q", got)
+	}
+	if !strings.HasPrefix(got, "FREQ=") {
+		t.Fatalf("unexpected: %q", got)
+	}
+}
+
+func TestNormalizeRule_ErrorOnMalformed(t *testing.T) {
+	if _, err := NormalizeRule("GARBAGE"); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestNormalizeRule_StableOnRepeatCalls(t *testing.T) {
+	rule := "FREQ=DAILY;INTERVAL=2;UNTIL=20260601T100000Z"
+	first, _ := NormalizeRule(rule)
+	second, _ := NormalizeRule(first)
+	if first != second {
+		t.Fatalf("%q vs %q", first, second)
+	}
+}
+
+func TestNormalizeRule_PreservesComponents(t *testing.T) {
+	rule := "FREQ=MONTHLY;BYDAY=-1MO;COUNT=3"
+	got, err := NormalizeRule(rule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "BYDAY=-1MO") || !strings.Contains(got, "COUNT=3") {
+		t.Fatalf("components lost: %q", got)
+	}
+}

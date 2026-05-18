@@ -250,6 +250,116 @@ func TestMessageForwardedFromMigrationUpDownIdempotent(t *testing.T) {
 	}
 }
 
+func TestMessageQuoteFieldsMigrationUpDownIdempotent(t *testing.T) {
+	ctx, pool := setupMessageRepoPostgresTest(t)
+	env := setupMessageRepoTestEnv(t, ctx, pool)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin migration test tx: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = tx.Rollback(context.Background())
+	})
+
+	up := readRepoRootFile(t, "migrations/036_messages_quote_fields.sql")
+	down := readRepoRootFile(t, "migrations/down/036_messages_quote_fields.down.sql")
+	if _, err := tx.Exec(ctx, down); err != nil {
+		t.Fatalf("reset migration down: %v", err)
+	}
+	if messageRepoColumnExists(ctx, t, tx, "quoted_message_id") {
+		t.Fatalf("quoted_message_id column exists before migration up")
+	}
+	if messageRepoColumnExists(ctx, t, tx, "quoted_snapshot") {
+		t.Fatalf("quoted_snapshot column exists before migration up")
+	}
+	if messageRepoIndexExists(ctx, t, tx, "idx_messages_quoted_message_id") {
+		t.Fatalf("quoted_message_id index exists before migration up")
+	}
+
+	existingMessageID := messageRepoTestUUID(30)
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO messages (id, channel_id, user_id, content, type, created_at, updated_at)
+		VALUES ($1, $2, $3, 'existing message', 'text', $4, $4)`,
+		existingMessageID,
+		env.channelID,
+		env.userID,
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("insert existing pre-migration message: %v", err)
+	}
+
+	if _, err := tx.Exec(ctx, up); err != nil {
+		t.Fatalf("apply migration up: %v", err)
+	}
+	if !messageRepoColumnExists(ctx, t, tx, "quoted_message_id") {
+		t.Fatalf("quoted_message_id column does not exist after up migration")
+	}
+	if !messageRepoColumnExists(ctx, t, tx, "quoted_snapshot") {
+		t.Fatalf("quoted_snapshot column does not exist after up migration")
+	}
+	if !messageRepoIndexExists(ctx, t, tx, "idx_messages_quoted_message_id") {
+		t.Fatalf("quoted_message_id index does not exist after up migration")
+	}
+	var (
+		content         string
+		messageType     entity.MessageType
+		quotedMessageID *uuid.UUID
+		quotedSnapshot  json.RawMessage
+	)
+	if err := tx.QueryRow(ctx, `
+		SELECT content, type, quoted_message_id, quoted_snapshot
+		FROM messages
+		WHERE id = $1`,
+		existingMessageID,
+	).Scan(&content, &messageType, &quotedMessageID, &quotedSnapshot); err != nil {
+		t.Fatalf("query existing message after migration up: %v", err)
+	}
+	if content != "existing message" || messageType != entity.MessageTypeText {
+		t.Fatalf("existing message after up = content %q type %q, want original values", content, messageType)
+	}
+	if quotedMessageID != nil {
+		t.Fatalf("quoted_message_id for existing row = %s, want NULL", *quotedMessageID)
+	}
+	if quotedSnapshot != nil {
+		t.Fatalf("quoted_snapshot for existing row = %s, want NULL", quotedSnapshot)
+	}
+	if _, err := tx.Exec(ctx, down); err != nil {
+		t.Fatalf("apply migration down: %v", err)
+	}
+	if messageRepoColumnExists(ctx, t, tx, "quoted_message_id") {
+		t.Fatalf("quoted_message_id column still exists after down migration")
+	}
+	if messageRepoColumnExists(ctx, t, tx, "quoted_snapshot") {
+		t.Fatalf("quoted_snapshot column still exists after down migration")
+	}
+	if messageRepoIndexExists(ctx, t, tx, "idx_messages_quoted_message_id") {
+		t.Fatalf("quoted_message_id index still exists after down migration")
+	}
+	if err := tx.QueryRow(ctx, `
+		SELECT content, type
+		FROM messages
+		WHERE id = $1`,
+		existingMessageID,
+	).Scan(&content, &messageType); err != nil {
+		t.Fatalf("query existing message after migration down: %v", err)
+	}
+	if content != "existing message" || messageType != entity.MessageTypeText {
+		t.Fatalf("existing message after down = content %q type %q, want original values", content, messageType)
+	}
+	if _, err := tx.Exec(ctx, up); err != nil {
+		t.Fatalf("reapply migration up: %v", err)
+	}
+	if _, err := tx.Exec(ctx, up); err != nil {
+		t.Fatalf("reapply migration up second time: %v", err)
+	}
+	if !messageRepoColumnExists(ctx, t, tx, "quoted_message_id") || !messageRepoColumnExists(ctx, t, tx, "quoted_snapshot") {
+		t.Fatalf("quote columns do not exist after idempotent up migration")
+	}
+	if !messageRepoIndexExists(ctx, t, tx, "idx_messages_quoted_message_id") {
+		t.Fatalf("quoted_message_id index does not exist after idempotent up migration")
+	}
+}
+
 func setupMessageRepoPostgresTest(t *testing.T) (context.Context, *pgxpool.Pool) {
 	t.Helper()
 
@@ -364,6 +474,22 @@ func messageRepoColumnExists(ctx context.Context, t *testing.T, q messageRepoCol
 				AND column_name = $1
 		)`, column).Scan(&exists); err != nil {
 		t.Fatalf("check column %s: %v", column, err)
+	}
+	return exists
+}
+
+func messageRepoIndexExists(ctx context.Context, t *testing.T, q messageRepoColumnQueryer, index string) bool {
+	t.Helper()
+	var exists bool
+	if err := q.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM pg_indexes
+			WHERE schemaname = 'public'
+				AND tablename = 'messages'
+				AND indexname = $1
+		)`, index).Scan(&exists); err != nil {
+		t.Fatalf("check index %s: %v", index, err)
 	}
 	return exists
 }

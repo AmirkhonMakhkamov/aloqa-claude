@@ -1253,6 +1253,7 @@ func (s *fakeCalendarTxScope) Messages() repository.MessageRepository           
 func (s *fakeCalendarTxScope) Channels() repository.ChannelRepository                 { return nil }
 func (s *fakeCalendarTxScope) ChannelGrants() repository.ChannelAccessGrantRepository { return nil }
 func (s *fakeCalendarTxScope) Calls() repository.CallRepository                       { return s.calls }
+func (s *fakeCalendarTxScope) CallMessages() repository.CallMessageRepository         { return nil }
 func (s *fakeCalendarTxScope) Calendars() repository.CalendarRepository               { return s.calendars }
 func (s *fakeCalendarTxScope) Recordings() repository.RecordingRepository             { return nil }
 func (s *fakeCalendarTxScope) Invites() repository.GuestInviteRepository              { return nil }

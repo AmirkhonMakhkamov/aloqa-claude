@@ -27,6 +27,7 @@ type TxManagerConfig struct {
 	Channels            *ChannelRepo
 	ChannelGrants       *ChannelAccessGrantRepo
 	Calls               *CallRepo
+	CallMessages        *CallMessageRepo
 	Calendars           *CalendarRepo
 	Recordings          *RecordingRepo
 	Invites             *GuestInviteRepo
@@ -46,6 +47,7 @@ type TxManager struct {
 	channels            *ChannelRepo
 	channelGrants       *ChannelAccessGrantRepo
 	calls               *CallRepo
+	callMessages        *CallMessageRepo
 	calendars           *CalendarRepo
 	recordings          *RecordingRepo
 	invites             *GuestInviteRepo
@@ -64,6 +66,7 @@ type txScope struct {
 	channels            repository.ChannelRepository
 	channelGrants       repository.ChannelAccessGrantRepository
 	calls               repository.CallRepository
+	callMessages        *CallMessageRepo
 	calendars           repository.CalendarRepository
 	recordings          repository.RecordingRepository
 	invites             repository.GuestInviteRepository
@@ -88,6 +91,7 @@ func NewTxManager(pool *pgxpool.Pool, cfg TxManagerConfig) *TxManager {
 		channels:            cfg.Channels,
 		channelGrants:       cfg.ChannelGrants,
 		calls:               cfg.Calls,
+		callMessages:        cfg.CallMessages,
 		calendars:           cfg.Calendars,
 		recordings:          cfg.Recordings,
 		invites:             cfg.Invites,
@@ -138,6 +142,9 @@ func (m *TxManager) WithinTx(ctx context.Context, fn func(ctx context.Context, s
 	if m.calls != nil {
 		scope.calls = m.calls.withTx(tx)
 	}
+	if m.callMessages != nil {
+		scope.callMessages = m.callMessages.withTx(tx)
+	}
 	if m.calendars != nil {
 		scope.calendars = m.calendars.withTx(tx)
 	}
@@ -180,6 +187,9 @@ func (s *txScope) ChannelGrants() repository.ChannelAccessGrantRepository {
 	return s.channelGrants
 }
 func (s *txScope) Calls() repository.CallRepository { return s.calls }
+func (s *txScope) CallMessages() repository.CallMessageRepository {
+	return s.callMessages
+}
 func (s *txScope) Calendars() repository.CalendarRepository {
 	return s.calendars
 }

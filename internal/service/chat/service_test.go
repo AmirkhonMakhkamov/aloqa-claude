@@ -883,6 +883,7 @@ func (s *fakeChatTxScope) Messages() repository.MessageRepository               
 func (s *fakeChatTxScope) Channels() repository.ChannelRepository                 { return s.channels }
 func (s *fakeChatTxScope) ChannelGrants() repository.ChannelAccessGrantRepository { return nil }
 func (s *fakeChatTxScope) Calls() repository.CallRepository                       { return nil }
+func (s *fakeChatTxScope) CallMessages() repository.CallMessageRepository         { return nil }
 func (s *fakeChatTxScope) Calendars() repository.CalendarRepository               { return nil }
 func (s *fakeChatTxScope) Recordings() repository.RecordingRepository             { return nil }
 func (s *fakeChatTxScope) Invites() repository.GuestInviteRepository              { return nil }

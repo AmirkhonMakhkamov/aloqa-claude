@@ -225,6 +225,13 @@ type CallRepository interface {
 	RemoveParticipant(ctx context.Context, callID, userID uuid.UUID) error
 }
 
+type CallMessageRepository interface {
+	Create(ctx context.Context, msg *entity.CallMessage) error
+	ListByCall(ctx context.Context, callID uuid.UUID, p pagination.Params) ([]entity.CallMessage, error)
+	SoftDelete(ctx context.Context, id, callID uuid.UUID) error
+	GetByID(ctx context.Context, id uuid.UUID) (*entity.CallMessage, error)
+}
+
 type CalendarRepository interface {
 	ListUserCalendars(ctx context.Context, workspaceID, ownerID uuid.UUID) ([]entity.UserCalendar, error)
 	GetUserCalendar(ctx context.Context, workspaceID, calendarID, ownerID uuid.UUID) (*entity.UserCalendar, error)

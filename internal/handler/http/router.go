@@ -288,6 +288,11 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 			r.Put("/participants/{userID}/role", deps.Calls.UpdateParticipantRole)
 			r.Put("/media", deps.Calls.UpdateMedia)
 			r.Put("/quality", deps.Calls.SetQuality)
+			r.Route("/messages", func(r chi.Router) {
+				r.Post("/", deps.Calls.SendCallMessage)
+				r.Get("/", deps.Calls.ListCallMessages)
+				r.Delete("/{messageID}", deps.Calls.DeleteCallMessage)
+			})
 			r.Route("/media-session", func(r chi.Router) {
 				r.Post("/token", deps.Calls.MediaToken)
 				r.Post("/offer", deps.Calls.MediaOffer)

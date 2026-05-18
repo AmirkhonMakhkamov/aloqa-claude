@@ -54,7 +54,7 @@ func (s *Service) SendCallMessage(ctx context.Context, workspaceID, callID, send
 		ID:        id.New(),
 		CallID:    callID,
 		SenderID:  senderID,
-		Body:      strings.TrimSpace(body),
+		Body:      body,
 		CreatedAt: time.Now().UTC(),
 	}
 
@@ -151,15 +151,15 @@ func (s *Service) DeleteCallMessage(ctx context.Context, workspaceID, callID, re
 }
 
 func validateCallMessageBody(body string) error {
+	if !utf8.ValidString(body) {
+		return cerrors.InvalidInput("body must be valid UTF-8")
+	}
 	trimmed := strings.TrimSpace(body)
 	if trimmed == "" {
 		return cerrors.InvalidInput("body is required")
 	}
-	if len(trimmed) > callMessageMaxBody {
+	if utf8.RuneCountInString(trimmed) > callMessageMaxBody {
 		return cerrors.InvalidInput("body too long")
-	}
-	if !utf8.ValidString(body) {
-		return cerrors.InvalidInput("body must be valid UTF-8")
 	}
 	return nil
 }

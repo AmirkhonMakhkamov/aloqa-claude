@@ -29,10 +29,10 @@ func TestSendCallMessageCreatesMessageAndEnqueuesEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SendCallMessage returned error: %v", err)
 	}
-	if msg.Body != "hello call" {
-		t.Fatalf("message body = %q, want trimmed body", msg.Body)
+	if msg.Body != "  hello call  " {
+		t.Fatalf("message body = %q, want verbatim body", msg.Body)
 	}
-	if stored := f.messages.messages[msg.ID]; stored == nil || stored.Body != "hello call" {
+	if stored := f.messages.messages[msg.ID]; stored == nil || stored.Body != "  hello call  " {
 		t.Fatalf("stored message = %+v, want created message", stored)
 	}
 	if tx.calls != 1 {

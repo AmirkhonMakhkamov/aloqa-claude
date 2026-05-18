@@ -1282,7 +1282,7 @@ func (s *Service) enqueueRealtimeTx(ctx context.Context, scope txscope.Scope, ev
 	if scope == nil {
 		return cerrors.Unavailable("transaction scope is not configured")
 	}
-	evt, body, _, err := event.Prepare(subject, event.Event{
+	evt, body, durable, err := event.Prepare(subject, event.Event{
 		Type:        evtType,
 		WorkspaceID: workspaceID,
 		ChannelID:   channelID,
@@ -1292,6 +1292,11 @@ func (s *Service) enqueueRealtimeTx(ctx context.Context, scope txscope.Scope, ev
 	})
 	if err != nil {
 		return err
+	}
+	if !durable {
+		slog.WarnContext(ctx, "enqueueRealtimeTx invoked for non-durable event; skipping outbox enqueue",
+			"type", evtType, "subject", subject)
+		return nil
 	}
 	return scope.EnqueueRealtime(ctx, evt, body)
 }

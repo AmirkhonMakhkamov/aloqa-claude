@@ -32,8 +32,8 @@ func TestCallMessagePostCreated(t *testing.T) {
 	if err := json.Unmarshal(res.Body.Bytes(), &msg); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if msg.Body != "hello" || msg.CallID != f.callID || msg.SenderID != f.userID {
-		t.Fatalf("message = %+v, want created call message", msg)
+	if msg.Body != " hello " || msg.CallID != f.callID || msg.SenderID != f.userID {
+		t.Fatalf("message = %+v, want verbatim body", msg)
 	}
 }
 

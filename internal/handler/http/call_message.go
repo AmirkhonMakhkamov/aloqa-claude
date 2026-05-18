@@ -3,7 +3,6 @@ package http
 import (
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -30,7 +29,6 @@ func (h *CallHandler) SendCallMessage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	req.Body = strings.TrimSpace(req.Body)
 
 	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
 	userID := middleware.UserIDFromContext(r.Context())

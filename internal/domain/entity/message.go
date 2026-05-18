@@ -1,6 +1,7 @@
 package entity
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -26,9 +27,11 @@ type Message struct {
 	Pinned    bool        `json:"pinned"`
 	PinnedBy  *uuid.UUID  `json:"pinned_by,omitempty"`
 	PinnedAt  *time.Time  `json:"pinned_at,omitempty"`
-	CreatedAt time.Time   `json:"created_at"`
-	UpdatedAt time.Time   `json:"updated_at"`
-	DeletedAt *time.Time  `json:"deleted_at,omitempty"`
+	// JSON-typed forwarded-from envelope. Persisted verbatim; the FE owns the schema.
+	ForwardedFrom json.RawMessage `json:"forwarded_from,omitempty" db:"forwarded_from"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
+	DeletedAt     *time.Time      `json:"deleted_at,omitempty"`
 
 	// Aggregated fields (populated by queries, not stored directly).
 	ReplyCount  int          `json:"reply_count,omitempty"`

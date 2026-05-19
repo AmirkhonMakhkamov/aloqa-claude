@@ -450,9 +450,16 @@ func (r *fakeMessageRepo) ListPinned(context.Context, uuid.UUID) ([]entity.Messa
 	return nil, nil
 }
 func (r *fakeMessageRepo) AddReaction(context.Context, *entity.Reaction) error { return nil }
+func (r *fakeMessageRepo) GetReactionByID(context.Context, uuid.UUID) (*entity.Reaction, error) {
+	return nil, cerrors.NotFound("reaction not found")
+}
+func (r *fakeMessageRepo) GetReactionByMessageUserEmoji(context.Context, uuid.UUID, uuid.UUID, string) (*entity.Reaction, error) {
+	return nil, cerrors.NotFound("reaction not found")
+}
 func (r *fakeMessageRepo) RemoveReaction(context.Context, uuid.UUID, uuid.UUID, string) error {
 	return nil
 }
+func (r *fakeMessageRepo) RemoveReactionByID(context.Context, uuid.UUID) error { return nil }
 func (r *fakeMessageRepo) ListReactions(context.Context, uuid.UUID) ([]entity.Reaction, error) {
 	return nil, nil
 }

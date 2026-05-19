@@ -98,7 +98,10 @@ type MessageRepository interface {
 	ListPinned(ctx context.Context, channelID uuid.UUID) ([]entity.Message, error)
 
 	AddReaction(ctx context.Context, r *entity.Reaction) error
+	GetReactionByID(ctx context.Context, id uuid.UUID) (*entity.Reaction, error)
+	GetReactionByMessageUserEmoji(ctx context.Context, messageID, userID uuid.UUID, emoji string) (*entity.Reaction, error)
 	RemoveReaction(ctx context.Context, messageID, userID uuid.UUID, emoji string) error
+	RemoveReactionByID(ctx context.Context, id uuid.UUID) error
 	ListReactions(ctx context.Context, messageID uuid.UUID) ([]entity.Reaction, error)
 
 	CreateAttachment(ctx context.Context, a *entity.Attachment) error

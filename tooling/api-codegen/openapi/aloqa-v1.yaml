@@ -537,6 +537,19 @@ paths:
       responses:
         '204': { description: Removed }
 
+  /api/v1/reactions/{reactionID}:
+    parameters:
+      - $ref: '#/components/parameters/ReactionID'
+    delete:
+      summary: Remove the caller's reaction by reaction ID
+      tags: [reactions]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Removed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   # -- Attachments ----------------------------------------------------------
   /api/v1/workspaces/{workspaceID}/channels/{channelID}/messages/{messageID}/attachments:
     parameters:
@@ -1097,6 +1110,11 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    ReactionID:
+      name: reactionID
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
     CallID:
       name: callID
       in: path
@@ -1270,6 +1288,10 @@ components:
         created_at: { $ref: '#/components/schemas/IsoDatetime' }
         updated_at: { $ref: '#/components/schemas/IsoDatetime' }
         deleted_at: { $ref: '#/components/schemas/IsoDatetime', nullable: true }
+        forwarded_from:
+          allOf:
+            - $ref: '#/components/schemas/ForwardedFromMeta'
+          nullable: true
         reply_count: { type: integer, nullable: true }
         reactions:
           type: array
@@ -1288,11 +1310,38 @@ components:
       type: object
       required: [content]
       properties:
-        content: { type: string, minLength: 1 }
+        content:
+          type: string
+          description: Empty string is allowed when `forwarded_from` is present.
         type:
           type: string
           enum: [text, file]
         parent_id: { $ref: '#/components/schemas/UUID' }
+        forwarded_from:
+          allOf:
+            - $ref: '#/components/schemas/ForwardedFromMeta'
+          nullable: true
+
+    ForwardedFromMeta:
+      type: object
+      required: [user_id, message_id, channel_id, created_at, snapshot]
+      properties:
+        user_id: { $ref: '#/components/schemas/UUID' }
+        message_id: { $ref: '#/components/schemas/UUID' }
+        channel_id: { $ref: '#/components/schemas/UUID' }
+        created_at: { $ref: '#/components/schemas/IsoDatetime' }
+        snapshot:
+          $ref: '#/components/schemas/ForwardedSnapshot'
+
+    ForwardedSnapshot:
+      type: object
+      required: [content]
+      properties:
+        content: { type: string }
+        attachments:
+          type: array
+          nullable: true
+          items: { $ref: '#/components/schemas/Attachment' }
 
     EditMessageRequest:
       type: object

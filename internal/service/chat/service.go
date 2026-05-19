@@ -1042,14 +1042,14 @@ func validateEmoji(emoji string) error {
 }
 
 // AddReaction adds an emoji reaction to a message.
-func (s *Service) AddReaction(ctx context.Context, messageID, userID uuid.UUID, emoji string) error {
+func (s *Service) AddReaction(ctx context.Context, messageID, userID uuid.UUID, emoji string) (*entity.Reaction, error) {
 	if err := validateEmoji(emoji); err != nil {
-		return err
+		return nil, err
 	}
 
 	msg, ch, err := s.requireMessageAccessWithCapability(ctx, messageID, userID, accesspolicy.CapabilityParticipate)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	reaction := &entity.Reaction{
@@ -1061,38 +1061,79 @@ func (s *Service) AddReaction(ctx context.Context, messageID, userID uuid.UUID, 
 	}
 
 	if err := s.messages.AddReaction(ctx, reaction); err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok {
+			return nil, appErr
+		}
 		slog.ErrorContext(ctx, "failed to add reaction", "message_id", messageID, "emoji", emoji, "error", err)
-		return cerrors.Internal("failed to add reaction", err)
+		return nil, cerrors.Internal("failed to add reaction", err)
 	}
 
-	s.publishEvent(ctx, event.TypeReactionAdded, ch.WorkspaceID, msg.ChannelID, userID, event.ReactionPayload{
-		MessageID: messageID,
-		ChannelID: msg.ChannelID,
-		UserID:    userID,
-		Emoji:     emoji,
-	})
+	s.publishEvent(ctx, event.TypeReactionAdded, ch.WorkspaceID, msg.ChannelID, userID, reaction)
 
-	return nil
+	return reaction, nil
 }
 
 // RemoveReaction removes an emoji reaction from a message.
 func (s *Service) RemoveReaction(ctx context.Context, messageID, userID uuid.UUID, emoji string) error {
+	if err := validateEmoji(emoji); err != nil {
+		return err
+	}
+
 	msg, ch, err := s.requireMessageAccessWithCapability(ctx, messageID, userID, accesspolicy.CapabilityParticipate)
 	if err != nil {
 		return err
 	}
 
+	reaction, err := s.messages.GetReactionByMessageUserEmoji(ctx, messageID, userID, emoji)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok {
+			return appErr
+		}
+		slog.ErrorContext(ctx, "failed to get reaction", "message_id", messageID, "emoji", emoji, "error", err)
+		return cerrors.Internal("failed to get reaction", err)
+	}
+
 	if err := s.messages.RemoveReaction(ctx, messageID, userID, emoji); err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok {
+			return appErr
+		}
 		slog.ErrorContext(ctx, "failed to remove reaction", "message_id", messageID, "emoji", emoji, "error", err)
 		return cerrors.Internal("failed to remove reaction", err)
 	}
 
-	s.publishEvent(ctx, event.TypeReactionRemoved, ch.WorkspaceID, msg.ChannelID, userID, event.ReactionPayload{
-		MessageID: messageID,
-		ChannelID: msg.ChannelID,
-		UserID:    userID,
-		Emoji:     emoji,
-	})
+	s.publishEvent(ctx, event.TypeReactionRemoved, ch.WorkspaceID, msg.ChannelID, userID, reaction)
+
+	return nil
+}
+
+// RemoveReactionByID removes the caller's reaction by its stable reaction ID.
+func (s *Service) RemoveReactionByID(ctx context.Context, reactionID, userID uuid.UUID) error {
+	reaction, err := s.messages.GetReactionByID(ctx, reactionID)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok {
+			return appErr
+		}
+		slog.ErrorContext(ctx, "failed to get reaction", "reaction_id", reactionID, "error", err)
+		return cerrors.Internal("failed to get reaction", err)
+	}
+
+	msg, ch, err := s.requireMessageAccessWithCapability(ctx, reaction.MessageID, userID, accesspolicy.CapabilityParticipate)
+	if err != nil {
+		return err
+	}
+	if reaction.UserID != userID {
+		return cerrors.Forbidden("cannot remove another user's reaction")
+	}
+
+	if err := s.messages.RemoveReactionByID(ctx, reactionID); err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok {
+			return appErr
+		}
+		slog.ErrorContext(ctx, "failed to remove reaction", "reaction_id", reactionID, "error", err)
+		return cerrors.Internal("failed to remove reaction", err)
+	}
+
+	s.publishEvent(ctx, event.TypeReactionRemoved, ch.WorkspaceID, msg.ChannelID, userID, reaction)
 
 	return nil
 }

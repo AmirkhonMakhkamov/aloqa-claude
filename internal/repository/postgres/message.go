@@ -578,6 +578,52 @@ func (r *MessageRepo) AddReaction(ctx context.Context, reaction *entity.Reaction
 	return nil
 }
 
+func (r *MessageRepo) GetReactionByID(ctx context.Context, id uuid.UUID) (*entity.Reaction, error) {
+	query := `
+		SELECT id, message_id, user_id, emoji, created_at
+		FROM reactions
+		WHERE id = $1`
+
+	var reaction entity.Reaction
+	if err := r.db.QueryRow(ctx, query, id).Scan(
+		&reaction.ID,
+		&reaction.MessageID,
+		&reaction.UserID,
+		&reaction.Emoji,
+		&reaction.CreatedAt,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, cerrors.NotFound("reaction not found")
+		}
+		return nil, fmt.Errorf("postgres: get reaction by id: %w", err)
+	}
+
+	return &reaction, nil
+}
+
+func (r *MessageRepo) GetReactionByMessageUserEmoji(ctx context.Context, messageID, userID uuid.UUID, emoji string) (*entity.Reaction, error) {
+	query := `
+		SELECT id, message_id, user_id, emoji, created_at
+		FROM reactions
+		WHERE message_id = $1 AND user_id = $2 AND emoji = $3`
+
+	var reaction entity.Reaction
+	if err := r.db.QueryRow(ctx, query, messageID, userID, emoji).Scan(
+		&reaction.ID,
+		&reaction.MessageID,
+		&reaction.UserID,
+		&reaction.Emoji,
+		&reaction.CreatedAt,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, cerrors.NotFound("reaction not found")
+		}
+		return nil, fmt.Errorf("postgres: get reaction by message user emoji: %w", err)
+	}
+
+	return &reaction, nil
+}
+
 func (r *MessageRepo) RemoveReaction(ctx context.Context, messageID, userID uuid.UUID, emoji string) error {
 	query := `
 		DELETE FROM reactions
@@ -586,6 +632,22 @@ func (r *MessageRepo) RemoveReaction(ctx context.Context, messageID, userID uuid
 	tag, err := r.db.Exec(ctx, query, messageID, userID, emoji)
 	if err != nil {
 		return fmt.Errorf("postgres: remove reaction: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return cerrors.NotFound("reaction not found")
+	}
+
+	return nil
+}
+
+func (r *MessageRepo) RemoveReactionByID(ctx context.Context, id uuid.UUID) error {
+	query := `
+		DELETE FROM reactions
+		WHERE id = $1`
+
+	tag, err := r.db.Exec(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("postgres: remove reaction by id: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return cerrors.NotFound("reaction not found")

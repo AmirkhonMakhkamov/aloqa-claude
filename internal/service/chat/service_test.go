@@ -560,7 +560,7 @@ func TestGuestCanReactWithSharedAccessPolicy(t *testing.T) {
 	svc := NewService(channels, messages, workspaces, nil, noopPublisher{}, guests, nil, nil, nil)
 	svc.SetAccessPolicy(accesspolicy.NewChecker(workspaces, channels, guests, nil))
 
-	if err := svc.AddReaction(ctx, messageID, guestID, ":+1:"); err != nil {
+	if _, err := svc.AddReaction(ctx, messageID, guestID, ":+1:"); err != nil {
 		t.Fatalf("AddReaction guest returned error: %v", err)
 	}
 	if err := svc.RemoveReaction(ctx, messageID, guestID, ":+1:"); err != nil {
@@ -1123,7 +1123,8 @@ func (r *fakeChannelRepo) GetDMChannel(context.Context, uuid.UUID, uuid.UUID, uu
 }
 
 type fakeMessageRepo struct {
-	messages map[uuid.UUID]*entity.Message
+	messages  map[uuid.UUID]*entity.Message
+	reactions map[uuid.UUID]entity.Reaction
 }
 
 func (r *fakeMessageRepo) Create(_ context.Context, msg *entity.Message) error {
@@ -1203,8 +1204,46 @@ func (r *fakeMessageRepo) SoftDeleteWithCascade(ctx context.Context, id uuid.UUI
 func (r *fakeMessageRepo) ListPinned(context.Context, uuid.UUID) ([]entity.Message, error) {
 	return nil, nil
 }
-func (r *fakeMessageRepo) AddReaction(context.Context, *entity.Reaction) error { return nil }
-func (r *fakeMessageRepo) RemoveReaction(context.Context, uuid.UUID, uuid.UUID, string) error {
+func (r *fakeMessageRepo) AddReaction(_ context.Context, reaction *entity.Reaction) error {
+	if r.reactions == nil {
+		r.reactions = map[uuid.UUID]entity.Reaction{}
+	}
+	for _, existing := range r.reactions {
+		if existing.MessageID == reaction.MessageID && existing.UserID == reaction.UserID && existing.Emoji == reaction.Emoji {
+			return cerrors.AlreadyExists("reaction already exists")
+		}
+	}
+	r.reactions[reaction.ID] = *reaction
+	return nil
+}
+func (r *fakeMessageRepo) GetReactionByID(_ context.Context, id uuid.UUID) (*entity.Reaction, error) {
+	if reaction, ok := r.reactions[id]; ok {
+		return &reaction, nil
+	}
+	return nil, cerrors.NotFound("reaction not found")
+}
+func (r *fakeMessageRepo) GetReactionByMessageUserEmoji(_ context.Context, messageID, userID uuid.UUID, emoji string) (*entity.Reaction, error) {
+	for _, reaction := range r.reactions {
+		if reaction.MessageID == messageID && reaction.UserID == userID && reaction.Emoji == emoji {
+			return &reaction, nil
+		}
+	}
+	return nil, cerrors.NotFound("reaction not found")
+}
+func (r *fakeMessageRepo) RemoveReaction(_ context.Context, messageID, userID uuid.UUID, emoji string) error {
+	for id, reaction := range r.reactions {
+		if reaction.MessageID == messageID && reaction.UserID == userID && reaction.Emoji == emoji {
+			delete(r.reactions, id)
+			return nil
+		}
+	}
+	return cerrors.NotFound("reaction not found")
+}
+func (r *fakeMessageRepo) RemoveReactionByID(_ context.Context, id uuid.UUID) error {
+	if _, ok := r.reactions[id]; !ok {
+		return cerrors.NotFound("reaction not found")
+	}
+	delete(r.reactions, id)
 	return nil
 }
 func (r *fakeMessageRepo) ListReactions(context.Context, uuid.UUID) ([]entity.Reaction, error) {

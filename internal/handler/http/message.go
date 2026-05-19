@@ -259,12 +259,13 @@ func (h *MessageHandler) AddReaction(w http.ResponseWriter, r *http.Request) {
 
 	userID := middleware.UserIDFromContext(r.Context())
 
-	if err := h.svc.AddReaction(r.Context(), messageID, userID, req.Emoji); err != nil {
+	reaction, err := h.svc.AddReaction(r.Context(), messageID, userID, req.Emoji)
+	if err != nil {
 		writeErr(w, err)
 		return
 	}
 
-	writeNoContent(w)
+	writeCreated(w, reaction)
 }
 
 func (h *MessageHandler) RemoveReaction(w http.ResponseWriter, r *http.Request) {
@@ -278,6 +279,23 @@ func (h *MessageHandler) RemoveReaction(w http.ResponseWriter, r *http.Request) 
 	userID := middleware.UserIDFromContext(r.Context())
 
 	if err := h.svc.RemoveReaction(r.Context(), messageID, userID, emoji); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
+func (h *MessageHandler) RemoveReactionByID(w http.ResponseWriter, r *http.Request) {
+	reactionID, err := id.Parse(chi.URLParam(r, "reactionID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+
+	if err := h.svc.RemoveReactionByID(r.Context(), reactionID, userID); err != nil {
 		writeErr(w, err)
 		return
 	}

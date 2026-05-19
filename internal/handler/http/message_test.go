@@ -137,6 +137,96 @@ func TestMessageCreatedEventIncludesForwardedFrom(t *testing.T) {
 	}
 }
 
+func TestMessageAddReactionReturnsReactionAndPublishesSchema(t *testing.T) {
+	f := newMessageHTTPFixture()
+	msg := &entity.Message{
+		ID:        uuid.New(),
+		ChannelID: f.channelID,
+		UserID:    f.userID,
+		Content:   "hello",
+		Type:      entity.MessageTypeText,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	f.messages.messages[msg.ID] = msg
+
+	res := f.serve(http.MethodPost, "/channels/"+f.channelID.String()+"/messages/"+msg.ID.String()+"/reactions", `{"emoji":"👍"}`)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", res.Code, res.Body.String())
+	}
+
+	var reaction entity.Reaction
+	if err := json.Unmarshal(res.Body.Bytes(), &reaction); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if reaction.ID == uuid.Nil || reaction.MessageID != msg.ID || reaction.UserID != f.userID || reaction.Emoji != "👍" || reaction.CreatedAt.IsZero() {
+		t.Fatalf("reaction = %+v, want full reaction object", reaction)
+	}
+
+	if len(f.publisher.events) != 1 {
+		t.Fatalf("published events = %d, want reaction.added", len(f.publisher.events))
+	}
+	var envelope struct {
+		Type    eventpkg.Type   `json:"type"`
+		Payload entity.Reaction `json:"payload"`
+	}
+	if err := json.Unmarshal(f.publisher.events[0], &envelope); err != nil {
+		t.Fatalf("decode event: %v", err)
+	}
+	if envelope.Type != eventpkg.TypeReactionAdded {
+		t.Fatalf("event type = %s, want %s", envelope.Type, eventpkg.TypeReactionAdded)
+	}
+	if envelope.Payload.ID != reaction.ID || envelope.Payload.CreatedAt.IsZero() {
+		t.Fatalf("event payload = %+v, want full reaction", envelope.Payload)
+	}
+}
+
+func TestMessageRemoveReactionByID(t *testing.T) {
+	f := newMessageHTTPFixture()
+	msg := &entity.Message{
+		ID:        uuid.New(),
+		ChannelID: f.channelID,
+		UserID:    f.userID,
+		Content:   "hello",
+		Type:      entity.MessageTypeText,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	reaction := entity.Reaction{
+		ID:        uuid.New(),
+		MessageID: msg.ID,
+		UserID:    f.userID,
+		Emoji:     "👍",
+		CreatedAt: time.Now().UTC(),
+	}
+	f.messages.messages[msg.ID] = msg
+	f.messages.reactions[reaction.ID] = reaction
+
+	res := f.serve(http.MethodDelete, "/reactions/"+reaction.ID.String(), "")
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", res.Code, res.Body.String())
+	}
+	if _, ok := f.messages.reactions[reaction.ID]; ok {
+		t.Fatalf("reaction %s still exists after delete", reaction.ID)
+	}
+	if len(f.publisher.events) != 1 {
+		t.Fatalf("published events = %d, want reaction.removed", len(f.publisher.events))
+	}
+	var envelope struct {
+		Type    eventpkg.Type   `json:"type"`
+		Payload entity.Reaction `json:"payload"`
+	}
+	if err := json.Unmarshal(f.publisher.events[0], &envelope); err != nil {
+		t.Fatalf("decode event: %v", err)
+	}
+	if envelope.Type != eventpkg.TypeReactionRemoved {
+		t.Fatalf("event type = %s, want %s", envelope.Type, eventpkg.TypeReactionRemoved)
+	}
+	if envelope.Payload.ID != reaction.ID || envelope.Payload.CreatedAt.IsZero() {
+		t.Fatalf("event payload = %+v, want deleted reaction", envelope.Payload)
+	}
+}
+
 func TestMessagePostQuoteFieldsCases(t *testing.T) {
 	t.Run("quote fields echo and omit deleted", func(t *testing.T) {
 		f := newMessageHTTPFixture()
@@ -359,7 +449,10 @@ func newMessageHTTPFixture() messageHTTPFixture {
 	workspaces := &fakeHTTPWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
 		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
 	}}
-	messages := &messageHTTPMessageRepo{messages: map[uuid.UUID]*entity.Message{}}
+	messages := &messageHTTPMessageRepo{
+		messages:  map[uuid.UUID]*entity.Message{},
+		reactions: map[uuid.UUID]entity.Reaction{},
+	}
 	publisher := &messageHTTPPublisher{}
 	svc := chatsvc.NewService(channels, messages, workspaces, nil, publisher, nil, nil, nil, nil)
 	handler := NewMessageHandler(svc)
@@ -373,8 +466,10 @@ func newMessageHTTPFixture() messageHTTPFixture {
 		})
 	})
 	router.Post("/channels/{channelID}/messages", handler.Send)
+	router.Post("/channels/{channelID}/messages/{messageID}/reactions", handler.AddReaction)
 	router.Get("/messages/{messageID}", handler.Get)
 	router.Delete("/messages/{messageID}", handler.Delete)
+	router.Delete("/reactions/{reactionID}", handler.RemoveReactionByID)
 
 	return messageHTTPFixture{
 		workspaceID: workspaceID,
@@ -446,7 +541,8 @@ func (r *messageHTTPChannelRepo) GetDMChannel(context.Context, uuid.UUID, uuid.U
 }
 
 type messageHTTPMessageRepo struct {
-	messages map[uuid.UUID]*entity.Message
+	messages  map[uuid.UUID]*entity.Message
+	reactions map[uuid.UUID]entity.Reaction
 }
 
 func (r *messageHTTPMessageRepo) Create(_ context.Context, msg *entity.Message) error {
@@ -522,8 +618,46 @@ func (r *messageHTTPMessageRepo) Unpin(context.Context, uuid.UUID) error { retur
 func (r *messageHTTPMessageRepo) ListPinned(context.Context, uuid.UUID) ([]entity.Message, error) {
 	return nil, nil
 }
-func (r *messageHTTPMessageRepo) AddReaction(context.Context, *entity.Reaction) error { return nil }
-func (r *messageHTTPMessageRepo) RemoveReaction(context.Context, uuid.UUID, uuid.UUID, string) error {
+func (r *messageHTTPMessageRepo) AddReaction(_ context.Context, reaction *entity.Reaction) error {
+	if r.reactions == nil {
+		r.reactions = map[uuid.UUID]entity.Reaction{}
+	}
+	for _, existing := range r.reactions {
+		if existing.MessageID == reaction.MessageID && existing.UserID == reaction.UserID && existing.Emoji == reaction.Emoji {
+			return cerrors.AlreadyExists("reaction already exists")
+		}
+	}
+	r.reactions[reaction.ID] = *reaction
+	return nil
+}
+func (r *messageHTTPMessageRepo) GetReactionByID(_ context.Context, id uuid.UUID) (*entity.Reaction, error) {
+	if reaction, ok := r.reactions[id]; ok {
+		return &reaction, nil
+	}
+	return nil, cerrors.NotFound("reaction not found")
+}
+func (r *messageHTTPMessageRepo) GetReactionByMessageUserEmoji(_ context.Context, messageID, userID uuid.UUID, emoji string) (*entity.Reaction, error) {
+	for _, reaction := range r.reactions {
+		if reaction.MessageID == messageID && reaction.UserID == userID && reaction.Emoji == emoji {
+			return &reaction, nil
+		}
+	}
+	return nil, cerrors.NotFound("reaction not found")
+}
+func (r *messageHTTPMessageRepo) RemoveReaction(_ context.Context, messageID, userID uuid.UUID, emoji string) error {
+	for id, reaction := range r.reactions {
+		if reaction.MessageID == messageID && reaction.UserID == userID && reaction.Emoji == emoji {
+			delete(r.reactions, id)
+			return nil
+		}
+	}
+	return cerrors.NotFound("reaction not found")
+}
+func (r *messageHTTPMessageRepo) RemoveReactionByID(_ context.Context, id uuid.UUID) error {
+	if _, ok := r.reactions[id]; !ok {
+		return cerrors.NotFound("reaction not found")
+	}
+	delete(r.reactions, id)
 	return nil
 }
 func (r *messageHTTPMessageRepo) ListReactions(context.Context, uuid.UUID) ([]entity.Reaction, error) {

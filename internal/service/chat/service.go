@@ -775,10 +775,10 @@ func (s *Service) SendMessage(
 			if err := s.enqueueMessageSearchTx(ctx, scope, workspaceID, channelID, msg); err != nil {
 				return err
 			}
-			if err := s.enqueueEventTx(ctx, scope, event.TypeMessageCreated, fmt.Sprintf("aloqa.chat.%s", channelID), workspaceID, channelID, userID, event.MessagePayload{Message: msg}); err != nil {
+			if err := s.enqueueEventTx(ctx, scope, event.TypeMessageCreated, fmt.Sprintf("aloqa.chat.%s", channelID), workspaceID, channelID, userID, event.NewMessagePayload(msg, ch)); err != nil {
 				return err
 			}
-			return s.enqueueEventTx(ctx, scope, event.TypeMessageCreated, fmt.Sprintf("aloqa.ws.%s", workspaceID), workspaceID, channelID, userID, event.MessagePayload{Message: msg})
+			return s.enqueueEventTx(ctx, scope, event.TypeMessageCreated, fmt.Sprintf("aloqa.ws.%s", workspaceID), workspaceID, channelID, userID, event.NewMessagePayload(msg, ch))
 		}); err != nil {
 			slog.ErrorContext(ctx, "failed to create message transaction", "channel_id", channelID, "error", err)
 			return nil, cerrors.Internal("failed to create message", err)
@@ -794,9 +794,9 @@ func (s *Service) SendMessage(
 		})
 
 		// Publish to channel-specific subject.
-		s.publishEvent(ctx, event.TypeMessageCreated, workspaceID, channelID, userID, event.MessagePayload{Message: msg})
+		s.publishEvent(ctx, event.TypeMessageCreated, workspaceID, channelID, userID, event.NewMessagePayload(msg, ch))
 		// Also publish to workspace subject for WebSocket distribution.
-		s.publishToWorkspace(ctx, event.TypeMessageCreated, workspaceID, channelID, userID, event.MessagePayload{Message: msg})
+		s.publishToWorkspace(ctx, event.TypeMessageCreated, workspaceID, channelID, userID, event.NewMessagePayload(msg, ch))
 	}
 
 	slog.InfoContext(ctx, "message sent", "message_id", msg.ID, "channel_id", channelID, "user_id", userID)
@@ -916,7 +916,7 @@ func (s *Service) EditMessage(ctx context.Context, messageID, userID uuid.UUID, 
 					return err
 				}
 			}
-			return s.enqueueEventTx(ctx, scope, event.TypeMessageUpdated, fmt.Sprintf("aloqa.chat.%s", msg.ChannelID), workspaceID, msg.ChannelID, userID, event.MessagePayload{Message: msg})
+			return s.enqueueEventTx(ctx, scope, event.TypeMessageUpdated, fmt.Sprintf("aloqa.chat.%s", msg.ChannelID), workspaceID, msg.ChannelID, userID, event.NewMessagePayload(msg, ch))
 		}); err != nil {
 			slog.ErrorContext(ctx, "failed to update message transaction", "message_id", messageID, "error", err)
 			return nil, cerrors.Internal("failed to update message", err)
@@ -933,7 +933,7 @@ func (s *Service) EditMessage(ctx context.Context, messageID, userID uuid.UUID, 
 			}
 			return s.search.IndexMessage(ctx, workspaceID, msg.ChannelID, msg.ID, msg.Content, msg.CreatedAt)
 		})
-		s.publishEvent(ctx, event.TypeMessageUpdated, workspaceID, msg.ChannelID, userID, event.MessagePayload{Message: msg})
+		s.publishEvent(ctx, event.TypeMessageUpdated, workspaceID, msg.ChannelID, userID, event.NewMessagePayload(msg, ch))
 	}
 
 	slog.InfoContext(ctx, "message edited", "message_id", messageID, "user_id", userID)
@@ -978,7 +978,7 @@ func (s *Service) DeleteMessage(ctx context.Context, messageID, userID uuid.UUID
 					}
 				}
 			}
-			if err := s.enqueueEventTx(ctx, scope, event.TypeMessageDeleted, fmt.Sprintf("aloqa.chat.%s", msg.ChannelID), workspaceID, msg.ChannelID, userID, event.MessagePayload{Message: msg}); err != nil {
+			if err := s.enqueueEventTx(ctx, scope, event.TypeMessageDeleted, fmt.Sprintf("aloqa.chat.%s", msg.ChannelID), workspaceID, msg.ChannelID, userID, event.NewMessagePayload(msg, ch)); err != nil {
 				return err
 			}
 			return s.enqueueCascadeQuoteUpdateEventsTx(ctx, scope, affectedQuoteRows, userID)
@@ -1019,7 +1019,7 @@ func (s *Service) DeleteMessage(ctx context.Context, messageID, userID uuid.UUID
 				}
 			}
 		}
-		s.publishEvent(ctx, event.TypeMessageDeleted, workspaceID, msg.ChannelID, userID, event.MessagePayload{Message: msg})
+		s.publishEvent(ctx, event.TypeMessageDeleted, workspaceID, msg.ChannelID, userID, event.NewMessagePayload(msg, ch))
 		s.publishCascadeQuoteUpdateEvents(ctx, affectedQuoteRows, userID)
 	}
 
@@ -1050,7 +1050,7 @@ func (s *Service) enqueueCascadeQuoteUpdateEventsTx(ctx context.Context, scope t
 			continue
 		}
 		workspaceID := channelWorkspaceIDOrNil(ch)
-		if err := s.enqueueEventTx(ctx, scope, event.TypeMessageUpdated, fmt.Sprintf("aloqa.chat.%s", updated.ChannelID), workspaceID, updated.ChannelID, userID, event.MessagePayload{Message: updated}); err != nil {
+		if err := s.enqueueEventTx(ctx, scope, event.TypeMessageUpdated, fmt.Sprintf("aloqa.chat.%s", updated.ChannelID), workspaceID, updated.ChannelID, userID, event.NewMessagePayload(updated, ch)); err != nil {
 			return err
 		}
 	}
@@ -1073,7 +1073,7 @@ func (s *Service) publishCascadeQuoteUpdateEvents(ctx context.Context, affectedQ
 			}
 			continue
 		}
-		s.publishEvent(ctx, event.TypeMessageUpdated, channelWorkspaceIDOrNil(ch), updated.ChannelID, userID, event.MessagePayload{Message: updated})
+		s.publishEvent(ctx, event.TypeMessageUpdated, channelWorkspaceIDOrNil(ch), updated.ChannelID, userID, event.NewMessagePayload(updated, ch))
 	}
 }
 

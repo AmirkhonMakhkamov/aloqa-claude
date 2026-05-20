@@ -350,7 +350,7 @@ func run() error {
 	authSvc.SetSessionOperationTimeout(cfg.Redis.OperationTimeout)
 	chatSvc := chat.NewService(channelRepo, messageRepo, workspaceRepo, channelAccessGrantRepo, realtimePublisher, guestAccessChecker, collaborationAccessChecker, searchSvc, collaborationSvc)
 	chatSvc.SetTransactionManager(txManager)
-	savedSvc := savedsvc.NewService(userRepo, channelRepo, messageRepo, savedRepo, channelAccessPolicy)
+	savedSvc := savedsvc.NewService(userRepo, channelRepo, messageRepo, savedRepo, channelAccessPolicy, realtimePublisher)
 	callSvc := call.NewService(callRepo, breakoutRoomRepo, channelRepo, workspaceRepo, realtimePublisher, sfuServer, call.MediaConfig{
 		TokenSecret:              []byte(cfg.JWT.Secret),
 		TokenTTL:                 cfg.WebRTC.MediaTokenTTL,

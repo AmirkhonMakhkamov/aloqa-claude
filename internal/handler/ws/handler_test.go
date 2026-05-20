@@ -67,6 +67,41 @@ func TestCanSubscribeAuthorizesKnownRoomTypes(t *testing.T) {
 	}
 }
 
+func TestCanSubscribeAuthorizesSavedChannelOnlyForOwnerMember(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	savedChannelID := uuid.New()
+	userID := uuid.New()
+	otherUserID := uuid.New()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			savedChannelID: {
+				ID:          savedChannelID,
+				WorkspaceID: &workspaceID,
+				Type:        entity.ChannelTypeSaved,
+				OwnerUserID: &userID,
+			},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{savedChannelID, userID}: {ChannelID: savedChannelID, UserID: userID},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}:      {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+		{workspaceID, otherUserID}: {WorkspaceID: workspaceID, UserID: otherUserID, Role: entity.WorkspaceRoleMember},
+	}}
+	chatSvc := chatdomain.NewService(channels, nil, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+	handler := NewHandler(nil, chatSvc, nil, nil, nil, 0)
+
+	if !handler.canSubscribe(ctx, &platformws.Client{ID: uuid.New(), UserID: userID}, "aloqa.chat."+savedChannelID.String()) {
+		t.Fatalf("saved channel subscription was denied for owner member")
+	}
+	if handler.canSubscribe(ctx, &platformws.Client{ID: uuid.New(), UserID: otherUserID}, "aloqa.chat."+savedChannelID.String()) {
+		t.Fatalf("saved channel subscription was allowed for a different user")
+	}
+}
+
 func TestCanSubscribeFailsClosedWithoutChatService(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()

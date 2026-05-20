@@ -3,11 +3,14 @@ package saved
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
 
 	"aloqa/internal/domain/entity"
+	"aloqa/internal/domain/event"
 	"aloqa/internal/domain/repository"
 	"aloqa/internal/pkg/cerrors"
 	"aloqa/internal/pkg/id"
@@ -15,12 +18,17 @@ import (
 	"aloqa/internal/security/accesspolicy"
 )
 
+type EventPublisher interface {
+	Publish(ctx context.Context, subject string, data []byte) error
+}
+
 type Service struct {
 	users    repository.UserRepository
 	channels repository.ChannelRepository
 	messages repository.MessageRepository
 	saved    *postgres.SavedRepo
 	access   *accesspolicy.Checker
+	pubsub   EventPublisher
 }
 
 func NewService(
@@ -29,8 +37,9 @@ func NewService(
 	messages repository.MessageRepository,
 	savedRepo *postgres.SavedRepo,
 	access *accesspolicy.Checker,
+	pubsub EventPublisher,
 ) *Service {
-	return &Service{users: users, channels: channels, messages: messages, saved: savedRepo, access: access}
+	return &Service{users: users, channels: channels, messages: messages, saved: savedRepo, access: access, pubsub: pubsub}
 }
 
 type SaveResult struct {
@@ -129,6 +138,7 @@ func (s *Service) SaveMessage(ctx context.Context, userID, messageID, workspaceI
 	if err := s.messages.Create(ctx, copy); err != nil {
 		return nil, err
 	}
+	s.publishMessageEvent(ctx, event.TypeMessageCreated, selfChannel, copy, userID)
 	return &SaveResult{SavedMsgID: copy.ID, ChannelID: copy.ChannelID, CreatedAt: copy.CreatedAt}, nil
 }
 
@@ -144,8 +154,15 @@ func (s *Service) UnsaveMessage(ctx context.Context, userID, savedMsgID uuid.UUI
 	if !ch.Type.IsSelfChannel() || ch.OwnerUserID == nil || *ch.OwnerUserID != userID {
 		return cerrors.NotFound("saved message not found")
 	}
-	_, err = s.messages.SoftDeleteWithCascade(ctx, savedMsgID)
-	return err
+	if _, err := s.messages.SoftDeleteWithCascade(ctx, savedMsgID); err != nil {
+		return err
+	}
+	deletedMsg, err := s.messages.GetByID(ctx, savedMsgID)
+	if err != nil {
+		return err
+	}
+	s.publishMessageEvent(ctx, event.TypeMessageDeleted, ch, deletedMsg, userID)
+	return nil
 }
 
 func (s *Service) ListMessages(ctx context.Context, userID uuid.UUID, mode entity.SavedMessagesMode, workspaceID *uuid.UUID, cursor string, limit int) (*postgres.SavedMessagesPage, error) {
@@ -159,4 +176,30 @@ func (s *Service) ListMessages(ctx context.Context, userID uuid.UUID, mode entit
 		return nil, cerrors.InvalidInput("workspaceId is not allowed for global mode")
 	}
 	return s.saved.ListMessages(ctx, userID, mode, workspaceID, cursor, limit)
+}
+
+func (s *Service) publishMessageEvent(ctx context.Context, eventType event.Type, channel *entity.Channel, message *entity.Message, userID uuid.UUID) {
+	if s.pubsub == nil || channel == nil || message == nil {
+		return
+	}
+	subject := fmt.Sprintf("aloqa.chat.%s", channel.ID)
+	workspaceID := uuid.Nil
+	if channel.WorkspaceID != nil {
+		workspaceID = *channel.WorkspaceID
+	}
+	_, body, _, err := event.Prepare(subject, event.Event{
+		Type:        eventType,
+		WorkspaceID: workspaceID,
+		ChannelID:   channel.ID,
+		UserID:      userID,
+		Timestamp:   time.Now().UTC(),
+		Payload:     event.NewMessagePayload(message, channel),
+	})
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to prepare saved message event", "type", eventType, "error", err)
+		return
+	}
+	if err := s.pubsub.Publish(ctx, subject, body); err != nil {
+		slog.ErrorContext(ctx, "failed to publish saved message event", "type", eventType, "subject", subject, "error", err)
+	}
 }

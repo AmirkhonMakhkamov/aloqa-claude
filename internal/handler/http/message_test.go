@@ -196,6 +196,85 @@ func TestMessageAddReactionReturnsReactionAndPublishesSchema(t *testing.T) {
 	}
 }
 
+func TestMessageAddReactionDuplicateReturnsExistingReaction(t *testing.T) {
+	f := newMessageHTTPFixture()
+	msg := &entity.Message{
+		ID:        uuid.New(),
+		ChannelID: f.channelID,
+		UserID:    f.userID,
+		Content:   "hello",
+		Type:      entity.MessageTypeText,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	f.messages.messages[msg.ID] = msg
+
+	path := "/channels/" + f.channelID.String() + "/messages/" + msg.ID.String() + "/reactions"
+	first := f.serve(http.MethodPost, path, `{"emoji":"👍"}`)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first status = %d, want 201; body=%s", first.Code, first.Body.String())
+	}
+
+	var created entity.Reaction
+	if err := json.Unmarshal(first.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode first response: %v", err)
+	}
+
+	second := f.serve(http.MethodPost, path, `{"emoji":"👍"}`)
+	if second.Code != http.StatusCreated {
+		t.Fatalf("second status = %d, want 201; body=%s", second.Code, second.Body.String())
+	}
+
+	var existing entity.Reaction
+	if err := json.Unmarshal(second.Body.Bytes(), &existing); err != nil {
+		t.Fatalf("decode second response: %v", err)
+	}
+	if existing.ID != created.ID || existing.CreatedAt.IsZero() {
+		t.Fatalf("duplicate reaction = %+v, want existing reaction %+v", existing, created)
+	}
+	if len(f.publisher.events) != 1 {
+		t.Fatalf("published events = %d, want one event for initial reaction only", len(f.publisher.events))
+	}
+}
+
+func TestMessageListIncludesPersistedReactions(t *testing.T) {
+	f := newMessageHTTPFixture()
+	msg := &entity.Message{
+		ID:        uuid.New(),
+		ChannelID: f.channelID,
+		UserID:    f.userID,
+		Content:   "hello",
+		Type:      entity.MessageTypeText,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	reaction := entity.Reaction{
+		ID:        uuid.New(),
+		MessageID: msg.ID,
+		UserID:    f.userID,
+		Emoji:     "👍",
+		CreatedAt: time.Now().UTC(),
+	}
+	f.messages.messages[msg.ID] = msg
+	f.messages.reactions[reaction.ID] = reaction
+
+	res := f.serve(http.MethodGet, "/channels/"+f.channelID.String()+"/messages", "")
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", res.Code, res.Body.String())
+	}
+
+	var page pagination.Page[entity.Message]
+	if err := json.Unmarshal(res.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(page.Items))
+	}
+	if len(page.Items[0].Reactions) != 1 || page.Items[0].Reactions[0].ID != reaction.ID {
+		t.Fatalf("reactions = %+v, want persisted reaction %+v", page.Items[0].Reactions, reaction)
+	}
+}
+
 func TestMessageRemoveReactionByID(t *testing.T) {
 	f := newMessageHTTPFixture()
 	msg := &entity.Message{
@@ -481,6 +560,7 @@ func newMessageHTTPFixture() messageHTTPFixture {
 		})
 	})
 	router.Post("/channels/{channelID}/messages", handler.Send)
+	router.Get("/channels/{channelID}/messages", handler.List)
 	router.Post("/channels/{channelID}/messages/{messageID}/reactions", handler.AddReaction)
 	router.Get("/messages/{messageID}", handler.Get)
 	router.Delete("/messages/{messageID}", handler.Delete)
@@ -675,8 +755,14 @@ func (r *messageHTTPMessageRepo) RemoveReactionByID(_ context.Context, id uuid.U
 	delete(r.reactions, id)
 	return nil
 }
-func (r *messageHTTPMessageRepo) ListReactions(context.Context, uuid.UUID) ([]entity.Reaction, error) {
-	return nil, nil
+func (r *messageHTTPMessageRepo) ListReactions(_ context.Context, messageID uuid.UUID) ([]entity.Reaction, error) {
+	var reactions []entity.Reaction
+	for _, reaction := range r.reactions {
+		if reaction.MessageID == messageID {
+			reactions = append(reactions, reaction)
+		}
+	}
+	return reactions, nil
 }
 func (r *messageHTTPMessageRepo) CreateAttachment(context.Context, *entity.Attachment) error {
 	return nil

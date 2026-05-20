@@ -771,6 +771,11 @@ func (s *Service) GetMessage(ctx context.Context, messageID, userID uuid.UUID) (
 	if err != nil {
 		return nil, err
 	}
+	items := []entity.Message{*msg}
+	if err := s.hydrateMessageReactions(ctx, items); err != nil {
+		return nil, err
+	}
+	*msg = items[0]
 	return msg, nil
 }
 
@@ -790,8 +795,12 @@ func (s *Service) GetMessages(ctx context.Context, channelID, userID uuid.UUID, 
 		return pagination.Page[entity.Message]{}, cerrors.Internal("failed to list messages", err)
 	}
 
-	redactDeletedMessages(items)
-	return buildMessagePage(items, p.Limit), nil
+	page := buildMessagePage(items, p.Limit)
+	if err := s.hydrateMessageReactions(ctx, page.Items); err != nil {
+		return pagination.Page[entity.Message]{}, err
+	}
+	redactDeletedMessages(page.Items)
+	return page, nil
 }
 
 // GetPinnedMessages returns all pinned messages in a channel after verifying
@@ -807,6 +816,9 @@ func (s *Service) GetPinnedMessages(ctx context.Context, channelID, userID uuid.
 		return nil, cerrors.Internal("failed to list pinned messages", err)
 	}
 
+	if err := s.hydrateMessageReactions(ctx, items); err != nil {
+		return nil, err
+	}
 	return items, nil
 }
 
@@ -825,8 +837,12 @@ func (s *Service) GetThreadReplies(ctx context.Context, parentID, userID uuid.UU
 		return pagination.Page[entity.Message]{}, cerrors.Internal("failed to list thread replies", err)
 	}
 
-	redactDeletedMessages(items)
-	return buildMessagePage(items, p.Limit), nil
+	page := buildMessagePage(items, p.Limit)
+	if err := s.hydrateMessageReactions(ctx, page.Items); err != nil {
+		return pagination.Page[entity.Message]{}, err
+	}
+	redactDeletedMessages(page.Items)
+	return page, nil
 }
 
 // EditMessage updates message content after verifying ownership.
@@ -1062,6 +1078,17 @@ func (s *Service) AddReaction(ctx context.Context, messageID, userID uuid.UUID, 
 
 	if err := s.messages.AddReaction(ctx, reaction); err != nil {
 		if appErr, ok := cerrors.AsAppError(err); ok {
+			if appErr.Code == cerrors.CodeAlreadyExists {
+				existing, getErr := s.messages.GetReactionByMessageUserEmoji(ctx, messageID, userID, emoji)
+				if getErr != nil {
+					if getAppErr, ok := cerrors.AsAppError(getErr); ok {
+						return nil, getAppErr
+					}
+					slog.ErrorContext(ctx, "failed to get existing reaction", "message_id", messageID, "emoji", emoji, "error", getErr)
+					return nil, cerrors.Internal("failed to get existing reaction", getErr)
+				}
+				return existing, nil
+			}
 			return nil, appErr
 		}
 		slog.ErrorContext(ctx, "failed to add reaction", "message_id", messageID, "emoji", emoji, "error", err)
@@ -1696,6 +1723,23 @@ func redactDeletedMessages(items []entity.Message) {
 	for i := range items {
 		items[i] = redactDeletedMessage(items[i])
 	}
+}
+
+func (s *Service) hydrateMessageReactions(ctx context.Context, items []entity.Message) error {
+	for i := range items {
+		if items[i].DeletedAt != nil {
+			items[i].Reactions = nil
+			continue
+		}
+
+		reactions, err := s.messages.ListReactions(ctx, items[i].ID)
+		if err != nil {
+			slog.ErrorContext(ctx, "failed to list message reactions", "message_id", items[i].ID, "error", err)
+			return cerrors.Internal("failed to list message reactions", err)
+		}
+		items[i].Reactions = reactions
+	}
+	return nil
 }
 
 func redactDeletedMessage(msg entity.Message) entity.Message {

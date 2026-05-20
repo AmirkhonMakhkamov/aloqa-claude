@@ -1246,8 +1246,14 @@ func (r *fakeMessageRepo) RemoveReactionByID(_ context.Context, id uuid.UUID) er
 	delete(r.reactions, id)
 	return nil
 }
-func (r *fakeMessageRepo) ListReactions(context.Context, uuid.UUID) ([]entity.Reaction, error) {
-	return nil, nil
+func (r *fakeMessageRepo) ListReactions(_ context.Context, messageID uuid.UUID) ([]entity.Reaction, error) {
+	var reactions []entity.Reaction
+	for _, reaction := range r.reactions {
+		if reaction.MessageID == messageID {
+			reactions = append(reactions, reaction)
+		}
+	}
+	return reactions, nil
 }
 func (r *fakeMessageRepo) CreateAttachment(context.Context, *entity.Attachment) error { return nil }
 func (r *fakeMessageRepo) DeleteAttachment(context.Context, uuid.UUID) error          { return nil }

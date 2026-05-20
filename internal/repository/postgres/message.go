@@ -23,6 +23,54 @@ type MessageRepo struct {
 	db   queryable
 }
 
+type nullableUserScan struct {
+	id                *uuid.UUID
+	email             *string
+	displayName       *string
+	avatarURL         *string
+	passwordHash      *string
+	status            *entity.UserStatus
+	deactivatedAt     *time.Time
+	savedMessagesMode *entity.SavedMessagesMode
+	locale            *string
+	createdAt         *time.Time
+	updatedAt         *time.Time
+}
+
+func (u nullableUserScan) user() *entity.User {
+	if u.id == nil {
+		return nil
+	}
+
+	user := &entity.User{
+		ID:           *u.id,
+		Email:        derefStr(u.email),
+		DisplayName:  derefStr(u.displayName),
+		AvatarURL:    derefStr(u.avatarURL),
+		PasswordHash: derefStr(u.passwordHash),
+		Locale:       derefStr(u.locale),
+	}
+	if u.status != nil {
+		user.Status = *u.status
+	}
+	if u.deactivatedAt != nil {
+		user.DeactivatedAt = u.deactivatedAt
+	}
+	if u.savedMessagesMode != nil {
+		user.SavedMessagesMode = *u.savedMessagesMode
+	}
+	if user.SavedMessagesMode == "" {
+		user.SavedMessagesMode = entity.SavedMessagesModePerWorkspace
+	}
+	if u.createdAt != nil {
+		user.CreatedAt = *u.createdAt
+	}
+	if u.updatedAt != nil {
+		user.UpdatedAt = *u.updatedAt
+	}
+	return user
+}
+
 // NewMessageRepo creates a new MessageRepo.
 func NewMessageRepo(pool *pgxpool.Pool) *MessageRepo {
 	return &MessageRepo{pool: pool, db: pool}
@@ -74,18 +122,14 @@ func (r *MessageRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Messag
 			m.edited, m.edited_at, m.pinned, m.pinned_by, m.pinned_at,
 			m.forwarded_from, m.saved_from, m.quoted_message_id, m.quoted_snapshot,
 			m.created_at, m.updated_at, m.deleted_at,
-			u.id, u.email, u.display_name, u.avatar_url, u.password_hash, u.status, u.locale, u.created_at, u.updated_at
+			u.id, u.email, u.display_name, u.avatar_url, u.password_hash, u.status,
+			u.deactivated_at, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
 		FROM messages m
 		LEFT JOIN users u ON u.id = m.user_id
 		WHERE m.id = $1`
 
 	msg := &entity.Message{}
-	var (
-		userID                                                      *uuid.UUID
-		userEmail, userDisplayName, userAvatarURL, userPasswordHash *string
-		userStatus, userLocale                                      *string
-		userCreatedAt, userUpdatedAt                                *time.Time
-	)
+	var user nullableUserScan
 
 	err := r.db.QueryRow(ctx, query, id).Scan(
 		&msg.ID,
@@ -106,15 +150,17 @@ func (r *MessageRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Messag
 		&msg.CreatedAt,
 		&msg.UpdatedAt,
 		&msg.DeletedAt,
-		&userID,
-		&userEmail,
-		&userDisplayName,
-		&userAvatarURL,
-		&userPasswordHash,
-		&userStatus,
-		&userLocale,
-		&userCreatedAt,
-		&userUpdatedAt,
+		&user.id,
+		&user.email,
+		&user.displayName,
+		&user.avatarURL,
+		&user.passwordHash,
+		&user.status,
+		&user.deactivatedAt,
+		&user.savedMessagesMode,
+		&user.locale,
+		&user.createdAt,
+		&user.updatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -123,26 +169,7 @@ func (r *MessageRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Messag
 		return nil, fmt.Errorf("postgres: get message by id: %w", err)
 	}
 
-	if userID != nil {
-		user := entity.User{
-			ID:           *userID,
-			Email:        derefStr(userEmail),
-			DisplayName:  derefStr(userDisplayName),
-			AvatarURL:    derefStr(userAvatarURL),
-			PasswordHash: derefStr(userPasswordHash),
-			Locale:       derefStr(userLocale),
-		}
-		if userStatus != nil {
-			user.Status = entity.UserStatus(*userStatus)
-		}
-		if userCreatedAt != nil {
-			user.CreatedAt = *userCreatedAt
-		}
-		if userUpdatedAt != nil {
-			user.UpdatedAt = *userUpdatedAt
-		}
-		msg.User = &user
-	}
+	msg.User = user.user()
 
 	return msg, nil
 }
@@ -162,7 +189,8 @@ func (r *MessageRepo) ListByChannel(ctx context.Context, channelID uuid.UUID, p 
 				m.edited, m.edited_at, m.pinned, m.pinned_by, m.pinned_at,
 				m.forwarded_from, m.saved_from, m.quoted_message_id, m.quoted_snapshot,
 				m.created_at, m.updated_at, m.deleted_at,
-				u.id, u.email, u.display_name, u.avatar_url, u.status
+				u.id, u.email, u.display_name, u.avatar_url, u.password_hash, u.status,
+				u.deactivated_at, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
 			FROM messages m
 			LEFT JOIN users u ON u.id = m.user_id
 			WHERE m.channel_id = $1 AND m.id < $2
@@ -176,7 +204,8 @@ func (r *MessageRepo) ListByChannel(ctx context.Context, channelID uuid.UUID, p 
 				m.edited, m.edited_at, m.pinned, m.pinned_by, m.pinned_at,
 				m.forwarded_from, m.saved_from, m.quoted_message_id, m.quoted_snapshot,
 				m.created_at, m.updated_at, m.deleted_at,
-				u.id, u.email, u.display_name, u.avatar_url, u.status
+				u.id, u.email, u.display_name, u.avatar_url, u.password_hash, u.status,
+				u.deactivated_at, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
 			FROM messages m
 			LEFT JOIN users u ON u.id = m.user_id
 			WHERE m.channel_id = $1
@@ -192,9 +221,7 @@ func (r *MessageRepo) ListByChannel(ctx context.Context, channelID uuid.UUID, p 
 	var messages []entity.Message
 	for rows.Next() {
 		var msg entity.Message
-		var userID *uuid.UUID
-		var userEmail, userDisplayName, userAvatarURL *string
-		var userStatus *entity.UserStatus
+		var user nullableUserScan
 
 		if err := rows.Scan(
 			&msg.ID,
@@ -215,26 +242,22 @@ func (r *MessageRepo) ListByChannel(ctx context.Context, channelID uuid.UUID, p 
 			&msg.CreatedAt,
 			&msg.UpdatedAt,
 			&msg.DeletedAt,
-			&userID,
-			&userEmail,
-			&userDisplayName,
-			&userAvatarURL,
-			&userStatus,
+			&user.id,
+			&user.email,
+			&user.displayName,
+			&user.avatarURL,
+			&user.passwordHash,
+			&user.status,
+			&user.deactivatedAt,
+			&user.savedMessagesMode,
+			&user.locale,
+			&user.createdAt,
+			&user.updatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("postgres: list messages by channel scan: %w", err)
 		}
 
-		if userID != nil {
-			msg.User = &entity.User{
-				ID:          *userID,
-				Email:       derefStr(userEmail),
-				DisplayName: derefStr(userDisplayName),
-				AvatarURL:   derefStr(userAvatarURL),
-			}
-			if userStatus != nil {
-				msg.User.Status = *userStatus
-			}
-		}
+		msg.User = user.user()
 
 		messages = append(messages, msg)
 	}
@@ -279,7 +302,8 @@ func (r *MessageRepo) ListThreadReplies(ctx context.Context, parentID uuid.UUID,
 				m.edited, m.edited_at, m.pinned, m.pinned_by, m.pinned_at,
 				m.forwarded_from, m.saved_from, m.quoted_message_id, m.quoted_snapshot,
 				m.created_at, m.updated_at, m.deleted_at,
-				u.id, u.email, u.display_name, u.avatar_url, u.status
+				u.id, u.email, u.display_name, u.avatar_url, u.password_hash, u.status,
+				u.deactivated_at, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
 			FROM messages m
 			LEFT JOIN users u ON u.id = m.user_id
 			WHERE m.parent_id = $1 AND m.id < $2
@@ -293,7 +317,8 @@ func (r *MessageRepo) ListThreadReplies(ctx context.Context, parentID uuid.UUID,
 				m.edited, m.edited_at, m.pinned, m.pinned_by, m.pinned_at,
 				m.forwarded_from, m.saved_from, m.quoted_message_id, m.quoted_snapshot,
 				m.created_at, m.updated_at, m.deleted_at,
-				u.id, u.email, u.display_name, u.avatar_url, u.status
+				u.id, u.email, u.display_name, u.avatar_url, u.password_hash, u.status,
+				u.deactivated_at, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
 			FROM messages m
 			LEFT JOIN users u ON u.id = m.user_id
 			WHERE m.parent_id = $1
@@ -309,9 +334,7 @@ func (r *MessageRepo) ListThreadReplies(ctx context.Context, parentID uuid.UUID,
 	var messages []entity.Message
 	for rows.Next() {
 		var msg entity.Message
-		var userID *uuid.UUID
-		var userEmail, userDisplayName, userAvatarURL *string
-		var userStatus *entity.UserStatus
+		var user nullableUserScan
 
 		if err := rows.Scan(
 			&msg.ID,
@@ -332,26 +355,22 @@ func (r *MessageRepo) ListThreadReplies(ctx context.Context, parentID uuid.UUID,
 			&msg.CreatedAt,
 			&msg.UpdatedAt,
 			&msg.DeletedAt,
-			&userID,
-			&userEmail,
-			&userDisplayName,
-			&userAvatarURL,
-			&userStatus,
+			&user.id,
+			&user.email,
+			&user.displayName,
+			&user.avatarURL,
+			&user.passwordHash,
+			&user.status,
+			&user.deactivatedAt,
+			&user.savedMessagesMode,
+			&user.locale,
+			&user.createdAt,
+			&user.updatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("postgres: list thread replies scan: %w", err)
 		}
 
-		if userID != nil {
-			msg.User = &entity.User{
-				ID:          *userID,
-				Email:       derefStr(userEmail),
-				DisplayName: derefStr(userDisplayName),
-				AvatarURL:   derefStr(userAvatarURL),
-			}
-			if userStatus != nil {
-				msg.User.Status = *userStatus
-			}
-		}
+		msg.User = user.user()
 
 		messages = append(messages, msg)
 	}

@@ -340,7 +340,11 @@ func (h *MessageHandler) Unpin(w http.ResponseWriter, r *http.Request) {
 func parsePagination(r *http.Request) pagination.Params {
 	p := pagination.Params{}
 
-	if cursor := r.URL.Query().Get("cursor"); cursor != "" {
+	cursor := r.URL.Query().Get("cursor")
+	if cursor == "" {
+		cursor = r.URL.Query().Get("before")
+	}
+	if cursor != "" {
 		if parsed, err := pagination.DecodeCursor(cursor); err == nil {
 			p.Cursor = parsed
 		}

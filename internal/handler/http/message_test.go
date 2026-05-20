@@ -137,6 +137,21 @@ func TestMessageCreatedEventIncludesForwardedFrom(t *testing.T) {
 	}
 }
 
+func TestParsePaginationAcceptsBeforeAlias(t *testing.T) {
+	cursorID := uuid.New()
+	cursor := pagination.EncodeCursor(cursorID)
+	req := httptest.NewRequest(http.MethodGet, "/messages?before="+cursor+"&limit=7", nil)
+
+	got := parsePagination(req)
+
+	if got.Cursor != cursorID {
+		t.Fatalf("cursor = %s, want %s", got.Cursor, cursorID)
+	}
+	if got.Limit != 7 {
+		t.Fatalf("limit = %d, want 7", got.Limit)
+	}
+}
+
 func TestMessageAddReactionReturnsReactionAndPublishesSchema(t *testing.T) {
 	f := newMessageHTTPFixture()
 	msg := &entity.Message{

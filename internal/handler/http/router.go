@@ -227,6 +227,8 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 	// Notifications.
 	r.Route("/notifications", func(r chi.Router) {
 		r.Get("/", deps.Notifications.List)
+		r.Post("/register-token", deps.Notifications.RegisterToken)
+		r.Post("/unregister-token", deps.Notifications.UnregisterToken)
 		r.Post("/read-all", deps.Notifications.MarkAllRead)
 		r.Get("/unread-count", deps.Notifications.CountUnread)
 		r.Post("/{notificationID}/read", deps.Notifications.MarkRead)

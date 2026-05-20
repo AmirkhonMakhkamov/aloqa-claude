@@ -633,6 +633,42 @@ paths:
       responses:
         '204': { description: Marked read }
 
+  /api/v1/workspaces/{workspaceID}/notifications/register-token:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+    post:
+      summary: Register a push notification token or web push subscription
+      tags: [notifications]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NotificationTokenRequest' }
+      responses:
+        '204': { description: Token registered }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/workspaces/{workspaceID}/notifications/unregister-token:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+    post:
+      summary: Unregister a push notification token or web push subscription
+      tags: [notifications]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NotificationTokenRequest' }
+      responses:
+        '204': { description: Token unregistered }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
   /api/v1/workspaces/{workspaceID}/notifications/unread-count:
     parameters:
       - $ref: '#/components/parameters/WorkspaceID'
@@ -1410,9 +1446,33 @@ components:
 
     UnreadCountResponse:
       type: object
-      required: [count]
+      required: [unread_count]
       properties:
-        count: { type: integer }
+        unread_count: { type: integer }
+
+    WebPushSubscription:
+      type: object
+      required: [endpoint]
+      properties:
+        endpoint: { type: string }
+        expirationTime:
+          type: integer
+          nullable: true
+        keys:
+          type: object
+          additionalProperties:
+            type: string
+
+    NotificationTokenRequest:
+      type: object
+      required: [platform]
+      properties:
+        platform:
+          type: string
+          enum: [web_push, apns, fcm]
+        token:
+          type: string
+        web_subscription: { $ref: '#/components/schemas/WebPushSubscription' }
 
     SearchResponse:
       type: object

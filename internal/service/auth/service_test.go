@@ -5,7 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 
 	"aloqa/internal/domain/entity"
 	"aloqa/internal/pkg/cerrors"
@@ -262,9 +264,203 @@ func TestRegisterRunsNewUserSeeder(t *testing.T) {
 	}
 }
 
+func TestLoginMasksInactiveStatusUntilPasswordVerified(t *testing.T) {
+	ctx := context.Background()
+	env := newServiceSessionTestEnv(t)
+	password := "Password1!"
+	activeID := env.addCredentialedUser(t, "active@example.com", password, entity.UserStatusActive)
+	deactivatedID := env.addCredentialedUser(t, "deactivated@example.com", password, entity.UserStatusDeactivated)
+	suspendedID := env.addCredentialedUser(t, "suspended@example.com", password, entity.UserStatusSuspended)
+
+	if _, err := env.svc.Login(ctx, "deactivated@example.com", "wrong", "ua", "127.0.0.1"); !hasCode(err, cerrors.CodeUnauthorized) {
+		t.Fatalf("deactivated wrong-password Login error = %v, want UNAUTHORIZED", err)
+	}
+	if _, err := env.svc.Login(ctx, "suspended@example.com", "wrong", "ua", "127.0.0.1"); !hasCode(err, cerrors.CodeUnauthorized) {
+		t.Fatalf("suspended wrong-password Login error = %v, want UNAUTHORIZED", err)
+	}
+	if _, err := env.svc.Login(ctx, "deactivated@example.com", password, "ua", "127.0.0.1"); !hasCode(err, cerrors.CodeAccountDeactivated) {
+		t.Fatalf("deactivated Login error = %v, want ACCOUNT_DEACTIVATED", err)
+	}
+	if _, err := env.svc.Login(ctx, "suspended@example.com", password, "ua", "127.0.0.1"); !hasCode(err, cerrors.CodeAccountSuspended) {
+		t.Fatalf("suspended Login error = %v, want ACCOUNT_SUSPENDED", err)
+	}
+	if result, err := env.svc.Login(ctx, "active@example.com", password, "ua", "127.0.0.1"); err != nil || result == nil {
+		t.Fatalf("active Login result=%v error=%v, want success for %s", result, err, activeID)
+	}
+	if env.users.users[deactivatedID].Status != entity.UserStatusDeactivated {
+		t.Fatalf("deactivated user status changed during Login")
+	}
+	if env.users.users[suspendedID].Status != entity.UserStatusSuspended {
+		t.Fatalf("suspended user status changed during Login")
+	}
+}
+
+func TestDeactivateRevokesSessionsAndSetsStatus(t *testing.T) {
+	ctx := context.Background()
+	env := newServiceSessionTestEnv(t)
+	userID := env.addCredentialedUser(t, "user@example.com", "Password1!", entity.UserStatusActive)
+	result, err := env.svc.CreateSessionForUser(ctx, userID, "ua", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("CreateSessionForUser returned error: %v", err)
+	}
+
+	if err := env.svc.Deactivate(ctx, userID); err != nil {
+		t.Fatalf("Deactivate returned error: %v", err)
+	}
+
+	user := env.users.users[userID]
+	if user.Status != entity.UserStatusDeactivated {
+		t.Fatalf("Status = %q, want deactivated", user.Status)
+	}
+	if user.DeactivatedAt == nil {
+		t.Fatalf("DeactivatedAt = nil, want timestamp")
+	}
+	sessions, err := env.svc.ListSessions(ctx, userID.String())
+	if err != nil {
+		t.Fatalf("ListSessions returned error: %v", err)
+	}
+	for _, session := range sessions {
+		if session.ID == result.SessionID {
+			t.Fatalf("deactivated session %s is still listed", result.SessionID)
+		}
+	}
+}
+
+func TestDeactivateIdempotentAndRejectsSuspended(t *testing.T) {
+	ctx := context.Background()
+	env := newServiceSessionTestEnv(t)
+	deactivatedID := env.addCredentialedUser(t, "deactivated@example.com", "Password1!", entity.UserStatusDeactivated)
+	suspendedID := env.addCredentialedUser(t, "suspended@example.com", "Password1!", entity.UserStatusSuspended)
+
+	if err := env.svc.Deactivate(ctx, deactivatedID); err != nil {
+		t.Fatalf("Deactivate already-deactivated returned error: %v", err)
+	}
+	if err := env.svc.Deactivate(ctx, suspendedID); !hasCode(err, cerrors.CodeForbidden) {
+		t.Fatalf("Deactivate suspended error = %v, want FORBIDDEN", err)
+	}
+}
+
+func TestDeactivateRevokeFailureDoesNotFlipStatus(t *testing.T) {
+	ctx := context.Background()
+	env := newServiceSessionTestEnv(t)
+	userID := env.addCredentialedUser(t, "user@example.com", "Password1!", entity.UserStatusActive)
+	env.svc.SetSessionOperationTimeout(20 * time.Millisecond)
+	env.redis.Close()
+
+	if err := env.svc.Deactivate(ctx, userID); !hasCode(err, cerrors.CodeInternal) {
+		t.Fatalf("Deactivate error = %v, want INTERNAL", err)
+	}
+	user := env.users.users[userID]
+	if user.Status != entity.UserStatusActive {
+		t.Fatalf("Status = %q, want active after revoke failure", user.Status)
+	}
+	if user.DeactivatedAt != nil {
+		t.Fatalf("DeactivatedAt = %v, want nil after revoke failure", user.DeactivatedAt)
+	}
+}
+
+func TestReactivateAndLoginStatusMatrix(t *testing.T) {
+	ctx := context.Background()
+	env := newServiceSessionTestEnv(t)
+	password := "Password1!"
+	deactivatedID := env.addCredentialedUser(t, "deactivated@example.com", password, entity.UserStatusDeactivated)
+	now := time.Now().UTC()
+	env.users.users[deactivatedID].DeactivatedAt = &now
+	env.addCredentialedUser(t, "active@example.com", password, entity.UserStatusActive)
+	env.addCredentialedUser(t, "suspended@example.com", password, entity.UserStatusSuspended)
+
+	if _, err := env.svc.ReactivateAndLogin(ctx, "deactivated@example.com", "wrong", "ua", "127.0.0.1"); !hasCode(err, cerrors.CodeUnauthorized) {
+		t.Fatalf("wrong-password ReactivateAndLogin error = %v, want UNAUTHORIZED", err)
+	}
+	if _, err := env.svc.ReactivateAndLogin(ctx, "active@example.com", password, "ua", "127.0.0.1"); !hasCode(err, cerrors.CodeNotDeactivated) {
+		t.Fatalf("active ReactivateAndLogin error = %v, want NOT_DEACTIVATED", err)
+	}
+	if _, err := env.svc.ReactivateAndLogin(ctx, "suspended@example.com", password, "ua", "127.0.0.1"); !hasCode(err, cerrors.CodeAccountSuspended) {
+		t.Fatalf("suspended ReactivateAndLogin error = %v, want ACCOUNT_SUSPENDED", err)
+	}
+
+	result, err := env.svc.ReactivateAndLogin(ctx, "deactivated@example.com", password, "ua", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("ReactivateAndLogin returned error: %v", err)
+	}
+	if result == nil || result.AccessToken == "" || result.RefreshToken == "" || result.SessionID == "" {
+		t.Fatalf("ReactivateAndLogin result missing tokens: %+v", result)
+	}
+	user := env.users.users[deactivatedID]
+	if user.Status != entity.UserStatusActive {
+		t.Fatalf("Status = %q, want active", user.Status)
+	}
+	if user.DeactivatedAt != nil {
+		t.Fatalf("DeactivatedAt = %v, want nil", user.DeactivatedAt)
+	}
+}
+
+func TestReactivateAndLoginRollsBackWhenSessionCreationFails(t *testing.T) {
+	ctx := context.Background()
+	env := newServiceSessionTestEnv(t)
+	userID := env.addCredentialedUser(t, "deactivated@example.com", "Password1!", entity.UserStatusDeactivated)
+	original := time.Now().Add(-time.Hour).UTC()
+	env.users.users[userID].DeactivatedAt = &original
+	env.svc.SetSessionOperationTimeout(20 * time.Millisecond)
+	env.redis.Close()
+
+	if _, err := env.svc.ReactivateAndLogin(ctx, "deactivated@example.com", "Password1!", "ua", "127.0.0.1"); !hasCode(err, cerrors.CodeInternal) {
+		t.Fatalf("ReactivateAndLogin error = %v, want INTERNAL", err)
+	}
+
+	user := env.users.users[userID]
+	if user.Status != entity.UserStatusDeactivated {
+		t.Fatalf("Status = %q, want deactivated after rollback", user.Status)
+	}
+	if user.DeactivatedAt == nil {
+		t.Fatalf("DeactivatedAt = nil, want rollback timestamp")
+	}
+}
+
 func hasCode(err error, code cerrors.Code) bool {
 	appErr, ok := cerrors.AsAppError(err)
 	return ok && appErr.Code == code
+}
+
+type serviceSessionTestEnv struct {
+	svc   *Service
+	users *fakeUserRepo
+	redis *miniredis.Miniredis
+	rdb   *redis.Client
+}
+
+func newServiceSessionTestEnv(t *testing.T) *serviceSessionTestEnv {
+	t.Helper()
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	users := &fakeUserRepo{users: map[uuid.UUID]*entity.User{}}
+	svc := NewService(users, &fakeWorkspaceRepo{}, rdb, []byte("01234567890123456789012345678901"), time.Minute, time.Hour, nil)
+	svc.SetSessionOperationTimeout(500 * time.Millisecond)
+	t.Cleanup(func() {
+		_ = rdb.Close()
+		mr.Close()
+	})
+	return &serviceSessionTestEnv{svc: svc, users: users, redis: mr, rdb: rdb}
+}
+
+func (e *serviceSessionTestEnv) addCredentialedUser(t *testing.T, email, password string, status entity.UserStatus) uuid.UUID {
+	t.Helper()
+	passwordHash, err := hashPassword(password)
+	if err != nil {
+		t.Fatalf("hashPassword returned error: %v", err)
+	}
+	userID := uuid.New()
+	e.users.users[userID] = &entity.User{
+		ID:           userID,
+		Email:        email,
+		DisplayName:  "Test User",
+		PasswordHash: passwordHash,
+		Status:       status,
+		Locale:       "en",
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+	}
+	return userID
 }
 
 type fakeNewUserSeeder struct {

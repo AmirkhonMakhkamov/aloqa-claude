@@ -16,6 +16,7 @@ type RouterDeps struct {
 	Auth             *AuthHandler
 	Account          *AccountHandler
 	Channels         *ChannelHandler
+	Saved            *SavedHandler
 	Messages         *MessageHandler
 	Calls            *CallHandler
 	Calendar         *CalendarHandler
@@ -89,6 +90,7 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 			r.Use(authLimiter)
 			r.Post("/register", deps.Auth.Register)
 			r.Post("/login", deps.Auth.Login)
+			r.Post("/reactivate-and-login", deps.Auth.ReactivateAndLogin)
 			r.Post("/refresh", deps.Auth.Refresh)
 		})
 
@@ -96,6 +98,7 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 			r.Use(middleware.Auth(deps.Validator))
 			r.Post("/logout", deps.Auth.Logout)
 			r.Post("/logout-all", deps.Auth.LogoutAll)
+			r.Post("/logout-others", deps.Auth.LogoutOthers)
 			r.Get("/sessions", deps.Auth.ListSessions)
 		})
 	})
@@ -118,6 +121,14 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 		r.Route("/api/v1/users", func(r chi.Router) {
 			r.Get("/me", deps.Account.Me)
 			r.Patch("/me", deps.Account.UpdateProfile)
+			r.Patch("/me/preferences", deps.Account.UpdatePreferences)
+			r.Post("/me/deactivate", deps.Account.Deactivate)
+			if deps.Saved != nil {
+				r.Get("/me/saved-channel", deps.Saved.ResolveGlobalChannel)
+				r.Post("/me/saved-messages", deps.Saved.SaveMessage)
+				r.Get("/me/saved-messages", deps.Saved.ListMessages)
+				r.Delete("/me/saved-messages/{savedMsgID}", deps.Saved.UnsaveMessage)
+			}
 		})
 
 		// WebSocket endpoint.
@@ -125,6 +136,10 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 
 		// File downloads (authenticated).
 		r.Get("/files/*", deps.Files.Download)
+
+		r.Route("/api/v1/reactions", func(r chi.Router) {
+			r.Delete("/{reactionID}", deps.Messages.RemoveReactionByID)
+		})
 
 		r.Route("/api/v1/admin", func(r chi.Router) {
 			r.Post("/search/reindex", deps.Admin.ReindexSearch)
@@ -220,6 +235,8 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 	// Notifications.
 	r.Route("/notifications", func(r chi.Router) {
 		r.Get("/", deps.Notifications.List)
+		r.Post("/register-token", deps.Notifications.RegisterToken)
+		r.Post("/unregister-token", deps.Notifications.UnregisterToken)
 		r.Post("/read-all", deps.Notifications.MarkAllRead)
 		r.Get("/unread-count", deps.Notifications.CountUnread)
 		r.Post("/{notificationID}/read", deps.Notifications.MarkRead)
@@ -236,6 +253,10 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 	})
 
 	// Channels.
+	if deps.Saved != nil {
+		r.Get("/saved-channel", deps.Saved.ResolveWorkspaceChannel)
+	}
+
 	r.Route("/channels", func(r chi.Router) {
 		r.Post("/", deps.Channels.Create)
 		r.Get("/", deps.Channels.List)
@@ -283,10 +304,19 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 			r.Post("/join", deps.Calls.Join)
 			r.Post("/leave", deps.Calls.Leave)
 			r.Post("/end", deps.Calls.End)
+			r.Post("/hand", deps.Calls.RaiseHand)
+			r.Delete("/hand", deps.Calls.LowerHand)
+			r.Post("/reactions", deps.Calls.SendCallReaction)
+			r.Post("/turn-credentials", deps.Calls.TurnCredentials)
 			r.Get("/participants", deps.Calls.Participants)
 			r.Put("/participants/{userID}/role", deps.Calls.UpdateParticipantRole)
 			r.Put("/media", deps.Calls.UpdateMedia)
 			r.Put("/quality", deps.Calls.SetQuality)
+			r.Route("/messages", func(r chi.Router) {
+				r.Post("/", deps.Calls.SendCallMessage)
+				r.Get("/", deps.Calls.ListCallMessages)
+				r.Delete("/{messageID}", deps.Calls.DeleteCallMessage)
+			})
 			r.Route("/media-session", func(r chi.Router) {
 				r.Post("/token", deps.Calls.MediaToken)
 				r.Post("/offer", deps.Calls.MediaOffer)
@@ -352,6 +382,7 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 			r.Delete("/", deps.Calendar.DeleteEvent)
 			r.Put("/rsvp", deps.Calendar.UpsertRsvp)
 			r.Post("/start-call", deps.Calendar.StartCallFromEvent)
+			r.Post("/occurrences/move", deps.Calendar.MoveOccurrence)
 		})
 	})
 }

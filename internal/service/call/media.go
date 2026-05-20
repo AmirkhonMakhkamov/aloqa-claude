@@ -37,6 +37,13 @@ type MediaJoinToken struct {
 	TURNStrategy        string                          `json:"turn_strategy,omitempty"`
 }
 
+type TurnCredentials struct {
+	URLs       []string `json:"urls"`
+	Username   string   `json:"username"`
+	Credential string   `json:"credential"`
+	TTL        int      `json:"ttl"`
+}
+
 type MediaOfferInput struct {
 	CallID uuid.UUID `json:"-"`
 	Token  string    `json:"token"`
@@ -84,6 +91,41 @@ type mediaTokenClaims struct {
 	Role        string `json:"role"`
 	NodeID      string `json:"node_id,omitempty"`
 	Region      string `json:"region,omitempty"`
+}
+
+// IssueTurnCredentials returns TURN servers and credentials scoped to an active call participant.
+func (s *Service) IssueTurnCredentials(ctx context.Context, workspaceID, callID, userID uuid.UUID) (*TurnCredentials, error) {
+	if len(s.media.TURNURLs) == 0 || s.media.TURNUsername == "" || s.media.TURNCredential == "" {
+		return nil, cerrors.Unavailable("turn service is not configured")
+	}
+	if _, err := s.requireCallAccess(ctx, workspaceID, callID, userID); err != nil {
+		return nil, err
+	}
+	participant, err := s.calls.GetParticipant(ctx, callID, userID)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return nil, cerrors.Forbidden("join the call before fetching turn credentials")
+		}
+		return nil, cerrors.Internal("failed to get participant", err)
+	}
+	if participant.Status != entity.ParticipantStatusConnected {
+		return nil, cerrors.Forbidden("participant is not connected")
+	}
+
+	ttl := s.media.TURNCredentialsTTL
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
+	}
+	if ttl > 30*time.Minute {
+		ttl = 30 * time.Minute
+	}
+
+	return &TurnCredentials{
+		URLs:       append([]string(nil), s.media.TURNURLs...),
+		Username:   s.media.TURNUsername,
+		Credential: s.media.TURNCredential,
+		TTL:        int(ttl.Seconds()),
+	}, nil
 }
 
 // IssueMediaJoinToken returns a short-lived token scoped to one call/user/role.

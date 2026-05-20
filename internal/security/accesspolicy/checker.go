@@ -8,6 +8,7 @@ import (
 
 	"aloqa/internal/domain/entity"
 	"aloqa/internal/domain/repository"
+	"aloqa/internal/middleware"
 	"aloqa/internal/pkg/cerrors"
 	"aloqa/internal/pkg/pagination"
 	"aloqa/internal/security/collabaccess"
@@ -103,8 +104,18 @@ func (c *Checker) Channel(ctx context.Context, channelID, userID uuid.UUID, capa
 	if ch.Archived {
 		return nil, cerrors.Forbidden("channel is archived")
 	}
+	pathWorkspaceID := middleware.WorkspaceIDFromContext(ctx)
+	if ch.Type.IsSelfChannel() {
+		return c.selfChannelDecision(ctx, ch, pathWorkspaceID, userID)
+	}
+	if ch.WorkspaceID == nil {
+		return nil, cerrors.NotFound("channel not found")
+	}
+	if pathWorkspaceID != uuid.Nil && *ch.WorkspaceID != pathWorkspaceID {
+		return nil, cerrors.NotFound("channel not found")
+	}
 
-	member, memberErr := c.workspaceMember(ctx, ch.WorkspaceID, userID)
+	member, memberErr := c.workspaceMember(ctx, *ch.WorkspaceID, userID)
 	if memberErr == nil {
 		return c.channelDecisionForWorkspaceMember(ctx, ch, member, userID, capability)
 	}
@@ -113,7 +124,7 @@ func (c *Checker) Channel(ctx context.Context, channelID, userID uuid.UUID, capa
 	}
 
 	if c.guests != nil {
-		allowed, err := c.guests.HasChannelAccess(ctx, ch.WorkspaceID, ch.ID, userID)
+		allowed, err := c.guests.HasChannelAccess(ctx, *ch.WorkspaceID, ch.ID, userID)
 		if err != nil {
 			return nil, err
 		}
@@ -241,8 +252,48 @@ func (c *Checker) channelDecisionForWorkspaceMember(
 			WorkspaceMember: member,
 			ChannelMember:   channelMember,
 		}, nil
+	case entity.ChannelTypeSaved, entity.ChannelTypeSavedGlobal:
+		return nil, cerrors.NotFound("channel not found")
 	default:
 		return nil, cerrors.Forbidden("unsupported channel type")
+	}
+}
+
+func (c *Checker) selfChannelDecision(ctx context.Context, ch *entity.Channel, pathWorkspaceID, userID uuid.UUID) (*ChannelDecision, error) {
+	if ch.OwnerUserID == nil || *ch.OwnerUserID != userID {
+		return nil, cerrors.NotFound("channel not found")
+	}
+
+	switch ch.Type {
+	case entity.ChannelTypeSaved:
+		if ch.WorkspaceID == nil {
+			return nil, cerrors.NotFound("channel not found")
+		}
+		if pathWorkspaceID != uuid.Nil && *ch.WorkspaceID != pathWorkspaceID {
+			return nil, cerrors.NotFound("channel not found")
+		}
+		return &ChannelDecision{
+			Subject: SubjectMember,
+			Channel: ch,
+		}, nil
+	case entity.ChannelTypeSavedGlobal:
+		if pathWorkspaceID == uuid.Nil {
+			return nil, cerrors.NotFound("channel not found")
+		}
+		member, err := c.workspaceMember(ctx, pathWorkspaceID, userID)
+		if err != nil {
+			if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeForbidden {
+				return nil, cerrors.Forbidden("user is not a member of this workspace")
+			}
+			return nil, err
+		}
+		return &ChannelDecision{
+			Subject:         SubjectMember,
+			Channel:         ch,
+			WorkspaceMember: member,
+		}, nil
+	default:
+		return nil, cerrors.NotFound("channel not found")
 	}
 }
 

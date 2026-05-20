@@ -324,6 +324,23 @@ func (s *Service) UpdateProfile(ctx context.Context, userID uuid.UUID, input Upd
 	return user, nil
 }
 
+func (s *Service) UpdateSavedMessagesMode(ctx context.Context, userID uuid.UUID, mode entity.SavedMessagesMode) (*entity.User, error) {
+	if mode != entity.SavedMessagesModePerWorkspace && mode != entity.SavedMessagesModeGlobal {
+		return nil, cerrors.InvalidInput("invalid saved_messages_mode")
+	}
+	user, err := s.GetUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	user.SavedMessagesMode = mode
+	user.UpdatedAt = time.Now().UTC()
+	if err := s.users.Update(ctx, user); err != nil {
+		slog.ErrorContext(ctx, "failed to update saved messages mode", "user_id", userID, "error", err)
+		return nil, cerrors.Internal("failed to update saved messages mode", err)
+	}
+	return user, nil
+}
+
 func (s *Service) ListWorkspaces(ctx context.Context, userID uuid.UUID) ([]entity.Workspace, error) {
 	if _, err := s.GetUser(ctx, userID); err != nil {
 		return nil, err
@@ -535,12 +552,18 @@ func (s *Service) Login(ctx context.Context, email, password, deviceInfo, ipAddr
 		return nil, cerrors.Internal("failed to fetch user", err)
 	}
 
-	if user.Status != entity.UserStatusActive {
-		return nil, cerrors.Forbidden("account is not active")
-	}
-
 	if err := verifyPassword(password, user.PasswordHash); err != nil {
 		return nil, cerrors.Unauthorized("invalid email or password")
+	}
+
+	if user.Status == entity.UserStatusSuspended {
+		return nil, cerrors.AccountSuspended()
+	}
+	if user.Status == entity.UserStatusDeactivated {
+		return nil, cerrors.AccountDeactivated()
+	}
+	if user.Status != entity.UserStatusActive {
+		return nil, cerrors.Forbidden("account is not active")
 	}
 
 	// Create server-side session.
@@ -648,10 +671,20 @@ func (s *Service) ValidateToken(tokenString string) (uuid.UUID, string, error) {
 	return claims.UserID, claims.SessionID, nil
 }
 
-// Logout revokes a single session.
-func (s *Service) Logout(ctx context.Context, sessionID string) error {
-	if err := s.sessions.Revoke(ctx, sessionID); err != nil {
-		slog.ErrorContext(ctx, "failed to revoke session", "session_id", sessionID, "error", err)
+// LogoutSessionForUser revokes a session by id, but only if it belongs to
+// userID. Returns NotFound if the target session does not exist or belongs
+// to a different user — UUID unpredictability is not an authorization
+// boundary.
+func (s *Service) LogoutSessionForUser(ctx context.Context, userID, targetSessionID string) error {
+	ok, err := s.sessions.SessionBelongsToUser(ctx, userID, targetSessionID)
+	if err != nil {
+		return cerrors.Internal("session ownership check failed", err)
+	}
+	if !ok {
+		return cerrors.NotFound("session not found")
+	}
+	if err := s.sessions.Revoke(ctx, targetSessionID); err != nil {
+		slog.ErrorContext(ctx, "failed to revoke session", "session_id", targetSessionID, "error", err)
 		return cerrors.Internal("failed to revoke session", err)
 	}
 	return nil
@@ -662,6 +695,104 @@ func (s *Service) LogoutAll(ctx context.Context, userID string) error {
 	if err := s.sessions.RevokeAllUserSessions(ctx, userID); err != nil {
 		slog.ErrorContext(ctx, "failed to revoke all sessions", "user_id", userID, "error", err)
 		return cerrors.Internal("failed to revoke sessions", err)
+	}
+	return nil
+}
+
+// Deactivate marks an account deactivated after revoking every refresh session.
+func (s *Service) Deactivate(ctx context.Context, userID uuid.UUID) error {
+	user, err := s.GetUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if user.Status == entity.UserStatusSuspended {
+		return cerrors.Forbidden("suspended accounts cannot self-deactivate")
+	}
+	if user.Status == entity.UserStatusDeactivated {
+		return nil
+	}
+
+	if err := s.LogoutAll(ctx, userID.String()); err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	user.Status = entity.UserStatusDeactivated
+	user.DeactivatedAt = &now
+	user.UpdatedAt = now
+	if err := s.users.Update(ctx, user); err != nil {
+		return cerrors.Internal("failed to deactivate user", err)
+	}
+	return nil
+}
+
+// ReactivateAndLogin verifies credentials, reactivates a deactivated account,
+// and issues the same token response as Login.
+func (s *Service) ReactivateAndLogin(ctx context.Context, email, password, deviceInfo, ipAddress string) (*LoginResult, error) {
+	input := LoginInput{
+		Email:    email,
+		Password: password,
+	}
+	if err := validate.Struct(input); err != nil {
+		return nil, err
+	}
+
+	user, err := s.users.GetByEmail(ctx, email)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return nil, cerrors.Unauthorized("invalid email or password")
+		}
+		slog.ErrorContext(ctx, "failed to fetch user by email", "error", err)
+		return nil, cerrors.Internal("failed to fetch user", err)
+	}
+
+	if err := verifyPassword(password, user.PasswordHash); err != nil {
+		return nil, cerrors.Unauthorized("invalid email or password")
+	}
+
+	if user.Status == entity.UserStatusSuspended {
+		return nil, cerrors.AccountSuspended()
+	}
+	if user.Status == entity.UserStatusActive {
+		return nil, cerrors.NotDeactivated()
+	}
+	if user.Status != entity.UserStatusDeactivated {
+		return nil, cerrors.Forbidden("account is not in a reactivatable state")
+	}
+
+	user.Status = entity.UserStatusActive
+	user.DeactivatedAt = nil
+	user.UpdatedAt = time.Now().UTC()
+	if err := s.users.Update(ctx, user); err != nil {
+		return nil, cerrors.Internal("failed to reactivate user", err)
+	}
+
+	result, err := s.CreateSessionForUser(ctx, user.ID, deviceInfo, ipAddress)
+	if err != nil {
+		now := time.Now().UTC()
+		user.Status = entity.UserStatusDeactivated
+		user.DeactivatedAt = &now
+		user.UpdatedAt = now
+		if rbErr := s.users.Update(ctx, user); rbErr != nil {
+			slog.ErrorContext(ctx, "reactivate-and-login rollback failed",
+				"user_id", user.ID,
+				"rollback_err", rbErr,
+				"session_err", err,
+			)
+		}
+		return nil, err
+	}
+
+	return result, nil
+}
+
+// LogoutOthers revokes every session for the user except keepSessionID.
+// Returns a non-nil error if ANY target session fails to revoke — the
+// HTTP layer must NOT report 204 in that case.
+func (s *Service) LogoutOthers(ctx context.Context, userID, keepSessionID string) error {
+	if err := s.sessions.RevokeAllUserSessionsExcept(ctx, userID, keepSessionID); err != nil {
+		slog.ErrorContext(ctx, "failed to revoke other sessions", "user_id", userID, "error", err)
+		return cerrors.Internal("failed to revoke other sessions", err)
 	}
 	return nil
 }

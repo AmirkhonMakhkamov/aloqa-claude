@@ -142,7 +142,11 @@ func (s *Service) canAccessMessage(
 	if err != nil {
 		return cerrors.Internal("failed to get channel", err)
 	}
-	if _, err := s.members.GetMember(ctx, ch.WorkspaceID, userID); err == nil {
+	if ch.WorkspaceID == nil {
+		return cerrors.NotFound("channel not found")
+	}
+	workspaceID := *ch.WorkspaceID
+	if _, err := s.members.GetMember(ctx, workspaceID, userID); err == nil {
 		if ch.Type == entity.ChannelTypePublic && capability == accesspolicy.CapabilityView {
 			return nil
 		}
@@ -158,7 +162,7 @@ func (s *Service) canAccessMessage(
 	}
 
 	if s.guests != nil {
-		allowed, err := s.guests.HasChannelAccess(ctx, ch.WorkspaceID, ch.ID, userID)
+		allowed, err := s.guests.HasChannelAccess(ctx, workspaceID, ch.ID, userID)
 		if err != nil {
 			return err
 		}
@@ -298,8 +302,8 @@ func (s *Service) Upload(
 		channel, err := s.channels.GetByID(ctx, channelID)
 		if err != nil {
 			slog.ErrorContext(ctx, "failed to load channel for file search indexing", "channel_id", channelID, "error", err)
-		} else if s.search != nil {
-			if err := s.search.IndexFile(ctx, channel.WorkspaceID, channelID, attachment.ID, messageID, filename, mimeType, attachment.CreatedAt); err != nil {
+		} else if s.search != nil && channel.WorkspaceID != nil {
+			if err := s.search.IndexFile(ctx, *channel.WorkspaceID, channelID, attachment.ID, messageID, filename, mimeType, attachment.CreatedAt); err != nil {
 				slog.ErrorContext(ctx, "failed to enqueue file search index", "attachment_id", attachment.ID, "error", err)
 			}
 		}
@@ -409,7 +413,10 @@ func (s *Service) Delete(ctx context.Context, key string, userID uuid.UUID) erro
 			if err := scope.Messages().DeleteAttachment(ctx, attachment.ID); err != nil {
 				return err
 			}
-			return s.enqueueFileDeleteSearchTx(ctx, scope, channel.WorkspaceID, attachment.ID)
+			if channel.WorkspaceID == nil {
+				return nil
+			}
+			return s.enqueueFileDeleteSearchTx(ctx, scope, *channel.WorkspaceID, attachment.ID)
 		}); err != nil {
 			slog.ErrorContext(ctx, "failed to delete attachment transaction", "attachment_id", attachment.ID, "error", err)
 			return cerrors.Internal("failed to delete attachment record", err)
@@ -428,8 +435,8 @@ func (s *Service) Delete(ctx context.Context, key string, userID uuid.UUID) erro
 		slog.ErrorContext(ctx, "failed to delete attachment record", "attachment_id", attachment.ID, "error", err)
 		return cerrors.Internal("failed to delete attachment record", err)
 	}
-	if s.search != nil {
-		if err := s.search.DeleteFile(ctx, channel.WorkspaceID, attachment.ID); err != nil {
+	if s.search != nil && channel.WorkspaceID != nil {
+		if err := s.search.DeleteFile(ctx, *channel.WorkspaceID, attachment.ID); err != nil {
 			slog.ErrorContext(ctx, "failed to enqueue file search delete", "attachment_id", attachment.ID, "error", err)
 		}
 	}
@@ -449,12 +456,17 @@ func (s *Service) enqueueFileSearchTx(ctx context.Context, scope txscope.Scope, 
 		return err
 	}
 	return scope.SearchIndexer().EnqueueUpsert(ctx, searchsvc.Document{
-		WorkspaceID: channel.WorkspaceID,
-		ResourceID:  attachment.ID,
-		ChannelID:   &channelID,
-		Type:        searchsvc.ResourceTypeFile,
-		Title:       fileName,
-		Content:     strings.TrimSpace(fileName + " " + mimeType),
+		WorkspaceID: func() uuid.UUID {
+			if channel.WorkspaceID == nil {
+				return uuid.Nil
+			}
+			return *channel.WorkspaceID
+		}(),
+		ResourceID: attachment.ID,
+		ChannelID:  &channelID,
+		Type:       searchsvc.ResourceTypeFile,
+		Title:      fileName,
+		Content:    strings.TrimSpace(fileName + " " + mimeType),
 		Metadata: map[string]any{
 			"message_id": messageID.String(),
 			"mime_type":  mimeType,

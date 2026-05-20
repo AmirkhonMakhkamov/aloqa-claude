@@ -9,11 +9,17 @@ import (
 type ChannelType string
 
 const (
-	ChannelTypePublic  ChannelType = "public"
-	ChannelTypePrivate ChannelType = "private"
-	ChannelTypeDM      ChannelType = "dm"
-	ChannelTypeGroupDM ChannelType = "group_dm"
+	ChannelTypePublic      ChannelType = "public"
+	ChannelTypePrivate     ChannelType = "private"
+	ChannelTypeDM          ChannelType = "dm"
+	ChannelTypeGroupDM     ChannelType = "group_dm"
+	ChannelTypeSaved       ChannelType = "saved"
+	ChannelTypeSavedGlobal ChannelType = "saved_global"
 )
+
+func (t ChannelType) IsSelfChannel() bool {
+	return t == ChannelTypeSaved || t == ChannelTypeSavedGlobal
+}
 
 type ChannelRole string
 
@@ -25,11 +31,12 @@ const (
 
 type Channel struct {
 	ID          uuid.UUID   `json:"id"`
-	WorkspaceID uuid.UUID   `json:"workspace_id"`
+	WorkspaceID *uuid.UUID  `json:"workspace_id"`
 	Name        string      `json:"name"`
 	Topic       string      `json:"topic,omitempty"`
 	Type        ChannelType `json:"type"`
 	CreatedBy   uuid.UUID   `json:"created_by"`
+	OwnerUserID *uuid.UUID  `json:"owner_user_id,omitempty"`
 	Archived    bool        `json:"archived"`
 	CreatedAt   time.Time   `json:"created_at"`
 	UpdatedAt   time.Time   `json:"updated_at"`

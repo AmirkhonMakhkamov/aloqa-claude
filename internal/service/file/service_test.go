@@ -37,7 +37,7 @@ func TestUploadScannerDoesNotConsumeStoredBody(t *testing.T) {
 		attachmentsByKey: map[string]*entity.Attachment{},
 	}
 	channels := &fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
-		channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePublic},
+		channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
 	}, members: map[[2]uuid.UUID]*entity.ChannelMember{
 		{channelID, userID}: {ChannelID: channelID, UserID: userID, Role: entity.ChannelRoleMember},
 	}}
@@ -77,7 +77,7 @@ func TestDownloadByKeyRequiresMessageAccess(t *testing.T) {
 		},
 	}
 	channels := &fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
-		channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePrivate},
+		channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePrivate},
 	}, members: map[[2]uuid.UUID]*entity.ChannelMember{
 		{channelID, ownerID}: {ChannelID: channelID, UserID: ownerID, Role: entity.ChannelRoleMember},
 	}}
@@ -108,7 +108,7 @@ func TestDownloadByKeyDistinguishesMissingFileFromStorageFailure(t *testing.T) {
 		},
 	}
 	channels := &fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
-		channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePublic},
+		channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
 	}}
 	members := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
 		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
@@ -153,7 +153,7 @@ func TestGuestGrantAllowsFileDownloadForInvitedChannel(t *testing.T) {
 		},
 	}
 	channels := &fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
-		channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePrivate},
+		channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePrivate},
 	}}
 	guests := guestaccess.NewChecker(&fakeGuestAccessRepo{grants: []entity.GuestAccessGrant{{
 		ID:          uuid.New(),
@@ -192,7 +192,7 @@ func TestCollaboratorUploadUsesSharedAccessPolicy(t *testing.T) {
 	}
 	channels := &fakeChannelRepo{
 		channels: map[uuid.UUID]*entity.Channel{
-			channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypeDM},
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypeDM},
 		},
 		members: map[[2]uuid.UUID]*entity.ChannelMember{
 			{channelID, sourceUserID}:   {ChannelID: channelID, UserID: sourceUserID, Role: entity.ChannelRoleMember},
@@ -238,7 +238,7 @@ func TestPresignDownloadByKeyUsesObjectStoreSignerWhenAvailable(t *testing.T) {
 		},
 	}
 	channels := &fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
-		channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePublic},
+		channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
 	}, members: map[[2]uuid.UUID]*entity.ChannelMember{
 		{channelID, userID}: {ChannelID: channelID, UserID: userID, Role: entity.ChannelRoleMember},
 	}}
@@ -434,8 +434,14 @@ func (r *fakeMessageRepo) ListByChannel(context.Context, uuid.UUID, pagination.P
 func (r *fakeMessageRepo) ListThreadReplies(context.Context, uuid.UUID, pagination.Params) ([]entity.Message, error) {
 	return nil, nil
 }
+func (r *fakeMessageRepo) HasActiveMessage(context.Context, uuid.UUID) (bool, error) {
+	return false, nil
+}
 func (r *fakeMessageRepo) Update(context.Context, *entity.Message) error { return nil }
 func (r *fakeMessageRepo) SoftDelete(context.Context, uuid.UUID) error   { return nil }
+func (r *fakeMessageRepo) SoftDeleteWithCascade(context.Context, uuid.UUID) ([]uuid.UUID, error) {
+	return nil, nil
+}
 func (r *fakeMessageRepo) Pin(context.Context, uuid.UUID, uuid.UUID) error {
 	return nil
 }
@@ -444,9 +450,16 @@ func (r *fakeMessageRepo) ListPinned(context.Context, uuid.UUID) ([]entity.Messa
 	return nil, nil
 }
 func (r *fakeMessageRepo) AddReaction(context.Context, *entity.Reaction) error { return nil }
+func (r *fakeMessageRepo) GetReactionByID(context.Context, uuid.UUID) (*entity.Reaction, error) {
+	return nil, cerrors.NotFound("reaction not found")
+}
+func (r *fakeMessageRepo) GetReactionByMessageUserEmoji(context.Context, uuid.UUID, uuid.UUID, string) (*entity.Reaction, error) {
+	return nil, cerrors.NotFound("reaction not found")
+}
 func (r *fakeMessageRepo) RemoveReaction(context.Context, uuid.UUID, uuid.UUID, string) error {
 	return nil
 }
+func (r *fakeMessageRepo) RemoveReactionByID(context.Context, uuid.UUID) error { return nil }
 func (r *fakeMessageRepo) ListReactions(context.Context, uuid.UUID) ([]entity.Reaction, error) {
 	return nil, nil
 }

@@ -47,6 +47,7 @@ type recentCallRepository interface {
 // Service handles call lifecycle, participant management, and WebRTC signaling.
 type Service struct {
 	calls         repository.CallRepository
+	callMessages  repository.CallMessageRepository
 	breakoutRooms repository.BreakoutRoomRepository
 	channels      repository.ChannelRepository
 	members       repository.WorkspaceRepository
@@ -62,6 +63,10 @@ type Service struct {
 type MediaConfig struct {
 	TokenSecret              []byte
 	TokenTTL                 time.Duration
+	TURNURLs                 []string
+	TURNUsername             string
+	TURNCredential           string
+	TURNCredentialsTTL       time.Duration
 	MaxPresentersPerCall     int
 	MaxViewersPerCall        int
 	MaxScreenSharesPerCall   int
@@ -110,6 +115,10 @@ func (s *Service) SetMediaControlPlane(control MediaControlPlane) {
 	s.control = control
 }
 
+func (s *Service) SetCallMessageRepo(repo repository.CallMessageRepository) {
+	s.callMessages = repo
+}
+
 func (s *Service) SetTransactionManager(manager txscope.Manager) {
 	s.tx = manager
 }
@@ -142,7 +151,11 @@ func (s *Service) canAccessWorkspaceContent(ctx context.Context, workspaceID, us
 }
 
 func (s *Service) requireChannelAccess(ctx context.Context, ch *entity.Channel, userID uuid.UUID) error {
-	if err := s.requireWorkspaceMember(ctx, ch.WorkspaceID, userID); err == nil {
+	if ch.WorkspaceID == nil {
+		return cerrors.NotFound("channel not found")
+	}
+	workspaceID := *ch.WorkspaceID
+	if err := s.requireWorkspaceMember(ctx, workspaceID, userID); err == nil {
 		if ch.Type == entity.ChannelTypePublic {
 			return nil
 		}
@@ -160,7 +173,7 @@ func (s *Service) requireChannelAccess(ctx context.Context, ch *entity.Channel, 
 		return nil
 	}
 	if s.guests != nil {
-		allowed, err := s.guests.HasChannelAccess(ctx, ch.WorkspaceID, ch.ID, userID)
+		allowed, err := s.guests.HasChannelAccess(ctx, workspaceID, ch.ID, userID)
 		if err != nil {
 			return err
 		}
@@ -328,7 +341,7 @@ func (s *Service) StartCall(
 			slog.ErrorContext(ctx, "failed to get channel for call", "channel_id", *channelID, "error", err)
 			return nil, cerrors.Internal("failed to get channel", err)
 		}
-		if ch.WorkspaceID != workspaceID {
+		if ch.WorkspaceID == nil || *ch.WorkspaceID != workspaceID {
 			return nil, cerrors.NotFound("channel not found")
 		}
 		if err := s.requireChannelAccess(ctx, ch, userID); err != nil {
@@ -1227,6 +1240,16 @@ func (s *Service) publishParticipantEvent(ctx context.Context, evtType event.Typ
 	})
 }
 
+func (s *Service) publishCallMessageEvent(ctx context.Context, evtType event.Type, call *entity.Call, msg *entity.CallMessage) {
+	channelID := uuid.Nil
+	if call.ChannelID != nil {
+		channelID = *call.ChannelID
+	}
+	subject := fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID)
+	payload := callMessagePayloadFor(evtType, call, msg)
+	s.doPublish(ctx, evtType, subject, call.WorkspaceID, channelID, msg.SenderID, payload)
+}
+
 func (s *Service) enqueueCallEventTx(ctx context.Context, scope txscope.Scope, evtType event.Type, call *entity.Call, userID uuid.UUID) error {
 	channelID := uuid.Nil
 	if call != nil && call.ChannelID != nil {
@@ -1246,11 +1269,28 @@ func (s *Service) enqueueParticipantEventTx(ctx context.Context, scope txscope.S
 	})
 }
 
+func (s *Service) enqueueCallMessageEventTx(ctx context.Context, scope txscope.Scope, evtType event.Type, call *entity.Call, msg *entity.CallMessage) error {
+	channelID := uuid.Nil
+	if call.ChannelID != nil {
+		channelID = *call.ChannelID
+	}
+	subject := fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID)
+	payload := callMessagePayloadFor(evtType, call, msg)
+	return s.enqueueRealtimeTx(ctx, scope, evtType, subject, call.WorkspaceID, channelID, msg.SenderID, payload)
+}
+
+func callMessagePayloadFor(evtType event.Type, call *entity.Call, msg *entity.CallMessage) any {
+	if evtType == event.TypeCallMessageDeleted {
+		return event.CallMessageDeletedPayload{CallID: call.ID, MessageID: msg.ID}
+	}
+	return event.CallMessagePayload{CallID: call.ID, Message: *msg}
+}
+
 func (s *Service) enqueueRealtimeTx(ctx context.Context, scope txscope.Scope, evtType event.Type, subject string, workspaceID, channelID, userID uuid.UUID, payload any) error {
 	if scope == nil {
 		return cerrors.Unavailable("transaction scope is not configured")
 	}
-	evt, body, _, err := event.Prepare(subject, event.Event{
+	evt, body, durable, err := event.Prepare(subject, event.Event{
 		Type:        evtType,
 		WorkspaceID: workspaceID,
 		ChannelID:   channelID,
@@ -1260,6 +1300,11 @@ func (s *Service) enqueueRealtimeTx(ctx context.Context, scope txscope.Scope, ev
 	})
 	if err != nil {
 		return err
+	}
+	if !durable {
+		slog.WarnContext(ctx, "enqueueRealtimeTx invoked for non-durable event; skipping outbox enqueue",
+			"type", evtType, "subject", subject)
+		return nil
 	}
 	return scope.EnqueueRealtime(ctx, evt, body)
 }

@@ -45,6 +45,7 @@ import (
 	"aloqa/internal/service/presence"
 	realtimesvc "aloqa/internal/service/realtime"
 	"aloqa/internal/service/recording"
+	savedsvc "aloqa/internal/service/saved"
 	"aloqa/internal/service/storageops"
 
 	"aloqa/internal/security/collabaccess"
@@ -181,6 +182,7 @@ func run() error {
 	channelRepo := postgres.NewChannelRepo(pool)
 	messageRepo := postgres.NewMessageRepo(pool)
 	callRepo := postgres.NewCallRepo(pool)
+	callMessageRepo := postgres.NewCallMessageRepo(pool)
 	breakoutRoomRepo := postgres.NewBreakoutRoomRepo(pool)
 	recordingRepo := postgres.NewRecordingRepo(pool)
 	auditRepo := postgres.NewAuditRepo(pool)
@@ -191,6 +193,7 @@ func run() error {
 	channelAccessStateRepo := postgres.NewChannelAccessStateRepo(pool)
 	workspaceCollaborationRepo := postgres.NewWorkspaceCollaborationRepo(pool)
 	realtimeRepo := postgres.NewRealtimeRepo(pool)
+	savedRepo := postgres.NewSavedRepo(pool)
 	mediaRepo := postgres.NewMediaRepo(pool)
 	calendarRepo := postgres.NewCalendarRepo(pool)
 
@@ -260,6 +263,7 @@ func run() error {
 		Channels:            channelRepo,
 		ChannelGrants:       channelAccessGrantRepo,
 		Calls:               callRepo,
+		CallMessages:        callMessageRepo,
 		Calendars:           calendarRepo,
 		Recordings:          recordingRepo,
 		Invites:             guestInviteRepo,
@@ -346,9 +350,14 @@ func run() error {
 	authSvc.SetSessionOperationTimeout(cfg.Redis.OperationTimeout)
 	chatSvc := chat.NewService(channelRepo, messageRepo, workspaceRepo, channelAccessGrantRepo, realtimePublisher, guestAccessChecker, collaborationAccessChecker, searchSvc, collaborationSvc)
 	chatSvc.SetTransactionManager(txManager)
+	savedSvc := savedsvc.NewService(userRepo, channelRepo, messageRepo, savedRepo, channelAccessPolicy, realtimePublisher)
 	callSvc := call.NewService(callRepo, breakoutRoomRepo, channelRepo, workspaceRepo, realtimePublisher, sfuServer, call.MediaConfig{
 		TokenSecret:              []byte(cfg.JWT.Secret),
 		TokenTTL:                 cfg.WebRTC.MediaTokenTTL,
+		TURNURLs:                 turnURLsFromConfig(cfg.WebRTC.TURNServer),
+		TURNUsername:             cfg.WebRTC.TURNUsername,
+		TURNCredential:           cfg.WebRTC.TURNPassword,
+		TURNCredentialsTTL:       cfg.WebRTC.MediaTokenTTL,
 		MaxPresentersPerCall:     cfg.WebRTC.MaxPresentersPerCall,
 		MaxViewersPerCall:        cfg.WebRTC.MaxViewersPerCall,
 		MaxScreenSharesPerCall:   cfg.WebRTC.MaxScreenSharesPerCall,
@@ -367,6 +376,7 @@ func run() error {
 		},
 	}, guestAccessChecker, collaborationAccessChecker)
 	callSvc.SetMediaControlPlane(mediaOpsSvc)
+	callSvc.SetCallMessageRepo(callMessageRepo)
 	callSvc.SetTransactionManager(txManager)
 	calendarSvc := calendarsvc.NewService(calendarRepo, workspaceRepo, callSvc, realtimePublisher)
 	calendarSvc.SetTransactionManager(txManager)
@@ -465,6 +475,7 @@ func run() error {
 	authHandler := httphandler.NewAuthHandler(authSvc)
 	accountHandler := httphandler.NewAccountHandler(authSvc)
 	channelHandler := httphandler.NewChannelHandler(chatSvc)
+	savedHandler := httphandler.NewSavedHandler(savedSvc)
 	messageHandler := httphandler.NewMessageHandler(chatSvc)
 	callHandler := httphandler.NewCallHandler(callSvc)
 	calendarHandler := httphandler.NewCalendarHandler(calendarSvc)
@@ -485,6 +496,7 @@ func run() error {
 		Auth:             authHandler,
 		Account:          accountHandler,
 		Channels:         channelHandler,
+		Saved:            savedHandler,
 		Messages:         messageHandler,
 		Calls:            callHandler,
 		Calendar:         calendarHandler,
@@ -672,6 +684,14 @@ func runCalendarReminderOutboxWorker(ctx context.Context, svc *calendarsvc.Servi
 		case <-ticker.C:
 		}
 	}
+}
+
+func turnURLsFromConfig(server string) []string {
+	server = strings.TrimSpace(server)
+	if server == "" {
+		return nil
+	}
+	return []string{server}
 }
 
 func forwardSessionEvictions(ctx context.Context, ps *pubsub.PubSub, hub *ws.Hub, presenceSvc *presence.Service) {

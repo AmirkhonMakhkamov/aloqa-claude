@@ -28,7 +28,7 @@ func TestSearchRequiresUserWorkspaceAndChannelAccess(t *testing.T) {
 		}},
 		&fakeChannelRepo{
 			channels: map[uuid.UUID]*entity.Channel{
-				privateChannelID: {ID: privateChannelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePrivate},
+				privateChannelID: {ID: privateChannelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePrivate},
 			},
 			members: map[[2]uuid.UUID]*entity.ChannelMember{
 				{privateChannelID, memberID}: {ChannelID: privateChannelID, UserID: memberID, Role: entity.ChannelRoleMember},
@@ -79,7 +79,7 @@ func TestSearchGuestScopeUsesAccessibleChannelsOnly(t *testing.T) {
 	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{}}
 	channels := &fakeChannelRepo{
 		channels: map[uuid.UUID]*entity.Channel{
-			privateChannelID: {ID: privateChannelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePrivate},
+			privateChannelID: {ID: privateChannelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePrivate},
 		},
 		members: map[[2]uuid.UUID]*entity.ChannelMember{},
 	}
@@ -255,7 +255,7 @@ func (r *fakeChannelRepo) GetByID(_ context.Context, id uuid.UUID) (*entity.Chan
 func (r *fakeChannelRepo) ListByWorkspace(_ context.Context, workspaceID uuid.UUID, _ pagination.Params) ([]entity.Channel, error) {
 	var channels []entity.Channel
 	for _, ch := range r.channels {
-		if ch.WorkspaceID == workspaceID {
+		if ch.WorkspaceID != nil && *ch.WorkspaceID == workspaceID {
 			channels = append(channels, *ch)
 		}
 	}
@@ -267,7 +267,7 @@ func (r *fakeChannelRepo) ListByUser(_ context.Context, workspaceID, userID uuid
 		if key[1] != userID {
 			continue
 		}
-		if ch := r.channels[key[0]]; ch != nil && ch.WorkspaceID == workspaceID {
+		if ch := r.channels[key[0]]; ch != nil && ch.WorkspaceID != nil && *ch.WorkspaceID == workspaceID {
 			channels = append(channels, *ch)
 		}
 	}

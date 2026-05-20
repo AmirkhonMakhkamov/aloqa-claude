@@ -28,7 +28,7 @@ func TestCallTenantBoundaries(t *testing.T) {
 		{workspaceA, userID}: {WorkspaceID: workspaceA, UserID: userID, Role: entity.WorkspaceRoleMember},
 	}}
 	channels := &fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
-		channelID: {ID: channelID, WorkspaceID: workspaceB, Type: entity.ChannelTypePublic},
+		channelID: {ID: channelID, WorkspaceID: &workspaceB, Type: entity.ChannelTypePublic},
 	}}
 	calls := &fakeCallRepo{calls: map[uuid.UUID]*entity.Call{
 		callID: {ID: callID, WorkspaceID: workspaceB, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive},
@@ -230,7 +230,7 @@ func TestGuestGrantAllowsJoiningChannelScopedCall(t *testing.T) {
 	}
 	channels := &fakeChannelRepo{
 		channels: map[uuid.UUID]*entity.Channel{
-			channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePrivate},
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePrivate},
 		},
 	}
 	guests := guestaccess.NewChecker(&fakeGuestAccessRepo{grants: []entity.GuestAccessGrant{{
@@ -269,7 +269,7 @@ func TestCrossWorkspaceDMMemberCanJoinSharedChannelCall(t *testing.T) {
 	}
 	channels := &fakeChannelRepo{
 		channels: map[uuid.UUID]*entity.Channel{
-			channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypeDM},
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypeDM},
 		},
 		members: map[[2]uuid.UUID]*entity.ChannelMember{
 			{channelID, hostID}:       {ChannelID: channelID, UserID: hostID},
@@ -310,7 +310,7 @@ func TestCrossWorkspaceDMMemberCannotJoinCallWhenSharedCallsRevoked(t *testing.T
 	}
 	channels := &fakeChannelRepo{
 		channels: map[uuid.UUID]*entity.Channel{
-			channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypeDM},
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypeDM},
 		},
 		members: map[[2]uuid.UUID]*entity.ChannelMember{
 			{channelID, hostID}:       {ChannelID: channelID, UserID: hostID},
@@ -570,8 +570,15 @@ type noopPublisher struct{}
 func (noopPublisher) Publish(context.Context, string, []byte) error { return nil }
 
 type capturingPublisher struct {
-	called  bool
+	called   bool
+	subject  string
+	body     []byte
+	captures []capturedPublish
+}
+
+type capturedPublish struct {
 	subject string
+	body    []byte
 }
 
 type fakeCallCollabChecker struct {
@@ -583,9 +590,14 @@ func (f fakeCallCollabChecker) AuthorizeCall(context.Context, uuid.UUID, uuid.UU
 	return f.decision, f.err
 }
 
-func (p *capturingPublisher) Publish(_ context.Context, subject string, _ []byte) error {
+func (p *capturingPublisher) Publish(_ context.Context, subject string, body []byte) error {
 	p.called = true
 	p.subject = subject
+	p.body = append([]byte(nil), body...)
+	p.captures = append(p.captures, capturedPublish{
+		subject: subject,
+		body:    append([]byte(nil), body...),
+	})
 	return nil
 }
 

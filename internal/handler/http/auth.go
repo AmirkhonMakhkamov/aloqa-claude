@@ -4,9 +4,11 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"aloqa/internal/middleware"
 	"aloqa/internal/pkg/cerrors"
+	"aloqa/internal/platform/uaparser"
 	"aloqa/internal/service/auth"
 )
 
@@ -43,6 +45,19 @@ type refreshRequest struct {
 
 type logoutRequest struct {
 	SessionID string `json:"session_id"`
+}
+
+type sessionListEntry struct {
+	ID           string    `json:"id"`
+	UserID       string    `json:"user_id"`
+	UserAgent    string    `json:"user_agent"`
+	IP           string    `json:"ip,omitempty"`
+	IsCurrent    bool      `json:"is_current"`
+	DeviceLabel  string    `json:"device_label,omitempty"`
+	BrowserLabel string    `json:"browser_label,omitempty"`
+	OsLabel      string    `json:"os_label,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	LastActiveAt time.Time `json:"last_active_at"`
 }
 
 func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
@@ -86,6 +101,29 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *AuthHandler) ReactivateAndLogin(w http.ResponseWriter, r *http.Request) {
+	var req loginRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	ipAddress := extractClientIP(r)
+
+	result, err := h.svc.ReactivateAndLogin(r.Context(), req.Email, req.Password, req.DeviceInfo, ipAddress)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, tokenResponse{
+		AccessToken:  result.AccessToken,
+		RefreshToken: result.RefreshToken,
+		SessionID:    result.SessionID,
+		ExpiresIn:    result.ExpiresIn,
+	})
+}
+
 func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	var req refreshRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -108,13 +146,26 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
-	// Get session ID from the JWT context (the session the user is currently using).
+	userID := middleware.UserIDFromContext(r.Context())
 	sessionID := middleware.SessionIDFromContext(r.Context())
 
-	// Allow overriding with an explicit session_id in body (to revoke a different session).
-	var req logoutRequest
-	if err := decodeJSON(r, &req); err == nil && req.SessionID != "" {
-		sessionID = req.SessionID
+	// Distinguish "empty body — revoke current session" from "non-empty
+	// malformed body — 400". We cannot rely on errors.Is(decodeJSON err,
+	// io.EOF) because the shared decodeJSON helper catches io.EOF internally
+	// and wraps it as cerrors.InvalidInput("request body is required") (see
+	// internal/handler/http/response.go:62-78). Use ContentLength as the
+	// discriminator: 0 means the client sent no body at all (the historical
+	// "revoke current session" contract), and any non-zero body must decode
+	// cleanly or 400.
+	if r.ContentLength != 0 {
+		var req logoutRequest
+		if err := decodeJSON(r, &req); err != nil {
+			writeErr(w, err)
+			return
+		}
+		if req.SessionID != "" {
+			sessionID = req.SessionID
+		}
 	}
 
 	if sessionID == "" {
@@ -122,7 +173,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.svc.Logout(r.Context(), sessionID); err != nil {
+	if err := h.svc.LogoutSessionForUser(r.Context(), userID.String(), sessionID); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -141,8 +192,25 @@ func (h *AuthHandler) LogoutAll(w http.ResponseWriter, r *http.Request) {
 	writeNoContent(w)
 }
 
+func (h *AuthHandler) LogoutOthers(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.UserIDFromContext(r.Context())
+	currentSessionID := middleware.SessionIDFromContext(r.Context())
+	if currentSessionID == "" {
+		// Server-side invariant violation — middleware always sets this for
+		// authenticated requests. Surface as Internal, not InvalidInput.
+		writeErr(w, cerrors.Internal("session id missing from context", nil))
+		return
+	}
+	if err := h.svc.LogoutOthers(r.Context(), userID.String(), currentSessionID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeNoContent(w)
+}
+
 func (h *AuthHandler) ListSessions(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
+	currentSessionID := middleware.SessionIDFromContext(r.Context())
 
 	sessions, err := h.svc.ListSessions(r.Context(), userID.String())
 	if err != nil {
@@ -150,7 +218,23 @@ func (h *AuthHandler) ListSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeOK(w, sessions)
+	out := make([]sessionListEntry, 0, len(sessions))
+	for _, s := range sessions {
+		device, browser, os := uaparser.Parse(s.DeviceInfo)
+		out = append(out, sessionListEntry{
+			ID:           s.ID,
+			UserID:       s.UserID,
+			UserAgent:    s.DeviceInfo,
+			IP:           s.IPAddress,
+			IsCurrent:    s.ID == currentSessionID,
+			DeviceLabel:  device,
+			BrowserLabel: browser,
+			OsLabel:      os,
+			CreatedAt:    s.CreatedAt,
+			LastActiveAt: s.LastActiveAt,
+		})
+	}
+	writeOK(w, out)
 }
 
 // extractClientIP returns the first valid IP from X-Forwarded-For, falling back

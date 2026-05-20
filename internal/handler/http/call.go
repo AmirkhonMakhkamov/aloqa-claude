@@ -423,6 +423,23 @@ func (h *CallHandler) MediaToken(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, token)
 }
 
+func (h *CallHandler) TurnCredentials(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+	userID := middleware.UserIDFromContext(r.Context())
+
+	credentials, err := h.svc.IssueTurnCredentials(r.Context(), workspaceID, callID, userID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w, credentials)
+}
+
 func (h *CallHandler) MediaOffer(w http.ResponseWriter, r *http.Request) {
 	callID, err := id.Parse(chi.URLParam(r, "callID"))
 	if err != nil {

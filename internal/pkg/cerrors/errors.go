@@ -10,15 +10,19 @@ import (
 type Code string
 
 const (
-	CodeNotFound      Code = "NOT_FOUND"
-	CodeAlreadyExists Code = "ALREADY_EXISTS"
-	CodeInvalidInput  Code = "INVALID_INPUT"
-	CodeUnauthorized  Code = "UNAUTHORIZED"
-	CodeForbidden     Code = "FORBIDDEN"
-	CodeInternal      Code = "INTERNAL"
-	CodeConflict      Code = "CONFLICT"
-	CodeRateLimited   Code = "RATE_LIMITED"
-	CodeUnavailable   Code = "UNAVAILABLE"
+	CodeNotFound           Code = "NOT_FOUND"
+	CodeAlreadyExists      Code = "ALREADY_EXISTS"
+	CodeInvalidInput       Code = "INVALID_INPUT"
+	CodeUnauthorized       Code = "UNAUTHORIZED"
+	CodeForbidden          Code = "FORBIDDEN"
+	CodeAccountDeactivated Code = "ACCOUNT_DEACTIVATED"
+	CodeAccountSuspended   Code = "ACCOUNT_SUSPENDED"
+	CodeNotDeactivated     Code = "NOT_DEACTIVATED"
+	CodeInternal           Code = "INTERNAL"
+	CodeConflict           Code = "CONFLICT"
+	CodeRateLimited        Code = "RATE_LIMITED"
+	CodeUnavailable        Code = "UNAVAILABLE"
+	CodeUnprocessable      Code = "UNPROCESSABLE"
 )
 
 // AppError is the standard application error type.
@@ -50,10 +54,12 @@ func (e *AppError) HTTPStatus() int {
 		return http.StatusBadRequest
 	case CodeUnauthorized:
 		return http.StatusUnauthorized
-	case CodeForbidden:
+	case CodeForbidden, CodeAccountDeactivated, CodeAccountSuspended, CodeNotDeactivated:
 		return http.StatusForbidden
 	case CodeRateLimited:
 		return http.StatusTooManyRequests
+	case CodeUnprocessable:
+		return http.StatusUnprocessableEntity
 	case CodeUnavailable:
 		return http.StatusServiceUnavailable
 	default:
@@ -81,6 +87,18 @@ func Forbidden(msg string) *AppError {
 	return &AppError{Code: CodeForbidden, Message: msg}
 }
 
+func AccountDeactivated() *AppError {
+	return &AppError{Code: CodeAccountDeactivated, Message: "account is deactivated"}
+}
+
+func AccountSuspended() *AppError {
+	return &AppError{Code: CodeAccountSuspended, Message: "account is suspended"}
+}
+
+func NotDeactivated() *AppError {
+	return &AppError{Code: CodeNotDeactivated, Message: "account is not deactivated"}
+}
+
 func Internal(msg string, err error) *AppError {
 	return &AppError{Code: CodeInternal, Message: msg, Err: err}
 }
@@ -91,6 +109,10 @@ func Conflict(msg string) *AppError {
 
 func Unavailable(msg string) *AppError {
 	return &AppError{Code: CodeUnavailable, Message: msg}
+}
+
+func Unprocessable(msg string) *AppError {
+	return &AppError{Code: CodeUnprocessable, Message: msg}
 }
 
 // AsAppError extracts an *AppError from an error chain.

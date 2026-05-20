@@ -36,8 +36,8 @@ func (r *ChannelRepo) withTx(tx pgx.Tx) *ChannelRepo {
 
 func (r *ChannelRepo) Create(ctx context.Context, ch *entity.Channel) error {
 	query := `
-		INSERT INTO channels (id, workspace_id, name, topic, type, created_by, archived, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
+		INSERT INTO channels (id, workspace_id, name, topic, type, created_by, owner_user_id, archived, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
 
 	_, err := r.db.Exec(ctx, query,
 		ch.ID,
@@ -46,6 +46,7 @@ func (r *ChannelRepo) Create(ctx context.Context, ch *entity.Channel) error {
 		ch.Topic,
 		ch.Type,
 		ch.CreatedBy,
+		ch.OwnerUserID,
 		ch.Archived,
 		ch.CreatedAt,
 		ch.UpdatedAt,
@@ -63,7 +64,7 @@ func (r *ChannelRepo) Create(ctx context.Context, ch *entity.Channel) error {
 
 func (r *ChannelRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Channel, error) {
 	query := `
-		SELECT id, workspace_id, name, topic, type, created_by, archived, created_at, updated_at
+		SELECT id, workspace_id, name, topic, type, created_by, owner_user_id, archived, created_at, updated_at
 		FROM channels
 		WHERE id = $1`
 
@@ -75,6 +76,7 @@ func (r *ChannelRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Channe
 		&ch.Topic,
 		&ch.Type,
 		&ch.CreatedBy,
+		&ch.OwnerUserID,
 		&ch.Archived,
 		&ch.CreatedAt,
 		&ch.UpdatedAt,
@@ -99,17 +101,17 @@ func (r *ChannelRepo) ListByWorkspace(ctx context.Context, workspaceID uuid.UUID
 
 	if p.Cursor != uuid.Nil {
 		query := `
-			SELECT id, workspace_id, name, topic, type, created_by, archived, created_at, updated_at
+			SELECT id, workspace_id, name, topic, type, created_by, owner_user_id, archived, created_at, updated_at
 			FROM channels
-			WHERE workspace_id = $1 AND id < $2
+			WHERE workspace_id = $1 AND id < $2 AND type NOT IN ('saved', 'saved_global')
 			ORDER BY id DESC
 			LIMIT $3`
 		rows, err = r.db.Query(ctx, query, workspaceID, p.Cursor, p.Limit+1)
 	} else {
 		query := `
-			SELECT id, workspace_id, name, topic, type, created_by, archived, created_at, updated_at
+			SELECT id, workspace_id, name, topic, type, created_by, owner_user_id, archived, created_at, updated_at
 			FROM channels
-			WHERE workspace_id = $1
+			WHERE workspace_id = $1 AND type NOT IN ('saved', 'saved_global')
 			ORDER BY id DESC
 			LIMIT $2`
 		rows, err = r.db.Query(ctx, query, workspaceID, p.Limit+1)
@@ -129,6 +131,7 @@ func (r *ChannelRepo) ListByWorkspace(ctx context.Context, workspaceID uuid.UUID
 			&ch.Topic,
 			&ch.Type,
 			&ch.CreatedBy,
+			&ch.OwnerUserID,
 			&ch.Archived,
 			&ch.CreatedAt,
 			&ch.UpdatedAt,
@@ -155,11 +158,12 @@ func (r *ChannelRepo) ListByUser(ctx context.Context, workspaceID, userID uuid.U
 	// sidebar after abandoning); the recipient only sees it once a real
 	// message lands. Non-DM channels are unaffected.
 	query := `
-		SELECT c.id, c.workspace_id, c.name, c.topic, c.type, c.created_by, c.archived, c.created_at, c.updated_at
+		SELECT c.id, c.workspace_id, c.name, c.topic, c.type, c.created_by, c.owner_user_id, c.archived, c.created_at, c.updated_at
 		FROM channels c
 		INNER JOIN channel_members cm ON cm.channel_id = c.id
 		WHERE c.workspace_id = $1
 		  AND cm.user_id = $2
+		  AND c.type NOT IN ('saved', 'saved_global')
 		  AND (
 		    c.type <> 'dm'
 		    OR c.created_by = $2
@@ -189,6 +193,7 @@ func (r *ChannelRepo) ListByUser(ctx context.Context, workspaceID, userID uuid.U
 			&ch.Topic,
 			&ch.Type,
 			&ch.CreatedBy,
+			&ch.OwnerUserID,
 			&ch.Archived,
 			&ch.CreatedAt,
 			&ch.UpdatedAt,
@@ -373,7 +378,7 @@ func (r *ChannelRepo) UpdateLastRead(ctx context.Context, channelID, userID uuid
 
 func (r *ChannelRepo) GetDMChannel(ctx context.Context, workspaceID, userA, userB uuid.UUID) (*entity.Channel, error) {
 	query := `
-		SELECT c.id, c.workspace_id, c.name, c.topic, c.type, c.created_by, c.archived, c.created_at, c.updated_at
+		SELECT c.id, c.workspace_id, c.name, c.topic, c.type, c.created_by, c.owner_user_id, c.archived, c.created_at, c.updated_at
 		FROM channels c
 		INNER JOIN channel_members cm1 ON cm1.channel_id = c.id AND cm1.user_id = $2
 		INNER JOIN channel_members cm2 ON cm2.channel_id = c.id AND cm2.user_id = $3
@@ -388,6 +393,7 @@ func (r *ChannelRepo) GetDMChannel(ctx context.Context, workspaceID, userA, user
 		&ch.Topic,
 		&ch.Type,
 		&ch.CreatedBy,
+		&ch.OwnerUserID,
 		&ch.Archived,
 		&ch.CreatedAt,
 		&ch.UpdatedAt,

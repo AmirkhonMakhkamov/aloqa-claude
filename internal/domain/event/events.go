@@ -46,6 +46,11 @@ const (
 	TypeCallParticipantLeft    Type = "call.participant.left"
 	TypeCallParticipantUpdated Type = "call.participant.updated"
 	TypeCallQualityAdapted     Type = "call.quality.adapted"
+	TypeCallMessageCreated     Type = "call.message.created"
+	TypeCallMessageDeleted     Type = "call.message.deleted"
+	TypeCallHandRaised         Type = "call.participant.hand_raised"
+	TypeCallHandLowered        Type = "call.participant.hand_lowered"
+	TypeCallReaction           Type = "call.reaction.added"
 
 	// Waiting room events.
 	TypeWaitingRoomJoined   Type = "waiting_room.joined"
@@ -106,7 +111,8 @@ type Definition struct {
 
 func DefinitionForType(t Type) Definition {
 	switch t {
-	case TypeTypingStarted, TypeSignalOffer, TypeSignalAnswer, TypeSignalCandidate:
+	case TypeTypingStarted, TypeSignalOffer, TypeSignalAnswer, TypeSignalCandidate,
+		TypeCallHandRaised, TypeCallHandLowered, TypeCallReaction:
 		return Definition{
 			Version:          CurrentVersion,
 			DeliverySemantic: DeliveryEphemeral,
@@ -153,7 +159,61 @@ func Prepare(subject string, evt Event) (Event, []byte, bool, error) {
 // --- Payload types ---
 
 type MessagePayload struct {
-	Message *entity.Message `json:"message"`
+	Message            *entity.Message     `json:"message"`
+	ChannelType        *entity.ChannelType `json:"channel_type,omitempty"`
+	ChannelWorkspaceID *uuid.UUID          `json:"-"`
+	SavedFromMessageID *uuid.UUID          `json:"saved_from_message_id,omitempty"`
+}
+
+type messagePayloadJSON struct {
+	Message            *entity.Message     `json:"message"`
+	ChannelType        *entity.ChannelType `json:"channel_type,omitempty"`
+	ChannelWorkspaceID *uuid.UUID          `json:"channel_workspace_id,omitempty"`
+	SavedFromMessageID *uuid.UUID          `json:"saved_from_message_id,omitempty"`
+}
+
+type selfChannelMessagePayloadJSON struct {
+	Message            *entity.Message     `json:"message"`
+	ChannelType        *entity.ChannelType `json:"channel_type"`
+	ChannelWorkspaceID *uuid.UUID          `json:"channel_workspace_id"`
+	SavedFromMessageID *uuid.UUID          `json:"saved_from_message_id,omitempty"`
+}
+
+func NewMessagePayload(message *entity.Message, channel *entity.Channel) MessagePayload {
+	payload := MessagePayload{Message: message}
+	if message == nil || channel == nil || !channel.Type.IsSelfChannel() {
+		return payload
+	}
+
+	payload.ChannelType = &channel.Type
+	payload.ChannelWorkspaceID = channel.WorkspaceID
+
+	if len(message.SavedFrom) > 0 {
+		var savedFrom entity.SavedFrom
+		if err := json.Unmarshal(message.SavedFrom, &savedFrom); err == nil && savedFrom.MessageID != uuid.Nil {
+			payload.SavedFromMessageID = &savedFrom.MessageID
+		}
+	}
+
+	return payload
+}
+
+func (p MessagePayload) MarshalJSON() ([]byte, error) {
+	if p.ChannelType == nil {
+		return json.Marshal(messagePayloadJSON{
+			Message:            p.Message,
+			ChannelType:        p.ChannelType,
+			ChannelWorkspaceID: p.ChannelWorkspaceID,
+			SavedFromMessageID: p.SavedFromMessageID,
+		})
+	}
+
+	return json.Marshal(selfChannelMessagePayloadJSON{
+		Message:            p.Message,
+		ChannelType:        p.ChannelType,
+		ChannelWorkspaceID: p.ChannelWorkspaceID,
+		SavedFromMessageID: p.SavedFromMessageID,
+	})
 }
 
 type ReactionPayload struct {
@@ -197,6 +257,16 @@ type CallPayload struct {
 	Call *entity.Call `json:"call"`
 }
 
+type CallMessagePayload struct {
+	CallID  uuid.UUID          `json:"call_id"`
+	Message entity.CallMessage `json:"message"`
+}
+
+type CallMessageDeletedPayload struct {
+	CallID    uuid.UUID `json:"call_id"`
+	MessageID uuid.UUID `json:"message_id"`
+}
+
 type CallParticipantPayload struct {
 	CallID      uuid.UUID               `json:"call_id"`
 	Participant *entity.CallParticipant `json:"participant"`
@@ -220,6 +290,17 @@ type CallQualityPayload struct {
 	TargetVideoBufferMs int       `json:"target_video_buffer_ms"`
 	LipSyncWindowMs     int       `json:"lip_sync_window_ms"`
 	Reasons             []string  `json:"reasons,omitempty"`
+}
+
+type CallHandPayload struct {
+	CallID uuid.UUID `json:"call_id"`
+	UserID uuid.UUID `json:"user_id"`
+}
+
+type CallReactionPayload struct {
+	CallID uuid.UUID `json:"call_id"`
+	UserID uuid.UUID `json:"user_id"`
+	Emoji  string    `json:"emoji"`
 }
 
 type BreakoutRoomPayload struct {

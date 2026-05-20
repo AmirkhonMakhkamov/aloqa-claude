@@ -1,3 +1,4 @@
+//nolint:staticcheck // nhooyr.io/websocket is the current project dependency.
 package ws
 
 import (
@@ -8,8 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/google/uuid"
-	"nhooyr.io/websocket"
 
 	"aloqa/internal/domain/event"
 )

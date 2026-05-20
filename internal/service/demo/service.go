@@ -242,7 +242,7 @@ func (s *Service) createChannel(ctx context.Context, workspaceID, userID uuid.UU
 	now := s.currentTime()
 	channel := &entity.Channel{
 		ID:          id.New(),
-		WorkspaceID: workspaceID,
+		WorkspaceID: &workspaceID,
 		Name:        spec.name,
 		Topic:       spec.topic,
 		Type:        entity.ChannelTypePublic,
@@ -277,7 +277,7 @@ func (s *Service) createDM(ctx context.Context, workspaceID, ownerID, contactID 
 	now := s.currentTime()
 	channel := &entity.Channel{
 		ID:          id.New(),
-		WorkspaceID: workspaceID,
+		WorkspaceID: &workspaceID,
 		Name:        "",
 		Topic:       "Demo: direct message",
 		Type:        entity.ChannelTypeDM,

@@ -88,15 +88,20 @@ type MessageRepository interface {
 	GetByID(ctx context.Context, id uuid.UUID) (*entity.Message, error)
 	ListByChannel(ctx context.Context, channelID uuid.UUID, p pagination.Params) ([]entity.Message, error)
 	ListThreadReplies(ctx context.Context, parentID uuid.UUID, p pagination.Params) ([]entity.Message, error)
+	HasActiveMessage(ctx context.Context, channelID uuid.UUID) (bool, error)
 	Update(ctx context.Context, msg *entity.Message) error
 	SoftDelete(ctx context.Context, id uuid.UUID) error
+	SoftDeleteWithCascade(ctx context.Context, id uuid.UUID) ([]uuid.UUID, error)
 
 	Pin(ctx context.Context, messageID, userID uuid.UUID) error
 	Unpin(ctx context.Context, messageID uuid.UUID) error
 	ListPinned(ctx context.Context, channelID uuid.UUID) ([]entity.Message, error)
 
 	AddReaction(ctx context.Context, r *entity.Reaction) error
+	GetReactionByID(ctx context.Context, id uuid.UUID) (*entity.Reaction, error)
+	GetReactionByMessageUserEmoji(ctx context.Context, messageID, userID uuid.UUID, emoji string) (*entity.Reaction, error)
 	RemoveReaction(ctx context.Context, messageID, userID uuid.UUID, emoji string) error
+	RemoveReactionByID(ctx context.Context, id uuid.UUID) error
 	ListReactions(ctx context.Context, messageID uuid.UUID) ([]entity.Reaction, error)
 
 	CreateAttachment(ctx context.Context, a *entity.Attachment) error
@@ -224,6 +229,13 @@ type CallRepository interface {
 	RemoveParticipant(ctx context.Context, callID, userID uuid.UUID) error
 }
 
+type CallMessageRepository interface {
+	Create(ctx context.Context, msg *entity.CallMessage) error
+	ListByCall(ctx context.Context, callID uuid.UUID, p pagination.Params) ([]entity.CallMessage, error)
+	SoftDelete(ctx context.Context, id, callID uuid.UUID) error
+	GetByID(ctx context.Context, id uuid.UUID) (*entity.CallMessage, error)
+}
+
 type CalendarRepository interface {
 	ListUserCalendars(ctx context.Context, workspaceID, ownerID uuid.UUID) ([]entity.UserCalendar, error)
 	GetUserCalendar(ctx context.Context, workspaceID, calendarID, ownerID uuid.UUID) (*entity.UserCalendar, error)
@@ -243,6 +255,10 @@ type CalendarRepository interface {
 	LockEventForStartCall(ctx context.Context, eventID uuid.UUID) (*entity.CalendarEvent, error)
 	CreateEvent(ctx context.Context, event *entity.CalendarEvent) (*entity.CalendarEvent, error)
 	UpdateEvent(ctx context.Context, event *entity.CalendarEvent) (*entity.CalendarEvent, error)
+	// CreateEventTx inserts an event using the current connection. It must not open a nested transaction.
+	CreateEventTx(ctx context.Context, event *entity.CalendarEvent) (*entity.CalendarEvent, error)
+	// UpdateEventTx updates an event using the current connection. expectedUpdatedAt enables exact optimistic locking.
+	UpdateEventTx(ctx context.Context, event *entity.CalendarEvent, expectedUpdatedAt *time.Time) (*entity.CalendarEvent, error)
 	DeleteEvent(ctx context.Context, workspaceID, eventID uuid.UUID) error
 	SetEventCallIDIfUnset(ctx context.Context, eventID, callID uuid.UUID) (*entity.CalendarEvent, error)
 	LinkEventAndCall(ctx context.Context, eventID, callID uuid.UUID) error

@@ -351,6 +351,10 @@ func run() error {
 	callSvc := call.NewService(callRepo, breakoutRoomRepo, channelRepo, workspaceRepo, realtimePublisher, sfuServer, call.MediaConfig{
 		TokenSecret:              []byte(cfg.JWT.Secret),
 		TokenTTL:                 cfg.WebRTC.MediaTokenTTL,
+		TURNURLs:                 turnURLsFromConfig(cfg.WebRTC.TURNServer),
+		TURNUsername:             cfg.WebRTC.TURNUsername,
+		TURNCredential:           cfg.WebRTC.TURNPassword,
+		TURNCredentialsTTL:       cfg.WebRTC.MediaTokenTTL,
 		MaxPresentersPerCall:     cfg.WebRTC.MaxPresentersPerCall,
 		MaxViewersPerCall:        cfg.WebRTC.MaxViewersPerCall,
 		MaxScreenSharesPerCall:   cfg.WebRTC.MaxScreenSharesPerCall,
@@ -675,6 +679,14 @@ func runCalendarReminderOutboxWorker(ctx context.Context, svc *calendarsvc.Servi
 		case <-ticker.C:
 		}
 	}
+}
+
+func turnURLsFromConfig(server string) []string {
+	server = strings.TrimSpace(server)
+	if server == "" {
+		return nil
+	}
+	return []string{server}
 }
 
 func forwardSessionEvictions(ctx context.Context, ps *pubsub.PubSub, hub *ws.Hub, presenceSvc *presence.Service) {

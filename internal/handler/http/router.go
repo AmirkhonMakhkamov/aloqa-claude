@@ -293,6 +293,7 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 			r.Post("/hand", deps.Calls.RaiseHand)
 			r.Delete("/hand", deps.Calls.LowerHand)
 			r.Post("/reactions", deps.Calls.SendCallReaction)
+			r.Post("/turn-credentials", deps.Calls.TurnCredentials)
 			r.Get("/participants", deps.Calls.Participants)
 			r.Put("/participants/{userID}/role", deps.Calls.UpdateParticipantRole)
 			r.Put("/media", deps.Calls.UpdateMedia)

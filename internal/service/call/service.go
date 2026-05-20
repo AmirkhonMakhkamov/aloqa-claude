@@ -63,6 +63,10 @@ type Service struct {
 type MediaConfig struct {
 	TokenSecret              []byte
 	TokenTTL                 time.Duration
+	TURNURLs                 []string
+	TURNUsername             string
+	TURNCredential           string
+	TURNCredentialsTTL       time.Duration
 	MaxPresentersPerCall     int
 	MaxViewersPerCall        int
 	MaxScreenSharesPerCall   int

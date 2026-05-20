@@ -2,10 +2,12 @@ package http
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -103,7 +105,39 @@ func TestCallReactionHTTPBadRequests(t *testing.T) {
 	}
 }
 
+func TestCallTurnCredentialsHTTP(t *testing.T) {
+	userID := uuid.New()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	router, _ := newCallInteractionHTTPRouterWithMediaConfig(workspaceID, callID, userID, entity.CallStatusActive, true, callsvc.MediaConfig{
+		TURNURLs:           []string{"turn:turn.example.test:3478", "turns:turn.example.test:5349"},
+		TURNUsername:       "turn-user",
+		TURNCredential:     "turn-secret",
+		TURNCredentialsTTL: 10 * time.Minute,
+	})
+
+	res := performCallInteractionRequest(router, http.MethodPost, workspaceID, callID, "/turn-credentials", "", true)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", res.Code, res.Body.String())
+	}
+
+	var body callsvc.TurnCredentials
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body.URLs) != 2 || body.URLs[0] != "turn:turn.example.test:3478" || body.URLs[1] != "turns:turn.example.test:5349" {
+		t.Fatalf("urls = %+v, want configured urls", body.URLs)
+	}
+	if body.Username != "turn-user" || body.Credential != "turn-secret" || body.TTL != 600 {
+		t.Fatalf("credentials = %+v, want configured values", body)
+	}
+}
+
 func newCallInteractionHTTPRouter(workspaceID, callID, userID uuid.UUID, status entity.CallStatus, includeParticipant bool) (http.Handler, *httpCallRepo) {
+	return newCallInteractionHTTPRouterWithMediaConfig(workspaceID, callID, userID, status, includeParticipant, callsvc.MediaConfig{})
+}
+
+func newCallInteractionHTTPRouterWithMediaConfig(workspaceID, callID, userID uuid.UUID, status entity.CallStatus, includeParticipant bool, media callsvc.MediaConfig) (http.Handler, *httpCallRepo) {
 	calls := &httpCallRepo{
 		calls: map[uuid.UUID]*entity.Call{
 			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: status},
@@ -123,7 +157,7 @@ func newCallInteractionHTTPRouter(workspaceID, callID, userID uuid.UUID, status 
 	workspaces := &httpWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
 		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
 	}}
-	svc := callsvc.NewService(calls, httpBreakoutRepo{}, httpChannelRepo{}, workspaces, httpNoopPublisher{}, nil, callsvc.MediaConfig{}, nil, nil)
+	svc := callsvc.NewService(calls, httpBreakoutRepo{}, httpChannelRepo{}, workspaces, httpNoopPublisher{}, nil, media, nil, nil)
 	router := NewRouter(RouterDeps{
 		Auth:             &AuthHandler{},
 		Account:          &AccountHandler{},

@@ -16,6 +16,7 @@ type RouterDeps struct {
 	Auth             *AuthHandler
 	Account          *AccountHandler
 	Channels         *ChannelHandler
+	Saved            *SavedHandler
 	Messages         *MessageHandler
 	Calls            *CallHandler
 	Calendar         *CalendarHandler
@@ -120,7 +121,14 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 		r.Route("/api/v1/users", func(r chi.Router) {
 			r.Get("/me", deps.Account.Me)
 			r.Patch("/me", deps.Account.UpdateProfile)
+			r.Patch("/me/preferences", deps.Account.UpdatePreferences)
 			r.Post("/me/deactivate", deps.Account.Deactivate)
+			if deps.Saved != nil {
+				r.Get("/me/saved-channel", deps.Saved.ResolveGlobalChannel)
+				r.Post("/me/saved-messages", deps.Saved.SaveMessage)
+				r.Get("/me/saved-messages", deps.Saved.ListMessages)
+				r.Delete("/me/saved-messages/{savedMsgID}", deps.Saved.UnsaveMessage)
+			}
 		})
 
 		// WebSocket endpoint.
@@ -245,6 +253,10 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 	})
 
 	// Channels.
+	if deps.Saved != nil {
+		r.Get("/saved-channel", deps.Saved.ResolveWorkspaceChannel)
+	}
+
 	r.Route("/channels", func(r chi.Router) {
 		r.Post("/", deps.Channels.Create)
 		r.Get("/", deps.Channels.List)

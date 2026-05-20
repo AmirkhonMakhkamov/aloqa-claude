@@ -22,6 +22,7 @@ const (
 	CodeConflict           Code = "CONFLICT"
 	CodeRateLimited        Code = "RATE_LIMITED"
 	CodeUnavailable        Code = "UNAVAILABLE"
+	CodeUnprocessable      Code = "UNPROCESSABLE"
 )
 
 // AppError is the standard application error type.
@@ -57,6 +58,8 @@ func (e *AppError) HTTPStatus() int {
 		return http.StatusForbidden
 	case CodeRateLimited:
 		return http.StatusTooManyRequests
+	case CodeUnprocessable:
+		return http.StatusUnprocessableEntity
 	case CodeUnavailable:
 		return http.StatusServiceUnavailable
 	default:
@@ -106,6 +109,10 @@ func Conflict(msg string) *AppError {
 
 func Unavailable(msg string) *AppError {
 	return &AppError{Code: CodeUnavailable, Message: msg}
+}
+
+func Unprocessable(msg string) *AppError {
+	return &AppError{Code: CodeUnprocessable, Message: msg}
 }
 
 // AsAppError extracts an *AppError from an error chain.

@@ -5,6 +5,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"aloqa/internal/domain/entity"
 	"aloqa/internal/middleware"
 	"aloqa/internal/pkg/id"
 	"aloqa/internal/service/auth"
@@ -22,6 +23,10 @@ type updateProfileRequest struct {
 	DisplayName *string `json:"display_name"`
 	AvatarURL   *string `json:"avatar_url"`
 	Locale      *string `json:"locale"`
+}
+
+type updatePreferencesRequest struct {
+	SavedMessagesMode entity.SavedMessagesMode `json:"saved_messages_mode"`
 }
 
 type createWorkspaceRequest struct {
@@ -55,6 +60,23 @@ func (h *AccountHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		AvatarURL:   req.AvatarURL,
 		Locale:      req.Locale,
 	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, user)
+}
+
+func (h *AccountHandler) UpdatePreferences(w http.ResponseWriter, r *http.Request) {
+	var req updatePreferencesRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	user, err := h.svc.UpdateSavedMessagesMode(r.Context(), userID, req.SavedMessagesMode)
 	if err != nil {
 		writeErr(w, err)
 		return

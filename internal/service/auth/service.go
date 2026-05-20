@@ -324,6 +324,23 @@ func (s *Service) UpdateProfile(ctx context.Context, userID uuid.UUID, input Upd
 	return user, nil
 }
 
+func (s *Service) UpdateSavedMessagesMode(ctx context.Context, userID uuid.UUID, mode entity.SavedMessagesMode) (*entity.User, error) {
+	if mode != entity.SavedMessagesModePerWorkspace && mode != entity.SavedMessagesModeGlobal {
+		return nil, cerrors.InvalidInput("invalid saved_messages_mode")
+	}
+	user, err := s.GetUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	user.SavedMessagesMode = mode
+	user.UpdatedAt = time.Now().UTC()
+	if err := s.users.Update(ctx, user); err != nil {
+		slog.ErrorContext(ctx, "failed to update saved messages mode", "user_id", userID, "error", err)
+		return nil, cerrors.Internal("failed to update saved messages mode", err)
+	}
+	return user, nil
+}
+
 func (s *Service) ListWorkspaces(ctx context.Context, userID uuid.UUID) ([]entity.Workspace, error) {
 	if _, err := s.GetUser(ctx, userID); err != nil {
 		return nil, err

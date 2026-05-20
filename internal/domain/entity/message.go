@@ -37,6 +37,7 @@ type Message struct {
 	PinnedAt  *time.Time  `json:"pinned_at,omitempty"`
 	// JSON-typed forwarded-from envelope. Persisted verbatim; the FE owns the schema.
 	ForwardedFrom   json.RawMessage `json:"forwarded_from,omitempty" db:"forwarded_from"`
+	SavedFrom       json.RawMessage `json:"saved_from,omitempty" db:"saved_from"`
 	QuotedMessageID *uuid.UUID      `json:"quoted_message_id,omitempty" db:"quoted_message_id"`
 	QuotedSnapshot  *QuotedSnapshot `json:"quoted_snapshot,omitempty" db:"quoted_snapshot"`
 	CreatedAt       time.Time       `json:"created_at"`

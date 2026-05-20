@@ -103,8 +103,11 @@ func (c *Checker) Channel(ctx context.Context, channelID, userID uuid.UUID, capa
 	if ch.Archived {
 		return nil, cerrors.Forbidden("channel is archived")
 	}
+	if ch.WorkspaceID == nil {
+		return nil, cerrors.NotFound("channel not found")
+	}
 
-	member, memberErr := c.workspaceMember(ctx, ch.WorkspaceID, userID)
+	member, memberErr := c.workspaceMember(ctx, *ch.WorkspaceID, userID)
 	if memberErr == nil {
 		return c.channelDecisionForWorkspaceMember(ctx, ch, member, userID, capability)
 	}
@@ -113,7 +116,7 @@ func (c *Checker) Channel(ctx context.Context, channelID, userID uuid.UUID, capa
 	}
 
 	if c.guests != nil {
-		allowed, err := c.guests.HasChannelAccess(ctx, ch.WorkspaceID, ch.ID, userID)
+		allowed, err := c.guests.HasChannelAccess(ctx, *ch.WorkspaceID, ch.ID, userID)
 		if err != nil {
 			return nil, err
 		}

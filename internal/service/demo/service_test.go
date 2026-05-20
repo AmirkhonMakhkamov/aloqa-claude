@@ -240,7 +240,7 @@ func (r *fakeChannelRepo) GetByID(_ context.Context, channelID uuid.UUID) (*enti
 func (r *fakeChannelRepo) ListByWorkspace(_ context.Context, workspaceID uuid.UUID, _ pagination.Params) ([]entity.Channel, error) {
 	channels := make([]entity.Channel, 0)
 	for _, channel := range r.channels {
-		if channel.WorkspaceID == workspaceID {
+		if channel.WorkspaceID != nil && *channel.WorkspaceID == workspaceID {
 			channels = append(channels, *channel)
 		}
 	}
@@ -253,7 +253,7 @@ func (r *fakeChannelRepo) ListByUser(_ context.Context, workspaceID, userID uuid
 		if key[1] != userID {
 			continue
 		}
-		if channel := r.channels[key[0]]; channel != nil && channel.WorkspaceID == workspaceID {
+		if channel := r.channels[key[0]]; channel != nil && channel.WorkspaceID != nil && *channel.WorkspaceID == workspaceID {
 			channels = append(channels, *channel)
 		}
 	}
@@ -312,7 +312,7 @@ func (r *fakeChannelRepo) UpdateLastRead(context.Context, uuid.UUID, uuid.UUID) 
 
 func (r *fakeChannelRepo) GetDMChannel(_ context.Context, workspaceID, userA, userB uuid.UUID) (*entity.Channel, error) {
 	for _, channel := range r.channels {
-		if channel.WorkspaceID != workspaceID || channel.Type != entity.ChannelTypeDM {
+		if channel.WorkspaceID == nil || *channel.WorkspaceID != workspaceID || channel.Type != entity.ChannelTypeDM {
 			continue
 		}
 		if r.members[[2]uuid.UUID{channel.ID, userA}] != nil && r.members[[2]uuid.UUID{channel.ID, userB}] != nil {
@@ -324,7 +324,7 @@ func (r *fakeChannelRepo) GetDMChannel(_ context.Context, workspaceID, userA, us
 
 func (r *fakeChannelRepo) channelByName(workspaceID uuid.UUID, name string) *entity.Channel {
 	for _, channel := range r.channels {
-		if channel.WorkspaceID == workspaceID && channel.Name == name {
+		if channel.WorkspaceID != nil && *channel.WorkspaceID == workspaceID && channel.Name == name {
 			return channel
 		}
 	}

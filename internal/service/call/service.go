@@ -151,7 +151,11 @@ func (s *Service) canAccessWorkspaceContent(ctx context.Context, workspaceID, us
 }
 
 func (s *Service) requireChannelAccess(ctx context.Context, ch *entity.Channel, userID uuid.UUID) error {
-	if err := s.requireWorkspaceMember(ctx, ch.WorkspaceID, userID); err == nil {
+	if ch.WorkspaceID == nil {
+		return cerrors.NotFound("channel not found")
+	}
+	workspaceID := *ch.WorkspaceID
+	if err := s.requireWorkspaceMember(ctx, workspaceID, userID); err == nil {
 		if ch.Type == entity.ChannelTypePublic {
 			return nil
 		}
@@ -169,7 +173,7 @@ func (s *Service) requireChannelAccess(ctx context.Context, ch *entity.Channel, 
 		return nil
 	}
 	if s.guests != nil {
-		allowed, err := s.guests.HasChannelAccess(ctx, ch.WorkspaceID, ch.ID, userID)
+		allowed, err := s.guests.HasChannelAccess(ctx, workspaceID, ch.ID, userID)
 		if err != nil {
 			return err
 		}
@@ -337,7 +341,7 @@ func (s *Service) StartCall(
 			slog.ErrorContext(ctx, "failed to get channel for call", "channel_id", *channelID, "error", err)
 			return nil, cerrors.Internal("failed to get channel", err)
 		}
-		if ch.WorkspaceID != workspaceID {
+		if ch.WorkspaceID == nil || *ch.WorkspaceID != workspaceID {
 			return nil, cerrors.NotFound("channel not found")
 		}
 		if err := s.requireChannelAccess(ctx, ch, userID); err != nil {

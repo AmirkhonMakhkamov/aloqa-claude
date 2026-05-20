@@ -37,7 +37,7 @@ func TestUploadScannerDoesNotConsumeStoredBody(t *testing.T) {
 		attachmentsByKey: map[string]*entity.Attachment{},
 	}
 	channels := &fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
-		channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePublic},
+		channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
 	}, members: map[[2]uuid.UUID]*entity.ChannelMember{
 		{channelID, userID}: {ChannelID: channelID, UserID: userID, Role: entity.ChannelRoleMember},
 	}}
@@ -77,7 +77,7 @@ func TestDownloadByKeyRequiresMessageAccess(t *testing.T) {
 		},
 	}
 	channels := &fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
-		channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePrivate},
+		channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePrivate},
 	}, members: map[[2]uuid.UUID]*entity.ChannelMember{
 		{channelID, ownerID}: {ChannelID: channelID, UserID: ownerID, Role: entity.ChannelRoleMember},
 	}}
@@ -108,7 +108,7 @@ func TestDownloadByKeyDistinguishesMissingFileFromStorageFailure(t *testing.T) {
 		},
 	}
 	channels := &fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
-		channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePublic},
+		channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
 	}}
 	members := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
 		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
@@ -153,7 +153,7 @@ func TestGuestGrantAllowsFileDownloadForInvitedChannel(t *testing.T) {
 		},
 	}
 	channels := &fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
-		channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePrivate},
+		channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePrivate},
 	}}
 	guests := guestaccess.NewChecker(&fakeGuestAccessRepo{grants: []entity.GuestAccessGrant{{
 		ID:          uuid.New(),
@@ -192,7 +192,7 @@ func TestCollaboratorUploadUsesSharedAccessPolicy(t *testing.T) {
 	}
 	channels := &fakeChannelRepo{
 		channels: map[uuid.UUID]*entity.Channel{
-			channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypeDM},
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypeDM},
 		},
 		members: map[[2]uuid.UUID]*entity.ChannelMember{
 			{channelID, sourceUserID}:   {ChannelID: channelID, UserID: sourceUserID, Role: entity.ChannelRoleMember},
@@ -238,7 +238,7 @@ func TestPresignDownloadByKeyUsesObjectStoreSignerWhenAvailable(t *testing.T) {
 		},
 	}
 	channels := &fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
-		channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePublic},
+		channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
 	}, members: map[[2]uuid.UUID]*entity.ChannelMember{
 		{channelID, userID}: {ChannelID: channelID, UserID: userID, Role: entity.ChannelRoleMember},
 	}}

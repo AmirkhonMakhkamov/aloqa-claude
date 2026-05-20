@@ -28,7 +28,7 @@ func TestCreateInviteRejectsCrossWorkspaceChannel(t *testing.T) {
 			{workspaceID, actorID}: {WorkspaceID: workspaceID, UserID: actorID, Role: entity.WorkspaceRoleMember},
 		}},
 		&fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
-			channelID: {ID: channelID, WorkspaceID: otherWorkspaceID, Type: entity.ChannelTypePublic},
+			channelID: {ID: channelID, WorkspaceID: &otherWorkspaceID, Type: entity.ChannelTypePublic},
 		}},
 		nil,
 	)
@@ -58,7 +58,7 @@ func TestCreateInviteRequiresPrivateChannelMembership(t *testing.T) {
 			{workspaceID, actorID}: {WorkspaceID: workspaceID, UserID: actorID, Role: entity.WorkspaceRoleMember},
 		}},
 		&fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
-			channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePrivate},
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePrivate},
 		}},
 		nil,
 	)
@@ -127,7 +127,7 @@ func TestRedeemInviteValidatesChannelsBeforeSideEffects(t *testing.T) {
 		users,
 		workspaces,
 		&fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
-			channelID: {ID: channelID, WorkspaceID: otherWorkspaceID, Type: entity.ChannelTypePublic},
+			channelID: {ID: channelID, WorkspaceID: &otherWorkspaceID, Type: entity.ChannelTypePublic},
 		}},
 		nil,
 	)
@@ -172,7 +172,7 @@ func TestRedeemInviteCreatesGuestAccessGrantWithoutWorkspaceMembership(t *testin
 		users,
 		workspaces,
 		&fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
-			channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePublic},
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
 		}},
 		nil,
 	)

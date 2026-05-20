@@ -28,7 +28,7 @@ func TestCanSubscribeAuthorizesKnownRoomTypes(t *testing.T) {
 
 	channels := &fakeChannelRepo{
 		channels: map[uuid.UUID]*entity.Channel{
-			privateChannelID: {ID: privateChannelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePrivate},
+			privateChannelID: {ID: privateChannelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePrivate},
 		},
 		members: map[[2]uuid.UUID]*entity.ChannelMember{},
 	}

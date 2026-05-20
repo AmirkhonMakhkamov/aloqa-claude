@@ -31,8 +31,8 @@ func TestChannelAccessRequiresWorkspaceAndPrivateMembership(t *testing.T) {
 
 	channels := &fakeChannelRepo{
 		channels: map[uuid.UUID]*entity.Channel{
-			publicChannelID:  {ID: publicChannelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePublic},
-			privateChannelID: {ID: privateChannelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePrivate},
+			publicChannelID:  {ID: publicChannelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
+			privateChannelID: {ID: privateChannelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePrivate},
 		},
 		members: map[[2]uuid.UUID]*entity.ChannelMember{},
 	}
@@ -82,7 +82,7 @@ func TestGuestGrantAllowsChannelAccessWithoutWorkspaceMembership(t *testing.T) {
 
 	channels := &fakeChannelRepo{
 		channels: map[uuid.UUID]*entity.Channel{
-			channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePrivate},
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePrivate},
 		},
 	}
 	guests := guestaccess.NewChecker(&fakeGuestAccessRepo{grants: []entity.GuestAccessGrant{{
@@ -118,7 +118,7 @@ func TestGetOrCreateDMCreatesCrossWorkspaceGrantWhenCollaborationAllows(t *testi
 	if err != nil {
 		t.Fatalf("GetOrCreateDM returned error: %v", err)
 	}
-	if channel == nil || channel.WorkspaceID != workspaceA {
+	if channel == nil || channel.WorkspaceID == nil || *channel.WorkspaceID != workspaceA {
 		t.Fatalf("expected cross-workspace DM anchored in source workspace")
 	}
 	if len(grants.created) != 1 {
@@ -138,7 +138,7 @@ func TestCrossWorkspaceDMAccessRequiresActiveCollaborationGrant(t *testing.T) {
 
 	channels := &fakeChannelRepo{
 		channels: map[uuid.UUID]*entity.Channel{
-			channelID: {ID: channelID, WorkspaceID: workspaceA, Type: entity.ChannelTypeDM},
+			channelID: {ID: channelID, WorkspaceID: &workspaceA, Type: entity.ChannelTypeDM},
 		},
 		members: map[[2]uuid.UUID]*entity.ChannelMember{
 			{channelID, userA}: {ChannelID: channelID, UserID: userA},
@@ -168,7 +168,7 @@ func TestGuestCanSendAndTrackUnreadWithSharedAccessPolicy(t *testing.T) {
 
 	channels := &fakeChannelRepo{
 		channels: map[uuid.UUID]*entity.Channel{
-			channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePrivate},
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePrivate},
 		},
 		members: map[[2]uuid.UUID]*entity.ChannelMember{
 			{channelID, ownerID}: {ChannelID: channelID, UserID: ownerID, Role: entity.ChannelRoleMember, LastReadAt: now.Add(-time.Hour)},
@@ -228,7 +228,7 @@ func TestCollaboratorCanSendWithSharedAccessPolicy(t *testing.T) {
 
 	channels := &fakeChannelRepo{
 		channels: map[uuid.UUID]*entity.Channel{
-			channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypeDM},
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypeDM},
 		},
 		members: map[[2]uuid.UUID]*entity.ChannelMember{
 			{channelID, localUserID}:  {ChannelID: channelID, UserID: localUserID, Role: entity.ChannelRoleMember},
@@ -425,7 +425,7 @@ func TestSendMessageForwardedFromValidationAndPersistence(t *testing.T) {
 			userID := uuid.New()
 			channels := &fakeChannelRepo{
 				channels: map[uuid.UUID]*entity.Channel{
-					channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePublic},
+					channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
 				},
 				members: map[[2]uuid.UUID]*entity.ChannelMember{
 					{channelID, userID}: {ChannelID: channelID, UserID: userID},
@@ -505,7 +505,7 @@ func TestEditMessageRejectsEmptyContent(t *testing.T) {
 	now := time.Now().UTC()
 	channels := &fakeChannelRepo{
 		channels: map[uuid.UUID]*entity.Channel{
-			channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePublic},
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
 		},
 		members: map[[2]uuid.UUID]*entity.ChannelMember{
 			{channelID, userID}: {ChannelID: channelID, UserID: userID},
@@ -535,7 +535,7 @@ func TestGuestCanReactWithSharedAccessPolicy(t *testing.T) {
 
 	channels := &fakeChannelRepo{
 		channels: map[uuid.UUID]*entity.Channel{
-			channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePrivate},
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePrivate},
 		},
 		members: map[[2]uuid.UUID]*entity.ChannelMember{
 			{channelID, ownerID}: {ChannelID: channelID, UserID: ownerID, Role: entity.ChannelRoleMember},
@@ -578,7 +578,7 @@ func TestEditAndDeleteRequireParticipateAccess(t *testing.T) {
 
 	channels := &fakeChannelRepo{
 		channels: map[uuid.UUID]*entity.Channel{
-			channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePublic},
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
 		},
 		members: map[[2]uuid.UUID]*entity.ChannelMember{},
 	}
@@ -612,7 +612,7 @@ func TestGetMessagesReturnsDeletedTombstoneWithoutContent(t *testing.T) {
 
 	channels := &fakeChannelRepo{
 		channels: map[uuid.UUID]*entity.Channel{
-			channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePublic},
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
 		},
 		members: map[[2]uuid.UUID]*entity.ChannelMember{
 			{channelID, userID}: {ChannelID: channelID, UserID: userID},
@@ -676,7 +676,7 @@ func TestDeleteMessagePublishesRedactedTombstone(t *testing.T) {
 
 	channels := &fakeChannelRepo{
 		channels: map[uuid.UUID]*entity.Channel{
-			channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePublic},
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
 		},
 		members: map[[2]uuid.UUID]*entity.ChannelMember{
 			{channelID, userID}: {ChannelID: channelID, UserID: userID},
@@ -755,8 +755,8 @@ func TestDeleteMessageWithTxEnqueuesCascadeQuoteUpdatedEvents(t *testing.T) {
 
 	channels := &fakeChannelRepo{
 		channels: map[uuid.UUID]*entity.Channel{
-			channelID:      {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePublic},
-			otherChannelID: {ID: otherChannelID, WorkspaceID: otherWorkspaceID, Type: entity.ChannelTypePublic},
+			channelID:      {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
+			otherChannelID: {ID: otherChannelID, WorkspaceID: &otherWorkspaceID, Type: entity.ChannelTypePublic},
 		},
 		members: map[[2]uuid.UUID]*entity.ChannelMember{
 			{channelID, userID}: {ChannelID: channelID, UserID: userID},
@@ -850,7 +850,7 @@ func TestListChannelsHidesRecipientDMWithOnlyDeletedMessages(t *testing.T) {
 		channels: map[uuid.UUID]*entity.Channel{
 			channelID: {
 				ID:          channelID,
-				WorkspaceID: workspaceID,
+				WorkspaceID: &workspaceID,
 				Type:        entity.ChannelTypeDM,
 				CreatedBy:   creatorID,
 			},
@@ -895,7 +895,7 @@ func TestJoinAndLeaveChannelUseTransactionalEventEnqueue(t *testing.T) {
 
 	channels := &fakeChannelRepo{
 		channels: map[uuid.UUID]*entity.Channel{
-			channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePublic},
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
 		},
 		members: map[[2]uuid.UUID]*entity.ChannelMember{},
 	}
@@ -1067,7 +1067,7 @@ func (r *fakeChannelRepo) GetByID(_ context.Context, id uuid.UUID) (*entity.Chan
 func (r *fakeChannelRepo) ListByWorkspace(_ context.Context, workspaceID uuid.UUID, _ pagination.Params) ([]entity.Channel, error) {
 	var channels []entity.Channel
 	for _, ch := range r.channels {
-		if ch.WorkspaceID == workspaceID {
+		if ch.WorkspaceID != nil && *ch.WorkspaceID == workspaceID {
 			channels = append(channels, *ch)
 		}
 	}
@@ -1079,7 +1079,7 @@ func (r *fakeChannelRepo) ListByUser(_ context.Context, workspaceID, userID uuid
 		if key[1] != userID {
 			continue
 		}
-		if ch := r.channels[key[0]]; ch != nil && ch.WorkspaceID == workspaceID {
+		if ch := r.channels[key[0]]; ch != nil && ch.WorkspaceID != nil && *ch.WorkspaceID == workspaceID {
 			channels = append(channels, *ch)
 		}
 	}

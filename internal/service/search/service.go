@@ -201,7 +201,10 @@ func (s *Service) requireChannelAccess(ctx context.Context, channelID, userID uu
 		}
 		return cerrors.Internal("failed to get channel", err)
 	}
-	if err := s.requireWorkspaceMember(ctx, ch.WorkspaceID, userID); err != nil {
+	if ch.WorkspaceID == nil {
+		return cerrors.NotFound("channel not found")
+	}
+	if err := s.requireWorkspaceMember(ctx, *ch.WorkspaceID, userID); err != nil {
 		return err
 	}
 	if ch.Type != entity.ChannelTypePublic {

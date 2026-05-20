@@ -534,7 +534,7 @@ func newMessageHTTPFixture() messageHTTPFixture {
 	userID := uuid.New()
 	channels := &messageHTTPChannelRepo{
 		channels: map[uuid.UUID]*entity.Channel{
-			channelID: {ID: channelID, WorkspaceID: workspaceID, Type: entity.ChannelTypePublic},
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
 		},
 		members: map[[2]uuid.UUID]*entity.ChannelMember{
 			{channelID, userID}: {ChannelID: channelID, UserID: userID},

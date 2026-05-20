@@ -363,7 +363,7 @@ func (s *Service) validateInviteChannels(ctx context.Context, workspaceID, actor
 			}
 			return cerrors.Internal("failed to load invite channel", err)
 		}
-		if ch.WorkspaceID != workspaceID {
+		if ch.WorkspaceID == nil || *ch.WorkspaceID != workspaceID {
 			return cerrors.Forbidden("invite channel must belong to the workspace")
 		}
 		if ch.Archived {
@@ -402,7 +402,7 @@ func (s *Service) validateRedeemChannels(ctx context.Context, invite *entity.Gue
 			}
 			return cerrors.Internal("failed to load invite channel", err)
 		}
-		if ch.WorkspaceID != invite.WorkspaceID || ch.Archived {
+		if ch.WorkspaceID == nil || *ch.WorkspaceID != invite.WorkspaceID || ch.Archived {
 			return cerrors.Forbidden("invite contains an inaccessible channel")
 		}
 		if ch.Type == entity.ChannelTypeDM || ch.Type == entity.ChannelTypeGroupDM {

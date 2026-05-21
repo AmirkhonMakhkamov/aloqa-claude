@@ -59,8 +59,12 @@ func TestSeedNewUserCreatesDemoWorkspaceChannelsDMsAndEvents(t *testing.T) {
 		if channel == nil {
 			t.Fatalf("demo channel %q was not created", spec.name)
 		}
-		if !strings.Contains(channel.Topic, "Demo:") {
-			t.Fatalf("channel topic = %q, want Demo marker", channel.Topic)
+		topic := ""
+		if channel.Topic != nil {
+			topic = *channel.Topic
+		}
+		if !strings.Contains(topic, "Demo:") {
+			t.Fatalf("channel topic = %q, want Demo marker", topic)
 		}
 		if member := channels.members[[2]uuid.UUID{channel.ID, newUser.ID}]; member == nil {
 			t.Fatalf("new user was not added to channel %q", spec.name)

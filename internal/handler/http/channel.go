@@ -36,6 +36,19 @@ type addChannelMembersRequest struct {
 	UserIDs []uuid.UUID `json:"user_ids"`
 }
 
+func (h *ChannelHandler) Directory(w http.ResponseWriter, r *http.Request) {
+	wsID := middleware.WorkspaceIDFromContext(r.Context())
+	userID := middleware.UserIDFromContext(r.Context())
+
+	directory, err := h.svc.ListDirectory(r.Context(), wsID, userID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, directory)
+}
+
 func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req createChannelRequest
 	if err := decodeJSON(r, &req); err != nil {

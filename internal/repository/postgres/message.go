@@ -407,6 +407,33 @@ func (r *MessageRepo) Update(ctx context.Context, msg *entity.Message) error {
 	return nil
 }
 
+func (r *MessageRepo) Move(ctx context.Context, msg *entity.Message) error {
+	now := time.Now().UTC()
+	query := `
+		UPDATE messages
+		SET channel_id = $2,
+			parent_id = $3,
+			pinned = false,
+			pinned_by = NULL,
+			pinned_at = NULL,
+			updated_at = $4
+		WHERE id = $1 AND deleted_at IS NULL`
+
+	tag, err := r.db.Exec(ctx, query, msg.ID, msg.ChannelID, msg.ParentID, now)
+	if err != nil {
+		return fmt.Errorf("postgres: move message: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return cerrors.NotFound("message not found")
+	}
+
+	msg.Pinned = false
+	msg.PinnedBy = nil
+	msg.PinnedAt = nil
+	msg.UpdatedAt = now
+	return nil
+}
+
 func (r *MessageRepo) SoftDelete(ctx context.Context, id uuid.UUID) error {
 	now := time.Now().UTC()
 	query := `

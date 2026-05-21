@@ -199,6 +199,11 @@ type editMessageRequest struct {
 	Content string `json:"content"`
 }
 
+type moveMessageRequest struct {
+	ChannelID string  `json:"channel_id"`
+	ParentID  *string `json:"parent_id,omitempty"`
+}
+
 func (h *MessageHandler) Edit(w http.ResponseWriter, r *http.Request) {
 	messageID, err := id.Parse(chi.URLParam(r, "messageID"))
 	if err != nil {
@@ -215,6 +220,49 @@ func (h *MessageHandler) Edit(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 
 	msg, err := h.svc.EditMessage(r.Context(), messageID, userID, req.Content)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, msg)
+}
+
+func (h *MessageHandler) Move(w http.ResponseWriter, r *http.Request) {
+	sourceChannelID, err := id.Parse(chi.URLParam(r, "channelID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	messageID, err := id.Parse(chi.URLParam(r, "messageID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	var req moveMessageRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	targetChannelID, err := id.Parse(req.ChannelID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	var parentID *uuid.UUID
+	if req.ParentID != nil {
+		parsed, err := id.Parse(*req.ParentID)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		parentID = &parsed
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+
+	msg, err := h.svc.MoveMessage(r.Context(), sourceChannelID, messageID, userID, targetChannelID, parentID)
 	if err != nil {
 		writeErr(w, err)
 		return

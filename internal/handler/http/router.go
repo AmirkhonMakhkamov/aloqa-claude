@@ -283,6 +283,7 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 					r.Get("/", deps.Messages.Get)
 					r.Put("/", deps.Messages.Edit)
 					r.Delete("/", deps.Messages.Delete)
+					r.Post("/move", deps.Messages.Move)
 					r.Get("/thread", deps.Messages.ListThread)
 					r.Post("/reactions", deps.Messages.AddReaction)
 					r.Delete("/reactions/{emoji}", deps.Messages.RemoveReaction)

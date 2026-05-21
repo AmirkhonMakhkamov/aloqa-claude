@@ -12,6 +12,7 @@ import (
 	"aloqa/internal/domain/entity"
 	eventpkg "aloqa/internal/domain/event"
 	"aloqa/internal/domain/repository"
+	"aloqa/internal/middleware"
 	"aloqa/internal/pkg/cerrors"
 	"aloqa/internal/pkg/pagination"
 	"aloqa/internal/platform/txscope"
@@ -81,11 +82,12 @@ func TestCreateChannelAddsSelectedWorkspaceMembers(t *testing.T) {
 	memberID := uuid.New()
 
 	channels := &fakeChannelRepo{}
+	publisher := &recordingSubjectPublisher{}
 	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
 		{workspaceID, creatorID}: {WorkspaceID: workspaceID, UserID: creatorID, Role: entity.WorkspaceRoleOwner},
 		{workspaceID, memberID}:  {WorkspaceID: workspaceID, UserID: memberID, Role: entity.WorkspaceRoleMember},
 	}}
-	svc := NewService(channels, nil, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+	svc := NewService(channels, nil, workspaces, nil, publisher, nil, nil, nil, nil)
 
 	channel, err := svc.CreateChannel(
 		ctx,
@@ -105,6 +107,105 @@ func TestCreateChannelAddsSelectedWorkspaceMembers(t *testing.T) {
 	}
 	if member := channels.members[[2]uuid.UUID{channel.ID, memberID}]; member == nil || member.Role != entity.ChannelRoleMember {
 		t.Fatalf("selected channel membership missing or wrong: %+v", member)
+	}
+	if !publisher.hasEvent("aloqa.ws."+workspaceID.String(), eventpkg.TypeChannelCreated) {
+		t.Fatalf("channel.created was not published to workspace subject; subjects=%v", publisher.subjects())
+	}
+}
+
+func TestSendMessageAllowsGlobalSavedChannelFromWorkspaceRoute(t *testing.T) {
+	workspaceID := uuid.New()
+	userID := uuid.New()
+	channelID := uuid.New()
+	ctx := context.WithValue(context.Background(), middleware.WorkspaceIDKey, workspaceID)
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {
+				ID:          channelID,
+				Type:        entity.ChannelTypeSavedGlobal,
+				CreatedBy:   userID,
+				OwnerUserID: &userID,
+			},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, userID}: {ChannelID: channelID, UserID: userID},
+		},
+	}
+	messages := &fakeMessageRepo{}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	publisher := &recordingSubjectPublisher{}
+	svc := NewService(channels, messages, workspaces, nil, publisher, nil, nil, nil, nil)
+	svc.SetAccessPolicy(accesspolicy.NewChecker(workspaces, channels, nil, nil))
+
+	msg, err := svc.SendMessage(ctx, channelID, userID, SendMessageInput{Content: "note to self"})
+	if err != nil {
+		t.Fatalf("SendMessage returned error: %v", err)
+	}
+	if msg.ChannelID != channelID {
+		t.Fatalf("message channel = %s, want %s", msg.ChannelID, channelID)
+	}
+	if !publisher.hasEvent("aloqa.ws."+workspaceID.String(), eventpkg.TypeMessageCreated) {
+		t.Fatalf("message.created was not published to workspace subject; subjects=%v", publisher.subjects())
+	}
+}
+
+func TestMoveMessageMovesAcrossAccessibleChannels(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	userID := uuid.New()
+	sourceChannelID := uuid.New()
+	targetChannelID := uuid.New()
+	messageID := uuid.New()
+	now := time.Now().UTC()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			sourceChannelID: {ID: sourceChannelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
+			targetChannelID: {ID: targetChannelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePrivate},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{sourceChannelID, userID}: {ChannelID: sourceChannelID, UserID: userID},
+			{targetChannelID, userID}: {ChannelID: targetChannelID, UserID: userID},
+		},
+	}
+	messages := &fakeMessageRepo{messages: map[uuid.UUID]*entity.Message{
+		messageID: {
+			ID:        messageID,
+			ChannelID: sourceChannelID,
+			UserID:    userID,
+			Content:   "move me",
+			Type:      entity.MessageTypeText,
+			CreatedAt: now,
+			UpdatedAt: now,
+			Pinned:    true,
+			PinnedBy:  &userID,
+			PinnedAt:  &now,
+		},
+	}}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	publisher := &recordingSubjectPublisher{}
+	svc := NewService(channels, messages, workspaces, nil, publisher, nil, nil, nil, nil)
+
+	moved, err := svc.MoveMessage(ctx, sourceChannelID, messageID, userID, targetChannelID, nil)
+	if err != nil {
+		t.Fatalf("MoveMessage returned error: %v", err)
+	}
+	if moved.ChannelID != targetChannelID {
+		t.Fatalf("moved channel = %s, want %s", moved.ChannelID, targetChannelID)
+	}
+	if moved.Pinned || moved.PinnedBy != nil || moved.PinnedAt != nil {
+		t.Fatalf("moved pinned state = pinned:%v by:%v at:%v, want cleared", moved.Pinned, moved.PinnedBy, moved.PinnedAt)
+	}
+	if !publisher.hasEvent("aloqa.chat."+sourceChannelID.String(), eventpkg.TypeMessageDeleted) {
+		t.Fatalf("message.deleted was not published to source channel; subjects=%v", publisher.subjects())
+	}
+	if !publisher.hasEvent("aloqa.chat."+targetChannelID.String(), eventpkg.TypeMessageCreated) {
+		t.Fatalf("message.created was not published to target channel; subjects=%v", publisher.subjects())
 	}
 }
 
@@ -1125,6 +1226,43 @@ func (p *recordingPublisher) Publish(_ context.Context, _ string, data []byte) e
 	return nil
 }
 
+type recordedPublish struct {
+	subject string
+	data    []byte
+}
+
+type recordingSubjectPublisher struct {
+	events []recordedPublish
+}
+
+func (p *recordingSubjectPublisher) Publish(_ context.Context, subject string, data []byte) error {
+	p.events = append(p.events, recordedPublish{subject: subject, data: append([]byte(nil), data...)})
+	return nil
+}
+
+func (p *recordingSubjectPublisher) hasEvent(subject string, typ eventpkg.Type) bool {
+	for _, published := range p.events {
+		if published.subject != subject {
+			continue
+		}
+		var envelope struct {
+			Type eventpkg.Type `json:"type"`
+		}
+		if err := json.Unmarshal(published.data, &envelope); err == nil && envelope.Type == typ {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *recordingSubjectPublisher) subjects() []string {
+	subjects := make([]string, 0, len(p.events))
+	for _, published := range p.events {
+		subjects = append(subjects, published.subject)
+	}
+	return subjects
+}
+
 type fakeWorkspaceRepo struct {
 	members map[[2]uuid.UUID]*entity.WorkspaceMember
 }
@@ -1342,7 +1480,14 @@ func (r *fakeMessageRepo) HasActiveMessage(_ context.Context, channelID uuid.UUI
 	}
 	return false, nil
 }
-func (r *fakeMessageRepo) Update(context.Context, *entity.Message) error   { return nil }
+func (r *fakeMessageRepo) Update(context.Context, *entity.Message) error { return nil }
+func (r *fakeMessageRepo) Move(_ context.Context, msg *entity.Message) error {
+	if stored := r.messages[msg.ID]; stored != nil {
+		*stored = *msg
+		return nil
+	}
+	return cerrors.NotFound("message not found")
+}
 func (r *fakeMessageRepo) Pin(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 func (r *fakeMessageRepo) Unpin(context.Context, uuid.UUID) error          { return nil }
 func (r *fakeMessageRepo) SoftDelete(_ context.Context, id uuid.UUID) error {

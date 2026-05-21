@@ -512,6 +512,27 @@ paths:
       responses:
         '204': { description: Deleted }
 
+  /api/v1/workspaces/{workspaceID}/channels/{channelID}/messages/{messageID}/move:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/ChannelID'
+      - $ref: '#/components/parameters/MessageID'
+    post:
+      summary: Move a message to another channel or thread
+      tags: [messages]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MoveMessageRequest' }
+      responses:
+        '200':
+          description: Moved message
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Message' }
+
   /api/v1/workspaces/{workspaceID}/channels/{channelID}/messages/{messageID}/thread:
     parameters:
       - $ref: '#/components/parameters/WorkspaceID'
@@ -1458,6 +1479,13 @@ components:
       required: [content]
       properties:
         content: { type: string, minLength: 1 }
+
+    MoveMessageRequest:
+      type: object
+      required: [channel_id]
+      properties:
+        channel_id: { $ref: '#/components/schemas/UUID' }
+        parent_id: { $ref: '#/components/schemas/UUID' }
 
     Reaction:
       type: object

@@ -1270,6 +1270,9 @@ components:
       required: [name, type]
       properties:
         name: { type: string, minLength: 1 }
+        members:
+          type: array
+          items: { $ref: '#/components/schemas/UUID' }
         topic: { type: string }
         type:
           type: string

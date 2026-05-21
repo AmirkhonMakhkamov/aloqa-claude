@@ -285,6 +285,7 @@ func (s *Service) CreateChannel(
 	workspaceID, userID uuid.UUID,
 	name, topic string,
 	chType entity.ChannelType,
+	extraMemberIDs []uuid.UUID,
 ) (*entity.Channel, error) {
 	input := CreateChannelInput{Name: name, Topic: topic}
 	if err := validate.Struct(input); err != nil {
@@ -316,6 +317,10 @@ func (s *Service) CreateChannel(
 		LastReadAt: now,
 		JoinedAt:   now,
 	}
+	extraMembers, err := s.buildInitialChannelMembers(ctx, workspaceID, userID, ch.ID, now, extraMemberIDs)
+	if err != nil {
+		return nil, err
+	}
 	if s.tx != nil {
 		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
 			if scope.Channels() == nil {
@@ -326,6 +331,11 @@ func (s *Service) CreateChannel(
 			}
 			if err := scope.Channels().AddMember(ctx, member); err != nil {
 				return err
+			}
+			for _, extraMember := range extraMembers {
+				if err := scope.Channels().AddMember(ctx, extraMember); err != nil {
+					return err
+				}
 			}
 			if err := s.enqueueChannelSearchTx(ctx, scope, ch); err != nil {
 				return err
@@ -344,6 +354,12 @@ func (s *Service) CreateChannel(
 			slog.ErrorContext(ctx, "failed to add channel owner", "channel_id", ch.ID, "user_id", userID, "error", err)
 			return nil, cerrors.Internal("failed to add channel owner", err)
 		}
+		for _, extraMember := range extraMembers {
+			if err := s.channels.AddMember(ctx, extraMember); err != nil {
+				slog.ErrorContext(ctx, "failed to add initial channel member", "channel_id", ch.ID, "user_id", extraMember.UserID, "error", err)
+				return nil, cerrors.Internal("failed to add initial channel member", err)
+			}
+		}
 
 		s.enqueueSearch(ctx, "index channel", func() error {
 			return s.search.IndexChannel(ctx, workspaceID, ch.ID, ch.Name, ch.Topic, ch.CreatedAt, ch.UpdatedAt)
@@ -353,6 +369,42 @@ func (s *Service) CreateChannel(
 
 	slog.InfoContext(ctx, "channel created", "channel_id", ch.ID, "name", name, "type", chType)
 	return ch, nil
+}
+
+func (s *Service) buildInitialChannelMembers(
+	ctx context.Context,
+	workspaceID, creatorID, channelID uuid.UUID,
+	joinedAt time.Time,
+	extraMemberIDs []uuid.UUID,
+) ([]*entity.ChannelMember, error) {
+	seen := map[uuid.UUID]struct{}{creatorID: {}}
+	members := make([]*entity.ChannelMember, 0, len(extraMemberIDs))
+
+	for _, memberID := range extraMemberIDs {
+		if memberID == uuid.Nil {
+			continue
+		}
+		if _, ok := seen[memberID]; ok {
+			continue
+		}
+		if _, err := s.members.GetMember(ctx, workspaceID, memberID); err != nil {
+			if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+				return nil, cerrors.Forbidden("selected user is not a member of this workspace")
+			}
+			return nil, cerrors.Internal("failed to verify selected channel member", err)
+		}
+		seen[memberID] = struct{}{}
+		members = append(members, &entity.ChannelMember{
+			ID:         id.New(),
+			ChannelID:  channelID,
+			UserID:     memberID,
+			Role:       entity.ChannelRoleMember,
+			LastReadAt: joinedAt,
+			JoinedAt:   joinedAt,
+		})
+	}
+
+	return members, nil
 }
 
 func (s *Service) UpdateChannel(ctx context.Context, channelID, userID uuid.UUID, name, topic string) (*entity.Channel, error) {

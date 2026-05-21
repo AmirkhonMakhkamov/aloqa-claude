@@ -74,6 +74,68 @@ func TestGetOrCreateDMRequiresBothWorkspaceMembers(t *testing.T) {
 	}
 }
 
+func TestCreateChannelAddsSelectedWorkspaceMembers(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	creatorID := uuid.New()
+	memberID := uuid.New()
+
+	channels := &fakeChannelRepo{}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, creatorID}: {WorkspaceID: workspaceID, UserID: creatorID, Role: entity.WorkspaceRoleOwner},
+		{workspaceID, memberID}:  {WorkspaceID: workspaceID, UserID: memberID, Role: entity.WorkspaceRoleMember},
+	}}
+	svc := NewService(channels, nil, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+
+	channel, err := svc.CreateChannel(
+		ctx,
+		workspaceID,
+		creatorID,
+		"design",
+		"Design critiques",
+		entity.ChannelTypePrivate,
+		[]uuid.UUID{memberID},
+	)
+	if err != nil {
+		t.Fatalf("CreateChannel returned error: %v", err)
+	}
+
+	if member := channels.members[[2]uuid.UUID{channel.ID, creatorID}]; member == nil || member.Role != entity.ChannelRoleOwner {
+		t.Fatalf("creator channel membership missing or wrong: %+v", member)
+	}
+	if member := channels.members[[2]uuid.UUID{channel.ID, memberID}]; member == nil || member.Role != entity.ChannelRoleMember {
+		t.Fatalf("selected channel membership missing or wrong: %+v", member)
+	}
+}
+
+func TestCreateChannelRejectsSelectedNonWorkspaceMember(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	creatorID := uuid.New()
+	intruderID := uuid.New()
+
+	channels := &fakeChannelRepo{}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, creatorID}: {WorkspaceID: workspaceID, UserID: creatorID, Role: entity.WorkspaceRoleOwner},
+	}}
+	svc := NewService(channels, nil, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+
+	if _, err := svc.CreateChannel(
+		ctx,
+		workspaceID,
+		creatorID,
+		"design",
+		"",
+		entity.ChannelTypePrivate,
+		[]uuid.UUID{intruderID},
+	); !hasCode(err, cerrors.CodeForbidden) {
+		t.Fatalf("CreateChannel non-workspace selected member error = %v, want FORBIDDEN", err)
+	}
+	if len(channels.created) != 0 {
+		t.Fatalf("created %d channels, want 0", len(channels.created))
+	}
+}
+
 func TestGuestGrantAllowsChannelAccessWithoutWorkspaceMembership(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()

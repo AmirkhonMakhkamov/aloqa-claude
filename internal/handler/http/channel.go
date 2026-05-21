@@ -21,9 +21,10 @@ func NewChannelHandler(svc *chat.Service) *ChannelHandler {
 }
 
 type createChannelRequest struct {
-	Name  string             `json:"name"`
-	Topic string             `json:"topic"`
-	Type  entity.ChannelType `json:"type"`
+	Name    string             `json:"name"`
+	Members []uuid.UUID        `json:"members,omitempty"`
+	Topic   string             `json:"topic"`
+	Type    entity.ChannelType `json:"type"`
 }
 
 type updateChannelRequest struct {
@@ -41,7 +42,7 @@ func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 	wsID := middleware.WorkspaceIDFromContext(r.Context())
 	userID := middleware.UserIDFromContext(r.Context())
 
-	ch, err := h.svc.CreateChannel(r.Context(), wsID, userID, req.Name, req.Topic, req.Type)
+	ch, err := h.svc.CreateChannel(r.Context(), wsID, userID, req.Name, req.Topic, req.Type, req.Members)
 	if err != nil {
 		writeErr(w, err)
 		return

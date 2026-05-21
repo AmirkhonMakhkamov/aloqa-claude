@@ -21,14 +21,19 @@ func NewChannelHandler(svc *chat.Service) *ChannelHandler {
 }
 
 type createChannelRequest struct {
-	Name  string             `json:"name"`
-	Topic string             `json:"topic"`
-	Type  entity.ChannelType `json:"type"`
+	Name    string             `json:"name"`
+	Members []uuid.UUID        `json:"members,omitempty"`
+	Topic   string             `json:"topic"`
+	Type    entity.ChannelType `json:"type"`
 }
 
 type updateChannelRequest struct {
 	Name  string `json:"name"`
 	Topic string `json:"topic"`
+}
+
+type addChannelMembersRequest struct {
+	UserIDs []uuid.UUID `json:"user_ids"`
 }
 
 func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
@@ -41,7 +46,7 @@ func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 	wsID := middleware.WorkspaceIDFromContext(r.Context())
 	userID := middleware.UserIDFromContext(r.Context())
 
-	ch, err := h.svc.CreateChannel(r.Context(), wsID, userID, req.Name, req.Topic, req.Type)
+	ch, err := h.svc.CreateChannel(r.Context(), wsID, userID, req.Name, req.Topic, req.Type, req.Members)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -79,6 +84,67 @@ func (h *ChannelHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeOK(w, ch)
+}
+
+func (h *ChannelHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
+	channelID, err := id.Parse(chi.URLParam(r, "channelID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	members, err := h.svc.ListChannelMembers(r.Context(), channelID, userID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, members)
+}
+
+func (h *ChannelHandler) AddMembers(w http.ResponseWriter, r *http.Request) {
+	channelID, err := id.Parse(chi.URLParam(r, "channelID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	var req addChannelMembersRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	members, err := h.svc.AddChannelMembers(r.Context(), channelID, userID, req.UserIDs)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, members)
+}
+
+func (h *ChannelHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
+	channelID, err := id.Parse(chi.URLParam(r, "channelID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	targetUserID, err := id.Parse(chi.URLParam(r, "userID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	if err := h.svc.RemoveChannelMember(r.Context(), channelID, userID, targetUserID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
 }
 
 func (h *ChannelHandler) Update(w http.ResponseWriter, r *http.Request) {

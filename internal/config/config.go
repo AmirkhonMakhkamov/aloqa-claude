@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bufio"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -223,6 +225,10 @@ func (s ServerConfig) Addr() string {
 }
 
 func Load() (*Config, error) {
+	if err := loadDotEnv(".env"); err != nil {
+		return nil, err
+	}
+
 	cfg := &Config{
 		Server: ServerConfig{
 			Host:         env("SERVER_HOST", "0.0.0.0"),
@@ -432,6 +438,125 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func loadDotEnv(path string) error {
+	file, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load %s: %w", path, err)
+	}
+	defer func() {
+		if err := file.Close(); err != nil {
+			slog.Warn("failed to close env file", "path", path, "error", err)
+		}
+	}()
+
+	scanner := bufio.NewScanner(file)
+	for lineNumber := 1; scanner.Scan(); lineNumber++ {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+
+		key, rawValue, ok := strings.Cut(line, "=")
+		if !ok {
+			return fmt.Errorf("load %s:%d: expected KEY=VALUE", path, lineNumber)
+		}
+
+		key = strings.TrimSpace(key)
+		if !isEnvKey(key) {
+			return fmt.Errorf("load %s:%d: invalid environment variable name %q", path, lineNumber, key)
+		}
+
+		value, err := parseDotEnvValue(rawValue)
+		if err != nil {
+			return fmt.Errorf("load %s:%d: %w", path, lineNumber, err)
+		}
+
+		if _, exists := os.LookupEnv(key); exists {
+			continue
+		}
+		if err := os.Setenv(key, value); err != nil {
+			return fmt.Errorf("load %s:%d: set %s: %w", path, lineNumber, key, err)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("load %s: %w", path, err)
+	}
+
+	return nil
+}
+
+func parseDotEnvValue(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", nil
+	}
+
+	quote := value[0]
+	if quote != '"' && quote != '\'' {
+		return stripDotEnvComment(value), nil
+	}
+
+	var builder strings.Builder
+	isEscaped := false
+	for i := 1; i < len(value); i++ {
+		ch := value[i]
+		if quote == '"' && isEscaped {
+			switch ch {
+			case 'n':
+				builder.WriteByte('\n')
+			case 'r':
+				builder.WriteByte('\r')
+			case 't':
+				builder.WriteByte('\t')
+			default:
+				builder.WriteByte(ch)
+			}
+			isEscaped = false
+			continue
+		}
+		if quote == '"' && ch == '\\' {
+			isEscaped = true
+			continue
+		}
+		if ch == quote {
+			trailing := strings.TrimSpace(value[i+1:])
+			if trailing != "" && !strings.HasPrefix(trailing, "#") {
+				return "", fmt.Errorf("unexpected trailing characters after quoted value")
+			}
+			return builder.String(), nil
+		}
+		builder.WriteByte(ch)
+	}
+
+	return "", fmt.Errorf("unterminated quoted value")
+}
+
+func stripDotEnvComment(value string) string {
+	for i := 0; i < len(value); i++ {
+		if value[i] == '#' && (i == 0 || value[i-1] == ' ' || value[i-1] == '\t') {
+			return strings.TrimSpace(value[:i])
+		}
+	}
+	return strings.TrimSpace(value)
+}
+
+func isEnvKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for i, ch := range key {
+		if ch == '_' || ch >= 'A' && ch <= 'Z' || ch >= 'a' && ch <= 'z' || i > 0 && ch >= '0' && ch <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func env(key, fallback string) string {

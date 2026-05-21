@@ -13,6 +13,7 @@ import (
 	"aloqa/internal/domain/entity"
 	"aloqa/internal/domain/event"
 	"aloqa/internal/domain/repository"
+	"aloqa/internal/middleware"
 	"aloqa/internal/pkg/cerrors"
 	"aloqa/internal/pkg/id"
 	"aloqa/internal/pkg/pagination"
@@ -27,6 +28,10 @@ import (
 // EventPublisher abstracts event publishing (e.g. NATS).
 type EventPublisher interface {
 	Publish(ctx context.Context, subject string, data []byte) error
+}
+
+type messageMoveRepository interface {
+	Move(ctx context.Context, msg *entity.Message) error
 }
 
 type CollaborationAccessAuthorizer interface {
@@ -101,6 +106,19 @@ func channelWorkspaceIDOrNil(ch *entity.Channel) uuid.UUID {
 		return uuid.Nil
 	}
 	return *ch.WorkspaceID
+}
+
+func requestWorkspaceIDForMessage(ctx context.Context, ch *entity.Channel) (uuid.UUID, error) {
+	if ch != nil && ch.WorkspaceID != nil {
+		return *ch.WorkspaceID, nil
+	}
+	if ch != nil && ch.Type == entity.ChannelTypeSavedGlobal {
+		workspaceID := middleware.WorkspaceIDFromContext(ctx)
+		if workspaceID != uuid.Nil {
+			return workspaceID, nil
+		}
+	}
+	return requireChannelWorkspaceID(ch)
 }
 
 func (s *Service) SetChannelAccessStates(states repository.ChannelAccessStateRepository) {
@@ -285,6 +303,7 @@ func (s *Service) CreateChannel(
 	workspaceID, userID uuid.UUID,
 	name, topic string,
 	chType entity.ChannelType,
+	extraMemberIDs []uuid.UUID,
 ) (*entity.Channel, error) {
 	input := CreateChannelInput{Name: name, Topic: topic}
 	if err := validate.Struct(input); err != nil {
@@ -316,6 +335,10 @@ func (s *Service) CreateChannel(
 		LastReadAt: now,
 		JoinedAt:   now,
 	}
+	extraMembers, err := s.buildInitialChannelMembers(ctx, workspaceID, userID, ch.ID, now, extraMemberIDs)
+	if err != nil {
+		return nil, err
+	}
 	if s.tx != nil {
 		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
 			if scope.Channels() == nil {
@@ -327,10 +350,18 @@ func (s *Service) CreateChannel(
 			if err := scope.Channels().AddMember(ctx, member); err != nil {
 				return err
 			}
+			for _, extraMember := range extraMembers {
+				if err := scope.Channels().AddMember(ctx, extraMember); err != nil {
+					return err
+				}
+			}
 			if err := s.enqueueChannelSearchTx(ctx, scope, ch); err != nil {
 				return err
 			}
-			return s.enqueueEventTx(ctx, scope, event.TypeChannelCreated, fmt.Sprintf("aloqa.chat.%s", ch.ID), workspaceID, ch.ID, userID, event.ChannelPayload{Channel: ch})
+			if err := s.enqueueEventTx(ctx, scope, event.TypeChannelCreated, fmt.Sprintf("aloqa.chat.%s", ch.ID), workspaceID, ch.ID, userID, event.ChannelPayload{Channel: ch}); err != nil {
+				return err
+			}
+			return s.enqueueEventTx(ctx, scope, event.TypeChannelCreated, fmt.Sprintf("aloqa.ws.%s", workspaceID), workspaceID, ch.ID, userID, event.ChannelPayload{Channel: ch})
 		}); err != nil {
 			slog.ErrorContext(ctx, "failed to create channel transaction", "name", name, "error", err)
 			return nil, cerrors.Internal("failed to create channel", err)
@@ -344,15 +375,58 @@ func (s *Service) CreateChannel(
 			slog.ErrorContext(ctx, "failed to add channel owner", "channel_id", ch.ID, "user_id", userID, "error", err)
 			return nil, cerrors.Internal("failed to add channel owner", err)
 		}
+		for _, extraMember := range extraMembers {
+			if err := s.channels.AddMember(ctx, extraMember); err != nil {
+				slog.ErrorContext(ctx, "failed to add initial channel member", "channel_id", ch.ID, "user_id", extraMember.UserID, "error", err)
+				return nil, cerrors.Internal("failed to add initial channel member", err)
+			}
+		}
 
 		s.enqueueSearch(ctx, "index channel", func() error {
 			return s.search.IndexChannel(ctx, workspaceID, ch.ID, ch.Name, ch.Topic, ch.CreatedAt, ch.UpdatedAt)
 		})
 		s.publishEvent(ctx, event.TypeChannelCreated, workspaceID, ch.ID, userID, event.ChannelPayload{Channel: ch})
+		s.publishToWorkspace(ctx, event.TypeChannelCreated, workspaceID, ch.ID, userID, event.ChannelPayload{Channel: ch})
 	}
 
 	slog.InfoContext(ctx, "channel created", "channel_id", ch.ID, "name", name, "type", chType)
 	return ch, nil
+}
+
+func (s *Service) buildInitialChannelMembers(
+	ctx context.Context,
+	workspaceID, creatorID, channelID uuid.UUID,
+	joinedAt time.Time,
+	extraMemberIDs []uuid.UUID,
+) ([]*entity.ChannelMember, error) {
+	seen := map[uuid.UUID]struct{}{creatorID: {}}
+	members := make([]*entity.ChannelMember, 0, len(extraMemberIDs))
+
+	for _, memberID := range extraMemberIDs {
+		if memberID == uuid.Nil {
+			continue
+		}
+		if _, ok := seen[memberID]; ok {
+			continue
+		}
+		if _, err := s.members.GetMember(ctx, workspaceID, memberID); err != nil {
+			if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+				return nil, cerrors.Forbidden("selected user is not a member of this workspace")
+			}
+			return nil, cerrors.Internal("failed to verify selected channel member", err)
+		}
+		seen[memberID] = struct{}{}
+		members = append(members, &entity.ChannelMember{
+			ID:         id.New(),
+			ChannelID:  channelID,
+			UserID:     memberID,
+			Role:       entity.ChannelRoleMember,
+			LastReadAt: joinedAt,
+			JoinedAt:   joinedAt,
+		})
+	}
+
+	return members, nil
 }
 
 func (s *Service) UpdateChannel(ctx context.Context, channelID, userID uuid.UUID, name, topic string) (*entity.Channel, error) {
@@ -679,6 +753,200 @@ func (s *Service) LeaveChannel(ctx context.Context, channelID, userID uuid.UUID)
 	return nil
 }
 
+func canManageChannelMembers(member *entity.ChannelMember) bool {
+	return member != nil && (member.Role == entity.ChannelRoleOwner || member.Role == entity.ChannelRoleAdmin)
+}
+
+// ListChannelMembers returns channel membership for a channel the user can view.
+func (s *Service) ListChannelMembers(ctx context.Context, channelID, userID uuid.UUID) ([]entity.ChannelMember, error) {
+	if _, err := s.authorizeChannel(ctx, channelID, userID, accesspolicy.CapabilityView); err != nil {
+		return nil, err
+	}
+
+	members, err := s.channels.ListMembers(ctx, channelID)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to list channel members", "channel_id", channelID, "user_id", userID, "error", err)
+		return nil, cerrors.Internal("failed to list channel members", err)
+	}
+
+	return members, nil
+}
+
+// AddChannelMembers adds workspace members to a channel when the actor can manage membership.
+func (s *Service) AddChannelMembers(ctx context.Context, channelID, actorID uuid.UUID, targetIDs []uuid.UUID) ([]entity.ChannelMember, error) {
+	decision, err := s.authorizeChannel(ctx, channelID, actorID, accesspolicy.CapabilityParticipate)
+	if err != nil {
+		return nil, err
+	}
+	if !canManageChannelMembers(decision.ChannelMember) {
+		return nil, cerrors.Forbidden("only channel owners and admins can add members")
+	}
+	if decision.Channel.Type != entity.ChannelTypePublic && decision.Channel.Type != entity.ChannelTypePrivate {
+		return nil, cerrors.Forbidden("members can only be managed for workspace channels")
+	}
+	workspaceID, err := requireChannelWorkspaceID(decision.Channel)
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	members := make([]entity.ChannelMember, 0, len(targetIDs))
+	seen := make(map[uuid.UUID]struct{}, len(targetIDs))
+	for _, targetID := range targetIDs {
+		if targetID == uuid.Nil {
+			continue
+		}
+		if _, ok := seen[targetID]; ok {
+			continue
+		}
+		seen[targetID] = struct{}{}
+		if targetID == actorID {
+			continue
+		}
+		if _, err := s.members.GetMember(ctx, workspaceID, targetID); err != nil {
+			if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+				return nil, cerrors.Forbidden("selected user is not a member of this workspace")
+			}
+			slog.ErrorContext(ctx, "failed to verify selected channel member", "workspace_id", workspaceID, "user_id", targetID, "error", err)
+			return nil, cerrors.Internal("failed to verify selected channel member", err)
+		}
+		if _, err := s.channels.GetMember(ctx, channelID, targetID); err == nil {
+			continue
+		} else if appErr, ok := cerrors.AsAppError(err); !ok || appErr.Code != cerrors.CodeNotFound {
+			slog.ErrorContext(ctx, "failed to check existing channel member", "channel_id", channelID, "user_id", targetID, "error", err)
+			return nil, cerrors.Internal("failed to check existing channel member", err)
+		}
+		members = append(members, entity.ChannelMember{
+			ID:         id.New(),
+			ChannelID:  channelID,
+			UserID:     targetID,
+			Role:       entity.ChannelRoleMember,
+			LastReadAt: now,
+			JoinedAt:   now,
+		})
+	}
+
+	if len(members) == 0 {
+		return nil, nil
+	}
+
+	addMembers := func(ctx context.Context, channels repository.ChannelRepository) error {
+		for index := range members {
+			if err := channels.AddMember(ctx, &members[index]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if s.tx != nil {
+		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
+			if scope.Channels() == nil {
+				return cerrors.Unavailable("channel transaction scope is not configured")
+			}
+			if err := addMembers(ctx, scope.Channels()); err != nil {
+				return err
+			}
+			for _, member := range members {
+				if err := s.enqueueEventTx(ctx, scope, event.TypeMemberJoined, fmt.Sprintf("aloqa.chat.%s", channelID), workspaceID, channelID, member.UserID, event.MemberPayload{
+					ChannelID: channelID,
+					UserID:    member.UserID,
+				}); err != nil {
+					return err
+				}
+			}
+			return s.enqueueEventTx(ctx, scope, event.TypeChannelCreated, fmt.Sprintf("aloqa.ws.%s", workspaceID), workspaceID, channelID, actorID, event.ChannelPayload{Channel: decision.Channel})
+		}); err != nil {
+			if appErr, ok := cerrors.AsAppError(err); ok {
+				return nil, appErr
+			}
+			slog.ErrorContext(ctx, "failed to add channel members transaction", "channel_id", channelID, "actor_id", actorID, "error", err)
+			return nil, cerrors.Internal("failed to add channel members", err)
+		}
+	} else if err := addMembers(ctx, s.channels); err != nil {
+		slog.ErrorContext(ctx, "failed to add channel members", "channel_id", channelID, "actor_id", actorID, "error", err)
+		return nil, cerrors.Internal("failed to add channel members", err)
+	} else {
+		for _, member := range members {
+			s.publishEvent(ctx, event.TypeMemberJoined, workspaceID, channelID, member.UserID, event.MemberPayload{
+				ChannelID: channelID,
+				UserID:    member.UserID,
+			})
+		}
+		s.publishToWorkspace(ctx, event.TypeChannelCreated, workspaceID, channelID, actorID, event.ChannelPayload{Channel: decision.Channel})
+	}
+
+	slog.InfoContext(ctx, "channel members added", "channel_id", channelID, "actor_id", actorID, "count", len(members))
+	return members, nil
+}
+
+// RemoveChannelMember removes another member from a channel when the actor can manage membership.
+func (s *Service) RemoveChannelMember(ctx context.Context, channelID, actorID, targetID uuid.UUID) error {
+	if actorID == targetID {
+		return cerrors.Forbidden("use leave channel to remove yourself")
+	}
+	decision, err := s.authorizeChannel(ctx, channelID, actorID, accesspolicy.CapabilityParticipate)
+	if err != nil {
+		return err
+	}
+	if !canManageChannelMembers(decision.ChannelMember) {
+		return cerrors.Forbidden("only channel owners and admins can remove members")
+	}
+	if decision.Channel.Type != entity.ChannelTypePublic && decision.Channel.Type != entity.ChannelTypePrivate {
+		return cerrors.Forbidden("members can only be managed for workspace channels")
+	}
+	workspaceID, err := requireChannelWorkspaceID(decision.Channel)
+	if err != nil {
+		return err
+	}
+	targetMember, err := s.channels.GetMember(ctx, channelID, targetID)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return cerrors.NotFound("channel member not found")
+		}
+		slog.ErrorContext(ctx, "failed to get target channel member", "channel_id", channelID, "user_id", targetID, "error", err)
+		return cerrors.Internal("failed to get channel member", err)
+	}
+	if targetMember.Role == entity.ChannelRoleOwner {
+		return cerrors.Forbidden("channel owner cannot be removed")
+	}
+
+	if s.tx != nil {
+		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
+			if scope.Channels() == nil {
+				return cerrors.Unavailable("channel transaction scope is not configured")
+			}
+			if err := scope.Channels().RemoveMember(ctx, channelID, targetID); err != nil {
+				return err
+			}
+			return s.enqueueEventTx(ctx, scope, event.TypeMemberLeft, fmt.Sprintf("aloqa.chat.%s", channelID), workspaceID, channelID, targetID, event.MemberPayload{
+				ChannelID: channelID,
+				UserID:    targetID,
+			})
+		}); err != nil {
+			if appErr, ok := cerrors.AsAppError(err); ok {
+				return appErr
+			}
+			slog.ErrorContext(ctx, "failed to remove channel member transaction", "channel_id", channelID, "actor_id", actorID, "target_id", targetID, "error", err)
+			return cerrors.Internal("failed to remove channel member", err)
+		}
+	} else if err := s.channels.RemoveMember(ctx, channelID, targetID); err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return cerrors.NotFound("channel member not found")
+		}
+		slog.ErrorContext(ctx, "failed to remove channel member", "channel_id", channelID, "actor_id", actorID, "target_id", targetID, "error", err)
+		return cerrors.Internal("failed to remove channel member", err)
+	} else {
+		s.publishEvent(ctx, event.TypeMemberLeft, workspaceID, channelID, targetID, event.MemberPayload{
+			ChannelID: channelID,
+			UserID:    targetID,
+		})
+	}
+
+	slog.InfoContext(ctx, "channel member removed", "channel_id", channelID, "actor_id", actorID, "target_id", targetID)
+	return nil
+}
+
 // SendMessage creates a new message in a channel after verifying membership.
 func (s *Service) SendMessage(
 	ctx context.Context,
@@ -725,7 +993,7 @@ func (s *Service) SendMessage(
 		return nil, err
 	}
 	ch := decision.Channel
-	workspaceID, err := requireChannelWorkspaceID(ch)
+	workspaceID, err := requestWorkspaceIDForMessage(ctx, ch)
 	if err != nil {
 		return nil, err
 	}
@@ -937,6 +1205,125 @@ func (s *Service) EditMessage(ctx context.Context, messageID, userID uuid.UUID, 
 	}
 
 	slog.InfoContext(ctx, "message edited", "message_id", messageID, "user_id", userID)
+	return msg, nil
+}
+
+type movedMessageDeleteRef struct {
+	ID        uuid.UUID `json:"id"`
+	ChannelID uuid.UUID `json:"channel_id"`
+	DeletedAt time.Time `json:"deleted_at"`
+}
+
+func (s *Service) MoveMessage(
+	ctx context.Context,
+	sourceChannelID, messageID, userID, targetChannelID uuid.UUID,
+	parentID *uuid.UUID,
+) (*entity.Message, error) {
+	msg, sourceCh, err := s.requireOwnMessageAccess(ctx, messageID, userID, accesspolicy.CapabilityParticipate)
+	if err != nil {
+		return nil, err
+	}
+	if msg.ChannelID != sourceChannelID {
+		return nil, cerrors.NotFound("message not found")
+	}
+	if parentID != nil && *parentID == messageID {
+		return nil, cerrors.InvalidInput("message cannot be moved under itself")
+	}
+
+	targetDecision, err := s.authorizeChannel(ctx, targetChannelID, userID, accesspolicy.CapabilityParticipate)
+	if err != nil {
+		return nil, err
+	}
+	targetCh := targetDecision.Channel
+	if targetCh.Archived {
+		return nil, cerrors.Forbidden("cannot move messages to an archived channel")
+	}
+	sourceWorkspaceID, err := requestWorkspaceIDForMessage(ctx, sourceCh)
+	if err != nil {
+		return nil, err
+	}
+	targetWorkspaceID, err := requestWorkspaceIDForMessage(ctx, targetCh)
+	if err != nil {
+		return nil, err
+	}
+	if sourceWorkspaceID != targetWorkspaceID {
+		return nil, cerrors.InvalidInput("message cannot be moved across workspaces")
+	}
+
+	if parentID != nil {
+		parent, err := s.messages.GetByID(ctx, *parentID)
+		if err != nil {
+			if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+				return nil, cerrors.NotFound("parent message not found")
+			}
+			return nil, cerrors.Internal("failed to get parent message", err)
+		}
+		if parent.DeletedAt != nil {
+			return nil, cerrors.NotFound("parent message has been deleted")
+		}
+		if parent.ChannelID != targetChannelID {
+			return nil, cerrors.InvalidInput("parent message does not belong to target channel")
+		}
+	}
+
+	originalChannelID := msg.ChannelID
+	now := time.Now().UTC()
+	msg.ChannelID = targetChannelID
+	msg.ParentID = parentID
+	msg.Pinned = false
+	msg.PinnedBy = nil
+	msg.PinnedAt = nil
+	msg.UpdatedAt = now
+
+	if s.tx != nil {
+		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
+			mover, ok := scope.Messages().(messageMoveRepository)
+			if !ok {
+				return cerrors.Unavailable("message move repository is not configured")
+			}
+			if err := mover.Move(ctx, msg); err != nil {
+				return err
+			}
+			if sourceWorkspaceID != uuid.Nil {
+				if err := s.enqueueMessageDeleteSearchTx(ctx, scope, sourceWorkspaceID, msg.ID); err != nil {
+					return err
+				}
+			}
+			if targetWorkspaceID != uuid.Nil {
+				if err := s.enqueueMessageSearchTx(ctx, scope, targetWorkspaceID, targetChannelID, msg); err != nil {
+					return err
+				}
+			}
+			return s.enqueueMoveEventsTx(ctx, scope, originalChannelID, sourceWorkspaceID, targetWorkspaceID, msg, targetCh, userID, now)
+		}); err != nil {
+			slog.ErrorContext(ctx, "failed to move message transaction", "message_id", messageID, "error", err)
+			return nil, cerrors.Internal("failed to move message", err)
+		}
+	} else {
+		mover, ok := s.messages.(messageMoveRepository)
+		if !ok {
+			return nil, cerrors.Unavailable("message move repository is not configured")
+		}
+		if err := mover.Move(ctx, msg); err != nil {
+			slog.ErrorContext(ctx, "failed to move message", "message_id", messageID, "error", err)
+			return nil, cerrors.Internal("failed to move message", err)
+		}
+		s.enqueueSearch(ctx, "move message delete old index", func() error {
+			if sourceWorkspaceID == uuid.Nil {
+				return nil
+			}
+			return s.search.DeleteMessage(ctx, sourceWorkspaceID, msg.ID)
+		})
+		s.enqueueSearch(ctx, "move message index target", func() error {
+			if targetWorkspaceID == uuid.Nil {
+				return nil
+			}
+			return s.search.IndexMessage(ctx, targetWorkspaceID, targetChannelID, msg.ID, msg.Content, msg.CreatedAt)
+		})
+		s.publishMoveEvents(ctx, originalChannelID, sourceWorkspaceID, targetWorkspaceID, msg, targetCh, userID, now)
+	}
+
+	slog.InfoContext(ctx, "message moved", "message_id", messageID, "source_channel_id", sourceChannelID, "target_channel_id", targetChannelID, "user_id", userID)
 	return msg, nil
 }
 
@@ -1432,6 +1819,26 @@ func (s *Service) publishToWorkspace(ctx context.Context, evtType event.Type, wo
 	s.doPublish(ctx, evtType, subject, workspaceID, channelID, userID, payload)
 }
 
+func (s *Service) publishMoveEvents(
+	ctx context.Context,
+	originalChannelID, sourceWorkspaceID, targetWorkspaceID uuid.UUID,
+	msg *entity.Message,
+	targetCh *entity.Channel,
+	userID uuid.UUID,
+	movedAt time.Time,
+) {
+	if originalChannelID == msg.ChannelID {
+		s.publishEvent(ctx, event.TypeMessageUpdated, targetWorkspaceID, msg.ChannelID, userID, event.NewMessagePayload(msg, targetCh))
+		s.publishToWorkspace(ctx, event.TypeMessageUpdated, targetWorkspaceID, msg.ChannelID, userID, event.NewMessagePayload(msg, targetCh))
+		return
+	}
+	deleteRef := movedMessageDeleteRef{ID: msg.ID, ChannelID: originalChannelID, DeletedAt: movedAt}
+	s.publishEvent(ctx, event.TypeMessageDeleted, sourceWorkspaceID, originalChannelID, userID, deleteRef)
+	s.publishToWorkspace(ctx, event.TypeMessageDeleted, sourceWorkspaceID, originalChannelID, userID, deleteRef)
+	s.publishEvent(ctx, event.TypeMessageCreated, targetWorkspaceID, msg.ChannelID, userID, event.NewMessagePayload(msg, targetCh))
+	s.publishToWorkspace(ctx, event.TypeMessageCreated, targetWorkspaceID, msg.ChannelID, userID, event.NewMessagePayload(msg, targetCh))
+}
+
 func (s *Service) enqueueSearch(ctx context.Context, action string, fn func() error) {
 	if s.search == nil || fn == nil {
 		return
@@ -1481,6 +1888,36 @@ func (s *Service) enqueueMessageDeleteSearchTx(ctx context.Context, scope txscop
 		return nil
 	}
 	return scope.SearchIndexer().EnqueueDelete(ctx, workspaceID, searchsvc.ResourceTypeMessage, messageID)
+}
+
+func (s *Service) enqueueMoveEventsTx(
+	ctx context.Context,
+	scope txscope.Scope,
+	originalChannelID, sourceWorkspaceID, targetWorkspaceID uuid.UUID,
+	msg *entity.Message,
+	targetCh *entity.Channel,
+	userID uuid.UUID,
+	movedAt time.Time,
+) error {
+	if originalChannelID == msg.ChannelID {
+		payload := event.NewMessagePayload(msg, targetCh)
+		if err := s.enqueueEventTx(ctx, scope, event.TypeMessageUpdated, fmt.Sprintf("aloqa.chat.%s", msg.ChannelID), targetWorkspaceID, msg.ChannelID, userID, payload); err != nil {
+			return err
+		}
+		return s.enqueueEventTx(ctx, scope, event.TypeMessageUpdated, fmt.Sprintf("aloqa.ws.%s", targetWorkspaceID), targetWorkspaceID, msg.ChannelID, userID, payload)
+	}
+	deleteRef := movedMessageDeleteRef{ID: msg.ID, ChannelID: originalChannelID, DeletedAt: movedAt}
+	if err := s.enqueueEventTx(ctx, scope, event.TypeMessageDeleted, fmt.Sprintf("aloqa.chat.%s", originalChannelID), sourceWorkspaceID, originalChannelID, userID, deleteRef); err != nil {
+		return err
+	}
+	if err := s.enqueueEventTx(ctx, scope, event.TypeMessageDeleted, fmt.Sprintf("aloqa.ws.%s", sourceWorkspaceID), sourceWorkspaceID, originalChannelID, userID, deleteRef); err != nil {
+		return err
+	}
+	payload := event.NewMessagePayload(msg, targetCh)
+	if err := s.enqueueEventTx(ctx, scope, event.TypeMessageCreated, fmt.Sprintf("aloqa.chat.%s", msg.ChannelID), targetWorkspaceID, msg.ChannelID, userID, payload); err != nil {
+		return err
+	}
+	return s.enqueueEventTx(ctx, scope, event.TypeMessageCreated, fmt.Sprintf("aloqa.ws.%s", targetWorkspaceID), targetWorkspaceID, msg.ChannelID, userID, payload)
 }
 
 func (s *Service) ensureChannelAccessGrantTx(ctx context.Context, scope txscope.Scope, channelID, workspaceID, remoteWorkspaceID, sourceUserID, targetUserID uuid.UUID, allowCalls bool) error {

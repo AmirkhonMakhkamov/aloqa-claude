@@ -268,6 +268,9 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 			r.Put("/", deps.Channels.Update)
 			r.Post("/join", deps.Channels.Join)
 			r.Post("/leave", deps.Channels.Leave)
+			r.Get("/members", deps.Channels.ListMembers)
+			r.Post("/members", deps.Channels.AddMembers)
+			r.Delete("/members/{userID}", deps.Channels.RemoveMember)
 			r.Post("/read", deps.Channels.MarkRead)
 
 			// Messages within a channel.
@@ -280,6 +283,7 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 					r.Get("/", deps.Messages.Get)
 					r.Put("/", deps.Messages.Edit)
 					r.Delete("/", deps.Messages.Delete)
+					r.Post("/move", deps.Messages.Move)
 					r.Get("/thread", deps.Messages.ListThread)
 					r.Post("/reactions", deps.Messages.AddReaction)
 					r.Delete("/reactions/{emoji}", deps.Messages.RemoveReaction)

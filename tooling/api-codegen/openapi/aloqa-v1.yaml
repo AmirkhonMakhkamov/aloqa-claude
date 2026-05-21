@@ -378,6 +378,55 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Channel' }
 
+  /api/v1/workspaces/{workspaceID}/channels/{channelID}/members:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/ChannelID'
+    get:
+      summary: List channel members
+      tags: [channels]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Channel members
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ChannelMember' }
+    post:
+      summary: Add channel members
+      tags: [channels]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddChannelMembersRequest' }
+      responses:
+        '200':
+          description: Added channel members
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ChannelMember' }
+
+  /api/v1/workspaces/{workspaceID}/channels/{channelID}/members/{userID}:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/ChannelID'
+      - name: userID
+        in: path
+        required: true
+        schema: { $ref: '#/components/schemas/UUID' }
+    delete:
+      summary: Remove a channel member
+      tags: [channels]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Removed channel member }
+
   /api/v1/workspaces/{workspaceID}/channels/{channelID}/read:
     parameters:
       - $ref: '#/components/parameters/WorkspaceID'
@@ -462,6 +511,27 @@ paths:
       security: [{ bearerAuth: [] }]
       responses:
         '204': { description: Deleted }
+
+  /api/v1/workspaces/{workspaceID}/channels/{channelID}/messages/{messageID}/move:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/ChannelID'
+      - $ref: '#/components/parameters/MessageID'
+    post:
+      summary: Move a message to another channel or thread
+      tags: [messages]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MoveMessageRequest' }
+      responses:
+        '200':
+          description: Moved message
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Message' }
 
   /api/v1/workspaces/{workspaceID}/channels/{channelID}/messages/{messageID}/thread:
     parameters:
@@ -1270,10 +1340,35 @@ components:
       required: [name, type]
       properties:
         name: { type: string, minLength: 1 }
+        members:
+          type: array
+          items: { $ref: '#/components/schemas/UUID' }
         topic: { type: string }
         type:
           type: string
           enum: [public, private]
+
+    ChannelMember:
+      type: object
+      required: [id, channel_id, user_id, role, last_read_at, joined_at]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        channel_id: { $ref: '#/components/schemas/UUID' }
+        user_id: { $ref: '#/components/schemas/UUID' }
+        role:
+          type: string
+          enum: [owner, admin, member]
+        muted_until: { $ref: '#/components/schemas/IsoDatetime', nullable: true }
+        last_read_at: { $ref: '#/components/schemas/IsoDatetime' }
+        joined_at: { $ref: '#/components/schemas/IsoDatetime' }
+
+    AddChannelMembersRequest:
+      type: object
+      required: [user_ids]
+      properties:
+        user_ids:
+          type: array
+          items: { $ref: '#/components/schemas/UUID' }
 
     UpdateChannelRequest:
       type: object
@@ -1384,6 +1479,13 @@ components:
       required: [content]
       properties:
         content: { type: string, minLength: 1 }
+
+    MoveMessageRequest:
+      type: object
+      required: [channel_id]
+      properties:
+        channel_id: { $ref: '#/components/schemas/UUID' }
+        parent_id: { $ref: '#/components/schemas/UUID' }
 
     Reaction:
       type: object

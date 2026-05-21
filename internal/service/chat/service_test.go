@@ -997,6 +997,120 @@ func TestJoinAndLeaveChannelUseTransactionalEventEnqueue(t *testing.T) {
 	}
 }
 
+func TestListChannelMembersReturnsVisibleMembership(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	ownerID := uuid.New()
+	memberID := uuid.New()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePrivate},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, ownerID}:  {ChannelID: channelID, UserID: ownerID, Role: entity.ChannelRoleOwner},
+			{channelID, memberID}: {ChannelID: channelID, UserID: memberID, Role: entity.ChannelRoleMember},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, ownerID}:  {WorkspaceID: workspaceID, UserID: ownerID, Role: entity.WorkspaceRoleOwner},
+		{workspaceID, memberID}: {WorkspaceID: workspaceID, UserID: memberID, Role: entity.WorkspaceRoleMember},
+	}}
+	svc := NewService(channels, nil, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+
+	members, err := svc.ListChannelMembers(ctx, channelID, ownerID)
+	if err != nil {
+		t.Fatalf("ListChannelMembers returned error: %v", err)
+	}
+	if len(members) != 2 {
+		t.Fatalf("members length = %d, want 2", len(members))
+	}
+}
+
+func TestAddChannelMembersRequiresManagerAndWorkspaceMembership(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	ownerID := uuid.New()
+	memberID := uuid.New()
+	targetID := uuid.New()
+	outsiderID := uuid.New()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePrivate},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, ownerID}:  {ChannelID: channelID, UserID: ownerID, Role: entity.ChannelRoleOwner},
+			{channelID, memberID}: {ChannelID: channelID, UserID: memberID, Role: entity.ChannelRoleMember},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, ownerID}:  {WorkspaceID: workspaceID, UserID: ownerID, Role: entity.WorkspaceRoleOwner},
+		{workspaceID, memberID}: {WorkspaceID: workspaceID, UserID: memberID, Role: entity.WorkspaceRoleMember},
+		{workspaceID, targetID}: {WorkspaceID: workspaceID, UserID: targetID, Role: entity.WorkspaceRoleMember},
+	}}
+	svc := NewService(channels, nil, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+
+	if _, err := svc.AddChannelMembers(ctx, channelID, memberID, []uuid.UUID{targetID}); !hasCode(err, cerrors.CodeForbidden) {
+		t.Fatalf("AddChannelMembers member error = %v, want FORBIDDEN", err)
+	}
+	if _, err := svc.AddChannelMembers(ctx, channelID, ownerID, []uuid.UUID{outsiderID}); !hasCode(err, cerrors.CodeForbidden) {
+		t.Fatalf("AddChannelMembers outsider error = %v, want FORBIDDEN", err)
+	}
+
+	added, err := svc.AddChannelMembers(ctx, channelID, ownerID, []uuid.UUID{targetID, targetID, ownerID})
+	if err != nil {
+		t.Fatalf("AddChannelMembers returned error: %v", err)
+	}
+	if len(added) != 1 {
+		t.Fatalf("added length = %d, want 1", len(added))
+	}
+	if member := channels.members[[2]uuid.UUID{channelID, targetID}]; member == nil || member.Role != entity.ChannelRoleMember {
+		t.Fatalf("target channel membership missing or wrong: %+v", member)
+	}
+}
+
+func TestRemoveChannelMemberRequiresManagerAndProtectsOwner(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	ownerID := uuid.New()
+	adminID := uuid.New()
+	memberID := uuid.New()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePrivate},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, ownerID}:  {ChannelID: channelID, UserID: ownerID, Role: entity.ChannelRoleOwner},
+			{channelID, adminID}:  {ChannelID: channelID, UserID: adminID, Role: entity.ChannelRoleAdmin},
+			{channelID, memberID}: {ChannelID: channelID, UserID: memberID, Role: entity.ChannelRoleMember},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, ownerID}:  {WorkspaceID: workspaceID, UserID: ownerID, Role: entity.WorkspaceRoleOwner},
+		{workspaceID, adminID}:  {WorkspaceID: workspaceID, UserID: adminID, Role: entity.WorkspaceRoleAdmin},
+		{workspaceID, memberID}: {WorkspaceID: workspaceID, UserID: memberID, Role: entity.WorkspaceRoleMember},
+	}}
+	svc := NewService(channels, nil, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+
+	if err := svc.RemoveChannelMember(ctx, channelID, memberID, adminID); !hasCode(err, cerrors.CodeForbidden) {
+		t.Fatalf("RemoveChannelMember member error = %v, want FORBIDDEN", err)
+	}
+	if err := svc.RemoveChannelMember(ctx, channelID, adminID, ownerID); !hasCode(err, cerrors.CodeForbidden) {
+		t.Fatalf("RemoveChannelMember owner error = %v, want FORBIDDEN", err)
+	}
+	if err := svc.RemoveChannelMember(ctx, channelID, adminID, memberID); err != nil {
+		t.Fatalf("RemoveChannelMember returned error: %v", err)
+	}
+	if channels.members[[2]uuid.UUID{channelID, memberID}] != nil {
+		t.Fatalf("member still present after remove")
+	}
+}
+
 type noopPublisher struct{}
 
 func (noopPublisher) Publish(context.Context, string, []byte) error { return nil }
@@ -1162,8 +1276,14 @@ func (r *fakeChannelRepo) GetMember(_ context.Context, channelID, userID uuid.UU
 	}
 	return nil, cerrors.NotFound("channel member not found")
 }
-func (r *fakeChannelRepo) ListMembers(context.Context, uuid.UUID) ([]entity.ChannelMember, error) {
-	return nil, nil
+func (r *fakeChannelRepo) ListMembers(_ context.Context, channelID uuid.UUID) ([]entity.ChannelMember, error) {
+	members := make([]entity.ChannelMember, 0)
+	for key, member := range r.members {
+		if key[0] == channelID && member != nil {
+			members = append(members, *member)
+		}
+	}
+	return members, nil
 }
 func (r *fakeChannelRepo) RemoveMember(_ context.Context, channelID, userID uuid.UUID) error {
 	key := [2]uuid.UUID{channelID, userID}

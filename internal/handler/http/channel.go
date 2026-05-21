@@ -32,6 +32,10 @@ type updateChannelRequest struct {
 	Topic string `json:"topic"`
 }
 
+type addChannelMembersRequest struct {
+	UserIDs []uuid.UUID `json:"user_ids"`
+}
+
 func (h *ChannelHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req createChannelRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -80,6 +84,67 @@ func (h *ChannelHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeOK(w, ch)
+}
+
+func (h *ChannelHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
+	channelID, err := id.Parse(chi.URLParam(r, "channelID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	members, err := h.svc.ListChannelMembers(r.Context(), channelID, userID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, members)
+}
+
+func (h *ChannelHandler) AddMembers(w http.ResponseWriter, r *http.Request) {
+	channelID, err := id.Parse(chi.URLParam(r, "channelID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	var req addChannelMembersRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	members, err := h.svc.AddChannelMembers(r.Context(), channelID, userID, req.UserIDs)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, members)
+}
+
+func (h *ChannelHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
+	channelID, err := id.Parse(chi.URLParam(r, "channelID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	targetUserID, err := id.Parse(chi.URLParam(r, "userID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	if err := h.svc.RemoveChannelMember(r.Context(), channelID, userID, targetUserID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
 }
 
 func (h *ChannelHandler) Update(w http.ResponseWriter, r *http.Request) {

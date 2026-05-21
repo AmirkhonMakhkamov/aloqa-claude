@@ -378,6 +378,55 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Channel' }
 
+  /api/v1/workspaces/{workspaceID}/channels/{channelID}/members:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/ChannelID'
+    get:
+      summary: List channel members
+      tags: [channels]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Channel members
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ChannelMember' }
+    post:
+      summary: Add channel members
+      tags: [channels]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddChannelMembersRequest' }
+      responses:
+        '200':
+          description: Added channel members
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ChannelMember' }
+
+  /api/v1/workspaces/{workspaceID}/channels/{channelID}/members/{userID}:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/ChannelID'
+      - name: userID
+        in: path
+        required: true
+        schema: { $ref: '#/components/schemas/UUID' }
+    delete:
+      summary: Remove a channel member
+      tags: [channels]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Removed channel member }
+
   /api/v1/workspaces/{workspaceID}/channels/{channelID}/read:
     parameters:
       - $ref: '#/components/parameters/WorkspaceID'
@@ -1277,6 +1326,28 @@ components:
         type:
           type: string
           enum: [public, private]
+
+    ChannelMember:
+      type: object
+      required: [id, channel_id, user_id, role, last_read_at, joined_at]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        channel_id: { $ref: '#/components/schemas/UUID' }
+        user_id: { $ref: '#/components/schemas/UUID' }
+        role:
+          type: string
+          enum: [owner, admin, member]
+        muted_until: { $ref: '#/components/schemas/IsoDatetime', nullable: true }
+        last_read_at: { $ref: '#/components/schemas/IsoDatetime' }
+        joined_at: { $ref: '#/components/schemas/IsoDatetime' }
+
+    AddChannelMembersRequest:
+      type: object
+      required: [user_ids]
+      properties:
+        user_ids:
+          type: array
+          items: { $ref: '#/components/schemas/UUID' }
 
     UpdateChannelRequest:
       type: object

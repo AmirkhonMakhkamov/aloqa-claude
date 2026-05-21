@@ -731,6 +731,199 @@ func (s *Service) LeaveChannel(ctx context.Context, channelID, userID uuid.UUID)
 	return nil
 }
 
+func canManageChannelMembers(member *entity.ChannelMember) bool {
+	return member != nil && (member.Role == entity.ChannelRoleOwner || member.Role == entity.ChannelRoleAdmin)
+}
+
+// ListChannelMembers returns channel membership for a channel the user can view.
+func (s *Service) ListChannelMembers(ctx context.Context, channelID, userID uuid.UUID) ([]entity.ChannelMember, error) {
+	if _, err := s.authorizeChannel(ctx, channelID, userID, accesspolicy.CapabilityView); err != nil {
+		return nil, err
+	}
+
+	members, err := s.channels.ListMembers(ctx, channelID)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to list channel members", "channel_id", channelID, "user_id", userID, "error", err)
+		return nil, cerrors.Internal("failed to list channel members", err)
+	}
+
+	return members, nil
+}
+
+// AddChannelMembers adds workspace members to a channel when the actor can manage membership.
+func (s *Service) AddChannelMembers(ctx context.Context, channelID, actorID uuid.UUID, targetIDs []uuid.UUID) ([]entity.ChannelMember, error) {
+	decision, err := s.authorizeChannel(ctx, channelID, actorID, accesspolicy.CapabilityParticipate)
+	if err != nil {
+		return nil, err
+	}
+	if !canManageChannelMembers(decision.ChannelMember) {
+		return nil, cerrors.Forbidden("only channel owners and admins can add members")
+	}
+	if decision.Channel.Type != entity.ChannelTypePublic && decision.Channel.Type != entity.ChannelTypePrivate {
+		return nil, cerrors.Forbidden("members can only be managed for workspace channels")
+	}
+	workspaceID, err := requireChannelWorkspaceID(decision.Channel)
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	members := make([]entity.ChannelMember, 0, len(targetIDs))
+	seen := make(map[uuid.UUID]struct{}, len(targetIDs))
+	for _, targetID := range targetIDs {
+		if targetID == uuid.Nil {
+			continue
+		}
+		if _, ok := seen[targetID]; ok {
+			continue
+		}
+		seen[targetID] = struct{}{}
+		if targetID == actorID {
+			continue
+		}
+		if _, err := s.members.GetMember(ctx, workspaceID, targetID); err != nil {
+			if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+				return nil, cerrors.Forbidden("selected user is not a member of this workspace")
+			}
+			slog.ErrorContext(ctx, "failed to verify selected channel member", "workspace_id", workspaceID, "user_id", targetID, "error", err)
+			return nil, cerrors.Internal("failed to verify selected channel member", err)
+		}
+		if _, err := s.channels.GetMember(ctx, channelID, targetID); err == nil {
+			continue
+		} else if appErr, ok := cerrors.AsAppError(err); !ok || appErr.Code != cerrors.CodeNotFound {
+			slog.ErrorContext(ctx, "failed to check existing channel member", "channel_id", channelID, "user_id", targetID, "error", err)
+			return nil, cerrors.Internal("failed to check existing channel member", err)
+		}
+		members = append(members, entity.ChannelMember{
+			ID:         id.New(),
+			ChannelID:  channelID,
+			UserID:     targetID,
+			Role:       entity.ChannelRoleMember,
+			LastReadAt: now,
+			JoinedAt:   now,
+		})
+	}
+
+	if len(members) == 0 {
+		return nil, nil
+	}
+
+	addMembers := func(ctx context.Context, channels repository.ChannelRepository) error {
+		for index := range members {
+			if err := channels.AddMember(ctx, &members[index]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if s.tx != nil {
+		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
+			if scope.Channels() == nil {
+				return cerrors.Unavailable("channel transaction scope is not configured")
+			}
+			if err := addMembers(ctx, scope.Channels()); err != nil {
+				return err
+			}
+			for _, member := range members {
+				if err := s.enqueueEventTx(ctx, scope, event.TypeMemberJoined, fmt.Sprintf("aloqa.chat.%s", channelID), workspaceID, channelID, member.UserID, event.MemberPayload{
+					ChannelID: channelID,
+					UserID:    member.UserID,
+				}); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			if appErr, ok := cerrors.AsAppError(err); ok {
+				return nil, appErr
+			}
+			slog.ErrorContext(ctx, "failed to add channel members transaction", "channel_id", channelID, "actor_id", actorID, "error", err)
+			return nil, cerrors.Internal("failed to add channel members", err)
+		}
+	} else if err := addMembers(ctx, s.channels); err != nil {
+		slog.ErrorContext(ctx, "failed to add channel members", "channel_id", channelID, "actor_id", actorID, "error", err)
+		return nil, cerrors.Internal("failed to add channel members", err)
+	} else {
+		for _, member := range members {
+			s.publishEvent(ctx, event.TypeMemberJoined, workspaceID, channelID, member.UserID, event.MemberPayload{
+				ChannelID: channelID,
+				UserID:    member.UserID,
+			})
+		}
+	}
+
+	slog.InfoContext(ctx, "channel members added", "channel_id", channelID, "actor_id", actorID, "count", len(members))
+	return members, nil
+}
+
+// RemoveChannelMember removes another member from a channel when the actor can manage membership.
+func (s *Service) RemoveChannelMember(ctx context.Context, channelID, actorID, targetID uuid.UUID) error {
+	if actorID == targetID {
+		return cerrors.Forbidden("use leave channel to remove yourself")
+	}
+	decision, err := s.authorizeChannel(ctx, channelID, actorID, accesspolicy.CapabilityParticipate)
+	if err != nil {
+		return err
+	}
+	if !canManageChannelMembers(decision.ChannelMember) {
+		return cerrors.Forbidden("only channel owners and admins can remove members")
+	}
+	if decision.Channel.Type != entity.ChannelTypePublic && decision.Channel.Type != entity.ChannelTypePrivate {
+		return cerrors.Forbidden("members can only be managed for workspace channels")
+	}
+	workspaceID, err := requireChannelWorkspaceID(decision.Channel)
+	if err != nil {
+		return err
+	}
+	targetMember, err := s.channels.GetMember(ctx, channelID, targetID)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return cerrors.NotFound("channel member not found")
+		}
+		slog.ErrorContext(ctx, "failed to get target channel member", "channel_id", channelID, "user_id", targetID, "error", err)
+		return cerrors.Internal("failed to get channel member", err)
+	}
+	if targetMember.Role == entity.ChannelRoleOwner {
+		return cerrors.Forbidden("channel owner cannot be removed")
+	}
+
+	if s.tx != nil {
+		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
+			if scope.Channels() == nil {
+				return cerrors.Unavailable("channel transaction scope is not configured")
+			}
+			if err := scope.Channels().RemoveMember(ctx, channelID, targetID); err != nil {
+				return err
+			}
+			return s.enqueueEventTx(ctx, scope, event.TypeMemberLeft, fmt.Sprintf("aloqa.chat.%s", channelID), workspaceID, channelID, targetID, event.MemberPayload{
+				ChannelID: channelID,
+				UserID:    targetID,
+			})
+		}); err != nil {
+			if appErr, ok := cerrors.AsAppError(err); ok {
+				return appErr
+			}
+			slog.ErrorContext(ctx, "failed to remove channel member transaction", "channel_id", channelID, "actor_id", actorID, "target_id", targetID, "error", err)
+			return cerrors.Internal("failed to remove channel member", err)
+		}
+	} else if err := s.channels.RemoveMember(ctx, channelID, targetID); err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return cerrors.NotFound("channel member not found")
+		}
+		slog.ErrorContext(ctx, "failed to remove channel member", "channel_id", channelID, "actor_id", actorID, "target_id", targetID, "error", err)
+		return cerrors.Internal("failed to remove channel member", err)
+	} else {
+		s.publishEvent(ctx, event.TypeMemberLeft, workspaceID, channelID, targetID, event.MemberPayload{
+			ChannelID: channelID,
+			UserID:    targetID,
+		})
+	}
+
+	slog.InfoContext(ctx, "channel member removed", "channel_id", channelID, "actor_id", actorID, "target_id", targetID)
+	return nil
+}
+
 // SendMessage creates a new message in a channel after verifying membership.
 func (s *Service) SendMessage(
 	ctx context.Context,

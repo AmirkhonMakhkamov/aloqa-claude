@@ -465,7 +465,7 @@ func (s *Service) buildInitialChannelMembers(
 	return members, nil
 }
 
-func (s *Service) UpdateChannel(ctx context.Context, channelID, userID uuid.UUID, name, topic string) (*entity.Channel, error) {
+func (s *Service) UpdateChannel(ctx context.Context, channelID, userID uuid.UUID, name, topic string, archived *bool) (*entity.Channel, error) {
 	input := CreateChannelInput{Name: name, Topic: topic}
 	if err := validate.Struct(input); err != nil {
 		return nil, err
@@ -505,6 +505,9 @@ func (s *Service) UpdateChannel(ctx context.Context, channelID, userID uuid.UUID
 
 	ch.Name = name
 	ch.Topic = &topic
+	if archived != nil {
+		ch.Archived = *archived
+	}
 	workspaceID, err := requireChannelWorkspaceID(ch)
 	if err != nil {
 		return nil, err

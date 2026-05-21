@@ -212,7 +212,7 @@ func (r *ChannelRepo) ListByUser(ctx context.Context, workspaceID, userID uuid.U
 func (r *ChannelRepo) Update(ctx context.Context, ch *entity.Channel) error {
 	query := `
 		UPDATE channels
-		SET name = $2, topic = $3, updated_at = $4
+		SET name = $2, topic = $3, archived = $4, updated_at = $5
 		WHERE id = $1`
 
 	ch.UpdatedAt = time.Now().UTC()
@@ -221,6 +221,7 @@ func (r *ChannelRepo) Update(ctx context.Context, ch *entity.Channel) error {
 		ch.ID,
 		ch.Name,
 		ch.Topic,
+		ch.Archived,
 		ch.UpdatedAt,
 	)
 	if err != nil {

@@ -28,8 +28,9 @@ type createChannelRequest struct {
 }
 
 type updateChannelRequest struct {
-	Name  string `json:"name"`
-	Topic string `json:"topic"`
+	Name     string `json:"name"`
+	Topic    string `json:"topic"`
+	Archived *bool  `json:"archived,omitempty"`
 }
 
 type addChannelMembersRequest struct {
@@ -174,7 +175,7 @@ func (h *ChannelHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userID := middleware.UserIDFromContext(r.Context())
-	ch, err := h.svc.UpdateChannel(r.Context(), channelID, userID, req.Name, req.Topic)
+	ch, err := h.svc.UpdateChannel(r.Context(), channelID, userID, req.Name, req.Topic, req.Archived)
 	if err != nil {
 		writeErr(w, err)
 		return

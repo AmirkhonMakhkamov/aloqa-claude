@@ -274,6 +274,8 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 				u.email AS user_email,
 				u.display_name AS user_display_name,
 				u.avatar_url AS user_avatar_url,
+				u.position AS user_position,
+				u.department AS user_department,
 				u.status AS user_status,
 				u.locale AS user_locale,
 				u.created_at AS user_created_at,
@@ -359,6 +361,8 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 			user_email,
 			user_display_name,
 			user_avatar_url,
+			user_position,
+			user_department,
 			user_status,
 			user_locale,
 			user_created_at,
@@ -395,6 +399,8 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 			userEmail       sql.NullString
 			userDisplayName sql.NullString
 			userAvatarURL   sql.NullString
+			userPosition    sql.NullString
+			userDepartment  sql.NullString
 			userStatus      sql.NullString
 			userLocale      sql.NullString
 			userCreatedAt   sql.NullTime
@@ -414,6 +420,8 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 			&userEmail,
 			&userDisplayName,
 			&userAvatarURL,
+			&userPosition,
+			&userDepartment,
 			&userStatus,
 			&userLocale,
 			&userCreatedAt,
@@ -423,7 +431,7 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 			return nil, fmt.Errorf("postgres: scan search result: %w", err)
 		}
 		if userID.Valid {
-			result.User = &entity.User{
+			user := &entity.User{
 				ID:          userID.UUID,
 				Email:       userEmail.String,
 				DisplayName: userDisplayName.String,
@@ -433,6 +441,15 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 				CreatedAt:   userCreatedAt.Time,
 				UpdatedAt:   userUpdatedAt.Time,
 			}
+			if userPosition.Valid {
+				v := userPosition.String
+				user.Position = &v
+			}
+			if userDepartment.Valid {
+				v := userDepartment.String
+				user.Department = &v
+			}
+			result.User = user
 		}
 		results = append(results, result)
 	}

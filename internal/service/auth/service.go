@@ -121,6 +121,8 @@ type LoginResult struct {
 type UpdateProfileInput struct {
 	DisplayName *string
 	AvatarURL   *string
+	Position    *string
+	Department  *string
 	Locale      *string
 }
 
@@ -269,7 +271,7 @@ func (s *Service) GetUser(ctx context.Context, userID uuid.UUID) (*entity.User, 
 }
 
 func (s *Service) UpdateProfile(ctx context.Context, userID uuid.UUID, input UpdateProfileInput) (*entity.User, error) {
-	if input.DisplayName == nil && input.AvatarURL == nil && input.Locale == nil {
+	if input.DisplayName == nil && input.AvatarURL == nil && input.Position == nil && input.Department == nil && input.Locale == nil {
 		return nil, cerrors.InvalidInput("at least one profile field must be provided")
 	}
 
@@ -294,6 +296,28 @@ func (s *Service) UpdateProfile(ctx context.Context, userID uuid.UUID, input Upd
 			return nil, cerrors.InvalidInput("avatar_url must be at most 2048 characters")
 		}
 		user.AvatarURL = avatarURL
+	}
+	if input.Position != nil {
+		position := strings.TrimSpace(*input.Position)
+		if len(position) > 200 {
+			return nil, cerrors.InvalidInput("position must be at most 200 characters")
+		}
+		if position == "" {
+			user.Position = nil
+		} else {
+			user.Position = &position
+		}
+	}
+	if input.Department != nil {
+		department := strings.TrimSpace(*input.Department)
+		if len(department) > 120 {
+			return nil, cerrors.InvalidInput("department must be at most 120 characters")
+		}
+		if department == "" {
+			user.Department = nil
+		} else {
+			user.Department = &department
+		}
 	}
 	if input.Locale != nil {
 		locale := strings.TrimSpace(*input.Locale)

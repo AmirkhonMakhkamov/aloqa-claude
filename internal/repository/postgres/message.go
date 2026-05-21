@@ -28,6 +28,8 @@ type nullableUserScan struct {
 	email             *string
 	displayName       *string
 	avatarURL         *string
+	position          *string
+	department        *string
 	passwordHash      *string
 	status            *entity.UserStatus
 	deactivatedAt     *time.Time
@@ -47,6 +49,8 @@ func (u nullableUserScan) user() *entity.User {
 		Email:        derefStr(u.email),
 		DisplayName:  derefStr(u.displayName),
 		AvatarURL:    derefStr(u.avatarURL),
+		Position:     u.position,
+		Department:   u.department,
 		PasswordHash: derefStr(u.passwordHash),
 		Locale:       derefStr(u.locale),
 	}
@@ -122,7 +126,7 @@ func (r *MessageRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Messag
 			m.edited, m.edited_at, m.pinned, m.pinned_by, m.pinned_at,
 			m.forwarded_from, m.saved_from, m.quoted_message_id, m.quoted_snapshot,
 			m.created_at, m.updated_at, m.deleted_at,
-			u.id, u.email, u.display_name, u.avatar_url, u.password_hash, u.status,
+			u.id, u.email, u.display_name, u.avatar_url, u.position, u.department, u.password_hash, u.status,
 			u.deactivated_at, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
 		FROM messages m
 		LEFT JOIN users u ON u.id = m.user_id
@@ -154,6 +158,8 @@ func (r *MessageRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Messag
 		&user.email,
 		&user.displayName,
 		&user.avatarURL,
+		&user.position,
+		&user.department,
 		&user.passwordHash,
 		&user.status,
 		&user.deactivatedAt,
@@ -189,7 +195,7 @@ func (r *MessageRepo) ListByChannel(ctx context.Context, channelID uuid.UUID, p 
 				m.edited, m.edited_at, m.pinned, m.pinned_by, m.pinned_at,
 				m.forwarded_from, m.saved_from, m.quoted_message_id, m.quoted_snapshot,
 				m.created_at, m.updated_at, m.deleted_at,
-				u.id, u.email, u.display_name, u.avatar_url, u.password_hash, u.status,
+				u.id, u.email, u.display_name, u.avatar_url, u.position, u.department, u.password_hash, u.status,
 				u.deactivated_at, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
 			FROM messages m
 			LEFT JOIN users u ON u.id = m.user_id
@@ -204,7 +210,7 @@ func (r *MessageRepo) ListByChannel(ctx context.Context, channelID uuid.UUID, p 
 				m.edited, m.edited_at, m.pinned, m.pinned_by, m.pinned_at,
 				m.forwarded_from, m.saved_from, m.quoted_message_id, m.quoted_snapshot,
 				m.created_at, m.updated_at, m.deleted_at,
-				u.id, u.email, u.display_name, u.avatar_url, u.password_hash, u.status,
+				u.id, u.email, u.display_name, u.avatar_url, u.position, u.department, u.password_hash, u.status,
 				u.deactivated_at, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
 			FROM messages m
 			LEFT JOIN users u ON u.id = m.user_id
@@ -246,6 +252,8 @@ func (r *MessageRepo) ListByChannel(ctx context.Context, channelID uuid.UUID, p 
 			&user.email,
 			&user.displayName,
 			&user.avatarURL,
+			&user.position,
+			&user.department,
 			&user.passwordHash,
 			&user.status,
 			&user.deactivatedAt,
@@ -302,7 +310,7 @@ func (r *MessageRepo) ListThreadReplies(ctx context.Context, parentID uuid.UUID,
 				m.edited, m.edited_at, m.pinned, m.pinned_by, m.pinned_at,
 				m.forwarded_from, m.saved_from, m.quoted_message_id, m.quoted_snapshot,
 				m.created_at, m.updated_at, m.deleted_at,
-				u.id, u.email, u.display_name, u.avatar_url, u.password_hash, u.status,
+				u.id, u.email, u.display_name, u.avatar_url, u.position, u.department, u.password_hash, u.status,
 				u.deactivated_at, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
 			FROM messages m
 			LEFT JOIN users u ON u.id = m.user_id
@@ -317,7 +325,7 @@ func (r *MessageRepo) ListThreadReplies(ctx context.Context, parentID uuid.UUID,
 				m.edited, m.edited_at, m.pinned, m.pinned_by, m.pinned_at,
 				m.forwarded_from, m.saved_from, m.quoted_message_id, m.quoted_snapshot,
 				m.created_at, m.updated_at, m.deleted_at,
-				u.id, u.email, u.display_name, u.avatar_url, u.password_hash, u.status,
+				u.id, u.email, u.display_name, u.avatar_url, u.position, u.department, u.password_hash, u.status,
 				u.deactivated_at, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
 			FROM messages m
 			LEFT JOIN users u ON u.id = m.user_id
@@ -359,6 +367,8 @@ func (r *MessageRepo) ListThreadReplies(ctx context.Context, parentID uuid.UUID,
 			&user.email,
 			&user.displayName,
 			&user.avatarURL,
+			&user.position,
+			&user.department,
 			&user.passwordHash,
 			&user.status,
 			&user.deactivatedAt,

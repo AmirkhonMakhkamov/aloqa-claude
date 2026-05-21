@@ -78,6 +78,20 @@ ensure_user() {
   printf '%s\t%s\n' "$id" "$token"
 }
 
+# ensure_profile TOKEN POSITION DEPARTMENT
+# Idempotent: PATCH /users/me always overwrites, so re-running keeps values
+# in sync with this seed script.
+ensure_profile() {
+  local token=$1 position=$2 department=$3
+  local code
+  code=$(http_status PATCH "$API/users/me" "$token" \
+    "$(jbody --arg p "$position" --arg d "$department" '{position:$p,department:$d}')")
+  case "$code" in
+    200|204) ;;
+    *) echo "set profile failed ($code): $(cat "$TMP/resp")" >&2; exit 1 ;;
+  esac
+}
+
 # ensure_workspace TOKEN NAME SLUG -> workspace id
 ensure_workspace() {
   local token=$1 name=$2 slug=$3
@@ -199,6 +213,17 @@ IFS=$'\t' read -r CAROL_ID CAROL_TOKEN < <(ensure_user 'carol@aloqa.test' 'Carol
 IFS=$'\t' read -r DAVID_ID DAVID_TOKEN < <(ensure_user 'david@aloqa.test' 'DavidPass123!' 'David Yusupov')
 IFS=$'\t' read -r EVE_ID   EVE_TOKEN   < <(ensure_user 'eve@aloqa.test'   'EvePass123!'   'Eve Tursunova')
 IFS=$'\t' read -r FRANK_ID FRANK_TOKEN < <(ensure_user 'frank@aloqa.test' 'FrankPass123!' 'Frank Abdullayev')
+
+log 'ensuring user profiles (position + department)'
+# Spread realistic long job titles across multiple departments so the FE
+# member directory has something interesting to render. PATCH /users/me is
+# idempotent and overwrites on every run.
+ensure_profile "$ALICE_TOKEN" 'Director of Product, Collaboration Tools'              'Product'
+ensure_profile "$BOB_TOKEN"   'Senior Software Engineer, Platform Infrastructure'    'Engineering'
+ensure_profile "$CAROL_TOKEN" 'Principal Product Designer, Communication'            'Design'
+ensure_profile "$DAVID_TOKEN" 'Engineering Manager, Realtime'                        'Engineering'
+ensure_profile "$EVE_TOKEN"   'Head of People & Culture'                             'People & Culture'
+ensure_profile "$FRANK_TOKEN" 'Finance Business Partner, R&D'                        'Finance'
 
 log "ensuring workspace '$WS_SLUG'"
 WS_ID=$(ensure_workspace "$ALICE_TOKEN" "$WS_NAME" "$WS_SLUG")

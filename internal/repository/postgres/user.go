@@ -38,14 +38,16 @@ func (r *UserRepo) Create(ctx context.Context, user *entity.User) error {
 		user.SavedMessagesMode = entity.SavedMessagesModePerWorkspace
 	}
 	query := `
-		INSERT INTO users (id, email, display_name, avatar_url, password_hash, status, deactivated_at, saved_messages_mode, locale, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
+		INSERT INTO users (id, email, display_name, avatar_url, position, department, password_hash, status, deactivated_at, saved_messages_mode, locale, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`
 
 	_, err := r.db.Exec(ctx, query,
 		user.ID,
 		user.Email,
 		user.DisplayName,
 		user.AvatarURL,
+		user.Position,
+		user.Department,
 		user.PasswordHash,
 		user.Status,
 		user.DeactivatedAt,
@@ -67,7 +69,7 @@ func (r *UserRepo) Create(ctx context.Context, user *entity.User) error {
 
 func (r *UserRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.User, error) {
 	query := `
-		SELECT id, email, display_name, avatar_url, password_hash, status, deactivated_at, saved_messages_mode, locale, created_at, updated_at
+		SELECT id, email, display_name, avatar_url, position, department, password_hash, status, deactivated_at, saved_messages_mode, locale, created_at, updated_at
 		FROM users
 		WHERE id = $1`
 
@@ -77,6 +79,8 @@ func (r *UserRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.User, err
 		&user.Email,
 		&user.DisplayName,
 		&user.AvatarURL,
+		&user.Position,
+		&user.Department,
 		&user.PasswordHash,
 		&user.Status,
 		&user.DeactivatedAt,
@@ -105,7 +109,7 @@ func (r *UserRepo) GetByEmail(ctx context.Context, email string) (*entity.User, 
 	// register existence-check, login, invite, reset — finds the same
 	// row regardless of the case the caller typed.
 	query := `
-		SELECT id, email, display_name, avatar_url, password_hash, status, deactivated_at, saved_messages_mode, locale, created_at, updated_at
+		SELECT id, email, display_name, avatar_url, position, department, password_hash, status, deactivated_at, saved_messages_mode, locale, created_at, updated_at
 		FROM users
 		WHERE LOWER(email) = LOWER($1)`
 
@@ -115,6 +119,8 @@ func (r *UserRepo) GetByEmail(ctx context.Context, email string) (*entity.User, 
 		&user.Email,
 		&user.DisplayName,
 		&user.AvatarURL,
+		&user.Position,
+		&user.Department,
 		&user.PasswordHash,
 		&user.Status,
 		&user.DeactivatedAt,
@@ -142,7 +148,7 @@ func (r *UserRepo) ListActiveExcept(ctx context.Context, excludedID uuid.UUID, l
 	}
 
 	query := `
-		SELECT id, email, display_name, avatar_url, password_hash, status, deactivated_at, saved_messages_mode, locale, created_at, updated_at
+		SELECT id, email, display_name, avatar_url, position, department, password_hash, status, deactivated_at, saved_messages_mode, locale, created_at, updated_at
 		FROM users
 		WHERE id <> $1 AND status = $2
 		ORDER BY created_at ASC
@@ -162,6 +168,8 @@ func (r *UserRepo) ListActiveExcept(ctx context.Context, excludedID uuid.UUID, l
 			&user.Email,
 			&user.DisplayName,
 			&user.AvatarURL,
+			&user.Position,
+			&user.Department,
 			&user.PasswordHash,
 			&user.Status,
 			&user.DeactivatedAt,
@@ -187,7 +195,7 @@ func (r *UserRepo) Update(ctx context.Context, user *entity.User) error {
 	}
 	query := `
 		UPDATE users
-		SET display_name = $2, avatar_url = $3, status = $4, deactivated_at = $5, saved_messages_mode = $6, updated_at = $7
+		SET display_name = $2, avatar_url = $3, position = $4, department = $5, status = $6, deactivated_at = $7, saved_messages_mode = $8, updated_at = $9
 		WHERE id = $1`
 
 	user.UpdatedAt = time.Now().UTC()
@@ -196,6 +204,8 @@ func (r *UserRepo) Update(ctx context.Context, user *entity.User) error {
 		user.ID,
 		user.DisplayName,
 		user.AvatarURL,
+		user.Position,
+		user.Department,
 		user.Status,
 		user.DeactivatedAt,
 		user.SavedMessagesMode,

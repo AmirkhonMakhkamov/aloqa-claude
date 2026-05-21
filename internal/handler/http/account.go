@@ -22,6 +22,8 @@ func NewAccountHandler(svc *auth.Service) *AccountHandler {
 type updateProfileRequest struct {
 	DisplayName *string `json:"display_name"`
 	AvatarURL   *string `json:"avatar_url"`
+	Position    *string `json:"position"`
+	Department  *string `json:"department"`
 	Locale      *string `json:"locale"`
 }
 
@@ -58,6 +60,8 @@ func (h *AccountHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	user, err := h.svc.UpdateProfile(r.Context(), userID, auth.UpdateProfileInput{
 		DisplayName: req.DisplayName,
 		AvatarURL:   req.AvatarURL,
+		Position:    req.Position,
+		Department:  req.Department,
 		Locale:      req.Locale,
 	})
 	if err != nil {

@@ -1,0 +1,7 @@
+BEGIN;
+
+ALTER TABLE users
+    DROP COLUMN IF EXISTS department,
+    DROP COLUMN IF EXISTS position;
+
+COMMIT;

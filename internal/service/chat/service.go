@@ -621,7 +621,7 @@ func (s *Service) ListDirectory(ctx context.Context, workspaceID, userID uuid.UU
 		return nil, err
 	}
 
-	members, err := s.members.ListMembers(ctx, workspaceID, pagination.Params{Limit: pagination.MaxLimit})
+	members, err := s.listDirectoryMembers(ctx, workspaceID)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to list workspace directory members", "workspace_id", workspaceID, "user_id", userID, "error", err)
 		return nil, cerrors.Internal("failed to list directory members", err)
@@ -673,6 +673,34 @@ func (s *Service) ListDirectory(ctx context.Context, workspaceID, userID uuid.UU
 	return directory, nil
 }
 
+func (s *Service) listDirectoryMembers(ctx context.Context, workspaceID uuid.UUID) ([]entity.WorkspaceMember, error) {
+	var (
+		cursor  uuid.UUID
+		members []entity.WorkspaceMember
+	)
+
+	for {
+		page, err := s.members.ListMembers(ctx, workspaceID, pagination.Params{Cursor: cursor, Limit: pagination.MaxLimit})
+		if err != nil {
+			return nil, err
+		}
+		if len(page) == 0 {
+			return members, nil
+		}
+
+		members = append(members, page...)
+		if len(page) <= pagination.MaxLimit {
+			return members, nil
+		}
+
+		nextCursor := page[len(page)-1].ID
+		if nextCursor == uuid.Nil || nextCursor == cursor {
+			return members, nil
+		}
+		cursor = nextCursor
+	}
+}
+
 func (s *Service) listDirectoryChannels(ctx context.Context, workspaceID, userID uuid.UUID) ([]entity.Channel, error) {
 	if s.access != nil {
 		channels, err := s.access.ListChannels(ctx, workspaceID, userID, accesspolicy.CapabilityView)
@@ -682,12 +710,32 @@ func (s *Service) listDirectoryChannels(ctx context.Context, workspaceID, userID
 		return channels, nil
 	}
 
-	channels, err := s.channels.ListByWorkspace(ctx, workspaceID, pagination.Params{Limit: pagination.MaxLimit})
-	if err != nil {
-		slog.ErrorContext(ctx, "failed to list workspace directory channels", "workspace_id", workspaceID, "user_id", userID, "error", err)
-		return nil, cerrors.Internal("failed to list directory channels", err)
+	var (
+		cursor   uuid.UUID
+		channels []entity.Channel
+	)
+
+	for {
+		page, err := s.channels.ListByWorkspace(ctx, workspaceID, pagination.Params{Cursor: cursor, Limit: pagination.MaxLimit})
+		if err != nil {
+			slog.ErrorContext(ctx, "failed to list workspace directory channels", "workspace_id", workspaceID, "user_id", userID, "error", err)
+			return nil, cerrors.Internal("failed to list directory channels", err)
+		}
+		if len(page) == 0 {
+			return channels, nil
+		}
+
+		channels = append(channels, page...)
+		if len(page) <= pagination.MaxLimit {
+			return channels, nil
+		}
+
+		nextCursor := page[len(page)-1].ID
+		if nextCursor == uuid.Nil || nextCursor == cursor {
+			return channels, nil
+		}
+		cursor = nextCursor
 	}
-	return channels, nil
 }
 
 func (s *Service) directoryChannelAction(ctx context.Context, ch entity.Channel, userID uuid.UUID) (DirectoryChannelAction, error) {

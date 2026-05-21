@@ -64,7 +64,7 @@ type DirectoryPerson struct {
 type DirectoryChannel struct {
 	ChannelID uuid.UUID              `json:"channel_id"`
 	Name      string                 `json:"name"`
-	Topic     string                 `json:"topic,omitempty"`
+	Topic     *string                `json:"topic,omitempty"`
 	Type      entity.ChannelType     `json:"type"`
 	Action    DirectoryChannelAction `json:"action"`
 }
@@ -348,7 +348,7 @@ func (s *Service) CreateChannel(
 		ID:          id.New(),
 		WorkspaceID: &workspaceID,
 		Name:        name,
-		Topic:       topic,
+		Topic:       &topic,
 		Type:        chType,
 		CreatedBy:   userID,
 		Archived:    false,
@@ -412,7 +412,7 @@ func (s *Service) CreateChannel(
 		}
 
 		s.enqueueSearch(ctx, "index channel", func() error {
-			return s.search.IndexChannel(ctx, workspaceID, ch.ID, ch.Name, ch.Topic, ch.CreatedAt, ch.UpdatedAt)
+			return s.search.IndexChannel(ctx, workspaceID, ch.ID, ch.Name, derefTopicOrEmpty(ch.Topic), ch.CreatedAt, ch.UpdatedAt)
 		})
 		s.publishEvent(ctx, event.TypeChannelCreated, workspaceID, ch.ID, userID, event.ChannelPayload{Channel: ch})
 		s.publishToWorkspace(ctx, event.TypeChannelCreated, workspaceID, ch.ID, userID, event.ChannelPayload{Channel: ch})
@@ -420,6 +420,13 @@ func (s *Service) CreateChannel(
 
 	slog.InfoContext(ctx, "channel created", "channel_id", ch.ID, "name", name, "type", chType)
 	return ch, nil
+}
+
+func derefTopicOrEmpty(topic *string) string {
+	if topic == nil {
+		return ""
+	}
+	return *topic
 }
 
 func (s *Service) buildInitialChannelMembers(
@@ -497,7 +504,7 @@ func (s *Service) UpdateChannel(ctx context.Context, channelID, userID uuid.UUID
 	}
 
 	ch.Name = name
-	ch.Topic = topic
+	ch.Topic = &topic
 	workspaceID, err := requireChannelWorkspaceID(ch)
 	if err != nil {
 		return nil, err
@@ -529,7 +536,7 @@ func (s *Service) UpdateChannel(ctx context.Context, channelID, userID uuid.UUID
 		}
 
 		s.enqueueSearch(ctx, "index channel", func() error {
-			return s.search.IndexChannel(ctx, workspaceID, ch.ID, ch.Name, ch.Topic, ch.CreatedAt, ch.UpdatedAt)
+			return s.search.IndexChannel(ctx, workspaceID, ch.ID, ch.Name, derefTopicOrEmpty(ch.Topic), ch.CreatedAt, ch.UpdatedAt)
 		})
 		s.publishEvent(ctx, event.TypeChannelUpdated, workspaceID, ch.ID, userID, event.ChannelPayload{Channel: ch})
 	}
@@ -1966,7 +1973,7 @@ func (s *Service) GetOrCreateDM(ctx context.Context, workspaceID, userA, userB u
 		}
 
 		s.enqueueSearch(ctx, "index channel", func() error {
-			return s.search.IndexChannel(ctx, workspaceID, ch.ID, ch.Name, ch.Topic, ch.CreatedAt, ch.UpdatedAt)
+			return s.search.IndexChannel(ctx, workspaceID, ch.ID, ch.Name, derefTopicOrEmpty(ch.Topic), ch.CreatedAt, ch.UpdatedAt)
 		})
 		// Lazy DM visibility: see the matching comment in the tx path above.
 	}
@@ -2040,7 +2047,7 @@ func (s *Service) enqueueChannelSearchTx(ctx context.Context, scope txscope.Scop
 		ChannelID:   &ch.ID,
 		Type:        searchsvc.ResourceTypeChannel,
 		Title:       ch.Name,
-		Content:     ch.Topic,
+		Content:     derefTopicOrEmpty(ch.Topic),
 		CreatedAt:   ch.CreatedAt,
 		UpdatedAt:   ch.UpdatedAt,
 		Metadata: map[string]any{

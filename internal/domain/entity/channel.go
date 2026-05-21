@@ -33,7 +33,7 @@ type Channel struct {
 	ID          uuid.UUID   `json:"id"`
 	WorkspaceID *uuid.UUID  `json:"workspace_id"`
 	Name        string      `json:"name"`
-	Topic       string      `json:"topic,omitempty"`
+	Topic       *string     `json:"topic,omitempty"`
 	Type        ChannelType `json:"type"`
 	CreatedBy   uuid.UUID   `json:"created_by"`
 	OwnerUserID *uuid.UUID  `json:"owner_user_id,omitempty"`

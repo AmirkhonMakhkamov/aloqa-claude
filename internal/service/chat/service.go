@@ -45,6 +45,35 @@ type SearchIndexer interface {
 	IndexChannel(ctx context.Context, workspaceID, channelID uuid.UUID, name, topic string, createdAt, updatedAt time.Time) error
 }
 
+type DirectoryChannelAction string
+
+const (
+	DirectoryChannelActionOpen    DirectoryChannelAction = "open"
+	DirectoryChannelActionJoin    DirectoryChannelAction = "join"
+	DirectoryChannelActionRequest DirectoryChannelAction = "request"
+)
+
+type DirectoryPerson struct {
+	UserID      uuid.UUID            `json:"user_id"`
+	DisplayName string               `json:"display_name"`
+	Email       string               `json:"email"`
+	AvatarURL   string               `json:"avatar_url,omitempty"`
+	Role        entity.WorkspaceRole `json:"role"`
+}
+
+type DirectoryChannel struct {
+	ChannelID uuid.UUID              `json:"channel_id"`
+	Name      string                 `json:"name"`
+	Topic     *string                `json:"topic,omitempty"`
+	Type      entity.ChannelType     `json:"type"`
+	Action    DirectoryChannelAction `json:"action"`
+}
+
+type Directory struct {
+	People   []DirectoryPerson  `json:"people"`
+	Channels []DirectoryChannel `json:"channels"`
+}
+
 // Service handles chat channels, messaging, and real-time event distribution.
 type Service struct {
 	channels      repository.ChannelRepository
@@ -319,7 +348,7 @@ func (s *Service) CreateChannel(
 		ID:          id.New(),
 		WorkspaceID: &workspaceID,
 		Name:        name,
-		Topic:       topic,
+		Topic:       &topic,
 		Type:        chType,
 		CreatedBy:   userID,
 		Archived:    false,
@@ -383,7 +412,7 @@ func (s *Service) CreateChannel(
 		}
 
 		s.enqueueSearch(ctx, "index channel", func() error {
-			return s.search.IndexChannel(ctx, workspaceID, ch.ID, ch.Name, ch.Topic, ch.CreatedAt, ch.UpdatedAt)
+			return s.search.IndexChannel(ctx, workspaceID, ch.ID, ch.Name, derefTopicOrEmpty(ch.Topic), ch.CreatedAt, ch.UpdatedAt)
 		})
 		s.publishEvent(ctx, event.TypeChannelCreated, workspaceID, ch.ID, userID, event.ChannelPayload{Channel: ch})
 		s.publishToWorkspace(ctx, event.TypeChannelCreated, workspaceID, ch.ID, userID, event.ChannelPayload{Channel: ch})
@@ -391,6 +420,13 @@ func (s *Service) CreateChannel(
 
 	slog.InfoContext(ctx, "channel created", "channel_id", ch.ID, "name", name, "type", chType)
 	return ch, nil
+}
+
+func derefTopicOrEmpty(topic *string) string {
+	if topic == nil {
+		return ""
+	}
+	return *topic
 }
 
 func (s *Service) buildInitialChannelMembers(
@@ -468,7 +504,7 @@ func (s *Service) UpdateChannel(ctx context.Context, channelID, userID uuid.UUID
 	}
 
 	ch.Name = name
-	ch.Topic = topic
+	ch.Topic = &topic
 	workspaceID, err := requireChannelWorkspaceID(ch)
 	if err != nil {
 		return nil, err
@@ -500,7 +536,7 @@ func (s *Service) UpdateChannel(ctx context.Context, channelID, userID uuid.UUID
 		}
 
 		s.enqueueSearch(ctx, "index channel", func() error {
-			return s.search.IndexChannel(ctx, workspaceID, ch.ID, ch.Name, ch.Topic, ch.CreatedAt, ch.UpdatedAt)
+			return s.search.IndexChannel(ctx, workspaceID, ch.ID, ch.Name, derefTopicOrEmpty(ch.Topic), ch.CreatedAt, ch.UpdatedAt)
 		})
 		s.publishEvent(ctx, event.TypeChannelUpdated, workspaceID, ch.ID, userID, event.ChannelPayload{Channel: ch})
 	}
@@ -585,6 +621,144 @@ func (s *Service) ListChannels(ctx context.Context, workspaceID, userID uuid.UUI
 		return nil, err
 	}
 	return channels, nil
+}
+
+func (s *Service) ListDirectory(ctx context.Context, workspaceID, userID uuid.UUID) (*Directory, error) {
+	if err := s.CanAccessWorkspace(ctx, workspaceID, userID); err != nil {
+		return nil, err
+	}
+
+	members, err := s.listDirectoryMembers(ctx, workspaceID)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to list workspace directory members", "workspace_id", workspaceID, "user_id", userID, "error", err)
+		return nil, cerrors.Internal("failed to list directory members", err)
+	}
+
+	channels, err := s.listDirectoryChannels(ctx, workspaceID, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	directory := &Directory{
+		People:   make([]DirectoryPerson, 0, len(members)),
+		Channels: make([]DirectoryChannel, 0, len(channels)),
+	}
+
+	for _, member := range members {
+		if member.UserID == userID || member.User == nil || member.User.Status != entity.UserStatusActive {
+			continue
+		}
+
+		directory.People = append(directory.People, DirectoryPerson{
+			UserID:      member.UserID,
+			DisplayName: member.User.DisplayName,
+			Email:       member.User.Email,
+			AvatarURL:   member.User.AvatarURL,
+			Role:        member.Role,
+		})
+	}
+
+	for _, ch := range channels {
+		if ch.Archived || (ch.Type != entity.ChannelTypePublic && ch.Type != entity.ChannelTypePrivate) {
+			continue
+		}
+
+		action, err := s.directoryChannelAction(ctx, ch, userID)
+		if err != nil {
+			return nil, err
+		}
+
+		directory.Channels = append(directory.Channels, DirectoryChannel{
+			ChannelID: ch.ID,
+			Name:      ch.Name,
+			Topic:     ch.Topic,
+			Type:      ch.Type,
+			Action:    action,
+		})
+	}
+
+	return directory, nil
+}
+
+func (s *Service) listDirectoryMembers(ctx context.Context, workspaceID uuid.UUID) ([]entity.WorkspaceMember, error) {
+	var (
+		cursor  uuid.UUID
+		members []entity.WorkspaceMember
+	)
+
+	for {
+		page, err := s.members.ListMembers(ctx, workspaceID, pagination.Params{Cursor: cursor, Limit: pagination.MaxLimit})
+		if err != nil {
+			return nil, err
+		}
+		if len(page) == 0 {
+			return members, nil
+		}
+
+		members = append(members, page...)
+		if len(page) <= pagination.MaxLimit {
+			return members, nil
+		}
+
+		nextCursor := page[len(page)-1].ID
+		if nextCursor == uuid.Nil || nextCursor == cursor {
+			return members, nil
+		}
+		cursor = nextCursor
+	}
+}
+
+func (s *Service) listDirectoryChannels(ctx context.Context, workspaceID, userID uuid.UUID) ([]entity.Channel, error) {
+	if s.access != nil {
+		channels, err := s.access.ListChannels(ctx, workspaceID, userID, accesspolicy.CapabilityView)
+		if err != nil {
+			return nil, err
+		}
+		return channels, nil
+	}
+
+	var (
+		cursor   uuid.UUID
+		channels []entity.Channel
+	)
+
+	for {
+		page, err := s.channels.ListByWorkspace(ctx, workspaceID, pagination.Params{Cursor: cursor, Limit: pagination.MaxLimit})
+		if err != nil {
+			slog.ErrorContext(ctx, "failed to list workspace directory channels", "workspace_id", workspaceID, "user_id", userID, "error", err)
+			return nil, cerrors.Internal("failed to list directory channels", err)
+		}
+		if len(page) == 0 {
+			return channels, nil
+		}
+
+		channels = append(channels, page...)
+		if len(page) <= pagination.MaxLimit {
+			return channels, nil
+		}
+
+		nextCursor := page[len(page)-1].ID
+		if nextCursor == uuid.Nil || nextCursor == cursor {
+			return channels, nil
+		}
+		cursor = nextCursor
+	}
+}
+
+func (s *Service) directoryChannelAction(ctx context.Context, ch entity.Channel, userID uuid.UUID) (DirectoryChannelAction, error) {
+	_, err := s.channels.GetMember(ctx, ch.ID, userID)
+	if err == nil {
+		return DirectoryChannelActionOpen, nil
+	}
+	if appErr, ok := cerrors.AsAppError(err); !ok || appErr.Code != cerrors.CodeNotFound {
+		slog.ErrorContext(ctx, "failed to check directory channel membership", "channel_id", ch.ID, "user_id", userID, "error", err)
+		return "", cerrors.Internal("failed to check directory channel membership", err)
+	}
+
+	if ch.Type == entity.ChannelTypePublic {
+		return DirectoryChannelActionJoin, nil
+	}
+	return DirectoryChannelActionRequest, nil
 }
 
 // filterAbandonedRecipientDMs drops DM channels where the caller is not the
@@ -1799,7 +1973,7 @@ func (s *Service) GetOrCreateDM(ctx context.Context, workspaceID, userA, userB u
 		}
 
 		s.enqueueSearch(ctx, "index channel", func() error {
-			return s.search.IndexChannel(ctx, workspaceID, ch.ID, ch.Name, ch.Topic, ch.CreatedAt, ch.UpdatedAt)
+			return s.search.IndexChannel(ctx, workspaceID, ch.ID, ch.Name, derefTopicOrEmpty(ch.Topic), ch.CreatedAt, ch.UpdatedAt)
 		})
 		// Lazy DM visibility: see the matching comment in the tx path above.
 	}
@@ -1873,7 +2047,7 @@ func (s *Service) enqueueChannelSearchTx(ctx context.Context, scope txscope.Scop
 		ChannelID:   &ch.ID,
 		Type:        searchsvc.ResourceTypeChannel,
 		Title:       ch.Name,
-		Content:     ch.Topic,
+		Content:     derefTopicOrEmpty(ch.Topic),
 		CreatedAt:   ch.CreatedAt,
 		UpdatedAt:   ch.UpdatedAt,
 		Metadata: map[string]any{

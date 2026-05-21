@@ -2,6 +2,7 @@ package accesspolicy
 
 import (
 	"context"
+	"sort"
 	"testing"
 
 	"github.com/google/uuid"
@@ -90,6 +91,35 @@ func TestSelfChannelWorkspacePolicy(t *testing.T) {
 	})
 }
 
+func TestListChannelsReadsAllPaginatedWorkspaceChannels(t *testing.T) {
+	workspaceID := uuid.New()
+	userID := uuid.New()
+
+	channels := &fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{}}
+	for range 125 {
+		channelID := uuid.New()
+		channels.channels[channelID] = &entity.Channel{
+			ID:          channelID,
+			WorkspaceID: &workspaceID,
+			Type:        entity.ChannelTypePublic,
+		}
+	}
+	workspaces := &fakeWorkspaceRepo{
+		members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+			{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID},
+		},
+	}
+	checker := NewChecker(workspaces, channels, nil, nil)
+
+	got, err := checker.ListChannels(context.Background(), workspaceID, userID, CapabilityView)
+	if err != nil {
+		t.Fatalf("ListChannels returned error: %v", err)
+	}
+	if len(got) != 125 {
+		t.Fatalf("channels count = %d, want 125", len(got))
+	}
+}
+
 func requireCode(t *testing.T, err error, code cerrors.Code) {
 	t.Helper()
 	appErr, ok := cerrors.AsAppError(err)
@@ -143,8 +173,31 @@ func (r *fakeChannelRepo) GetByID(_ context.Context, id uuid.UUID) (*entity.Chan
 	}
 	return nil, cerrors.NotFound("channel not found")
 }
-func (r *fakeChannelRepo) ListByWorkspace(context.Context, uuid.UUID, pagination.Params) ([]entity.Channel, error) {
-	return nil, nil
+func (r *fakeChannelRepo) ListByWorkspace(_ context.Context, workspaceID uuid.UUID, p pagination.Params) ([]entity.Channel, error) {
+	var channels []entity.Channel
+	for _, ch := range r.channels {
+		if ch.WorkspaceID != nil && *ch.WorkspaceID == workspaceID {
+			channels = append(channels, *ch)
+		}
+	}
+	sort.Slice(channels, func(i, j int) bool {
+		return channels[i].ID.String() > channels[j].ID.String()
+	})
+	if p.Limit <= 0 && p.Cursor == uuid.Nil {
+		return channels, nil
+	}
+	p.Normalize()
+	page := make([]entity.Channel, 0, p.Limit+1)
+	for _, ch := range channels {
+		if p.Cursor != uuid.Nil && ch.ID.String() >= p.Cursor.String() {
+			continue
+		}
+		page = append(page, ch)
+		if len(page) >= p.Limit+1 {
+			return page, nil
+		}
+	}
+	return page, nil
 }
 func (r *fakeChannelRepo) ListByUser(context.Context, uuid.UUID, uuid.UUID) ([]entity.Channel, error) {
 	return nil, nil

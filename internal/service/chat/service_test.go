@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1050,6 +1051,60 @@ func TestListChannelsHidesRecipientDMWithOnlyDeletedMessages(t *testing.T) {
 	}
 }
 
+func TestListDirectoryReadsAllPaginatedMembersAndChannels(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	actorID := uuid.New()
+
+	workspaces := &fakeWorkspaceRepo{
+		members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+			{workspaceID, actorID}: {WorkspaceID: workspaceID, UserID: actorID, Role: entity.WorkspaceRoleMember},
+		},
+	}
+	for range 125 {
+		userID := uuid.New()
+		workspaces.listMembers = append(workspaces.listMembers, entity.WorkspaceMember{
+			ID:          uuid.New(),
+			WorkspaceID: workspaceID,
+			UserID:      userID,
+			Role:        entity.WorkspaceRoleMember,
+			User: &entity.User{
+				ID:          userID,
+				Email:       "person@example.com",
+				DisplayName: "Directory Person",
+				Status:      entity.UserStatusActive,
+			},
+		})
+	}
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{},
+		members:  map[[2]uuid.UUID]*entity.ChannelMember{},
+	}
+	for range 125 {
+		channelID := uuid.New()
+		channels.channels[channelID] = &entity.Channel{
+			ID:          channelID,
+			WorkspaceID: &workspaceID,
+			Name:        "directory-channel",
+			Type:        entity.ChannelTypePublic,
+		}
+	}
+
+	svc := NewService(channels, nil, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+
+	got, err := svc.ListDirectory(ctx, workspaceID, actorID)
+	if err != nil {
+		t.Fatalf("ListDirectory returned error: %v", err)
+	}
+	if len(got.People) != 125 {
+		t.Fatalf("people count = %d, want 125", len(got.People))
+	}
+	if len(got.Channels) != 125 {
+		t.Fatalf("channels count = %d, want 125", len(got.Channels))
+	}
+}
+
 func TestJoinAndLeaveChannelUseTransactionalEventEnqueue(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -1264,7 +1319,8 @@ func (p *recordingSubjectPublisher) subjects() []string {
 }
 
 type fakeWorkspaceRepo struct {
-	members map[[2]uuid.UUID]*entity.WorkspaceMember
+	members     map[[2]uuid.UUID]*entity.WorkspaceMember
+	listMembers []entity.WorkspaceMember
 }
 
 func (r *fakeWorkspaceRepo) Create(context.Context, *entity.Workspace) error { return nil }
@@ -1285,8 +1341,21 @@ func (r *fakeWorkspaceRepo) GetMember(_ context.Context, workspaceID, userID uui
 	}
 	return nil, cerrors.NotFound("workspace member not found")
 }
-func (r *fakeWorkspaceRepo) ListMembers(context.Context, uuid.UUID, pagination.Params) ([]entity.WorkspaceMember, error) {
-	return nil, nil
+func (r *fakeWorkspaceRepo) ListMembers(_ context.Context, workspaceID uuid.UUID, p pagination.Params) ([]entity.WorkspaceMember, error) {
+	if len(r.listMembers) == 0 {
+		return nil, nil
+	}
+
+	members := make([]entity.WorkspaceMember, 0, len(r.listMembers))
+	for _, member := range r.listMembers {
+		if member.WorkspaceID == workspaceID {
+			members = append(members, member)
+		}
+	}
+	sort.Slice(members, func(i, j int) bool {
+		return members[i].ID.String() > members[j].ID.String()
+	})
+	return paginateWorkspaceMemberFakes(members, p), nil
 }
 func (r *fakeWorkspaceRepo) UpdateMemberRole(context.Context, uuid.UUID, uuid.UUID, entity.WorkspaceRole) error {
 	return nil
@@ -1378,15 +1447,52 @@ func (r *fakeChannelRepo) GetByID(_ context.Context, id uuid.UUID) (*entity.Chan
 	}
 	return nil, cerrors.NotFound("channel not found")
 }
-func (r *fakeChannelRepo) ListByWorkspace(_ context.Context, workspaceID uuid.UUID, _ pagination.Params) ([]entity.Channel, error) {
+func (r *fakeChannelRepo) ListByWorkspace(_ context.Context, workspaceID uuid.UUID, p pagination.Params) ([]entity.Channel, error) {
 	var channels []entity.Channel
 	for _, ch := range r.channels {
 		if ch.WorkspaceID != nil && *ch.WorkspaceID == workspaceID {
 			channels = append(channels, *ch)
 		}
 	}
+	sort.Slice(channels, func(i, j int) bool {
+		return channels[i].ID.String() > channels[j].ID.String()
+	})
+	if p.Limit > 0 || p.Cursor != uuid.Nil {
+		return paginateChannelFakes(channels, p), nil
+	}
 	return channels, nil
 }
+
+func paginateWorkspaceMemberFakes(members []entity.WorkspaceMember, p pagination.Params) []entity.WorkspaceMember {
+	p.Normalize()
+	page := make([]entity.WorkspaceMember, 0, p.Limit+1)
+	for _, member := range members {
+		if p.Cursor != uuid.Nil && member.ID.String() >= p.Cursor.String() {
+			continue
+		}
+		page = append(page, member)
+		if len(page) >= p.Limit+1 {
+			return page
+		}
+	}
+	return page
+}
+
+func paginateChannelFakes(channels []entity.Channel, p pagination.Params) []entity.Channel {
+	p.Normalize()
+	page := make([]entity.Channel, 0, p.Limit+1)
+	for _, ch := range channels {
+		if p.Cursor != uuid.Nil && ch.ID.String() >= p.Cursor.String() {
+			continue
+		}
+		page = append(page, ch)
+		if len(page) >= p.Limit+1 {
+			return page
+		}
+	}
+	return page
+}
+
 func (r *fakeChannelRepo) ListByUser(_ context.Context, workspaceID, userID uuid.UUID) ([]entity.Channel, error) {
 	var channels []entity.Channel
 	for key := range r.members {

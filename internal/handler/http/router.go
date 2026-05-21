@@ -174,6 +174,7 @@ func mountWorkspaceScopedRoutes(r chi.Router, deps RouterDeps) {
 	// Non-admin workspace member list — used by the client to render DM
 	// counterparts and the "New DM" picker without admin permissions.
 	r.Get("/members", deps.Account.ListWorkspaceMembers)
+	r.Get("/directory", deps.Channels.Directory)
 
 	// Admin (workspace management).
 	r.Route("/admin", func(r chi.Router) {

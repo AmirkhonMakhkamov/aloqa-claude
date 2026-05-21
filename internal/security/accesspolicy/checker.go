@@ -166,7 +166,7 @@ func (c *Checker) ListChannels(ctx context.Context, workspaceID, userID uuid.UUI
 		all    []entity.Channel
 	)
 	for {
-		page, err := c.channels.ListByWorkspace(ctx, workspaceID, pagination.Params{Cursor: cursor, Limit: 200})
+		page, err := c.channels.ListByWorkspace(ctx, workspaceID, pagination.Params{Cursor: cursor, Limit: pagination.MaxLimit})
 		if err != nil {
 			return nil, cerrors.Internal("failed to list workspace channels", err)
 		}
@@ -181,10 +181,14 @@ func (c *Checker) ListChannels(ctx context.Context, workspaceID, userID uuid.UUI
 				return nil, err
 			}
 		}
-		if len(page) < 200 {
+		if len(page) <= pagination.MaxLimit {
 			break
 		}
-		cursor = page[len(page)-1].ID
+		nextCursor := page[len(page)-1].ID
+		if nextCursor == uuid.Nil || nextCursor == cursor {
+			break
+		}
+		cursor = nextCursor
 	}
 	return dedupeChannels(all), nil
 }

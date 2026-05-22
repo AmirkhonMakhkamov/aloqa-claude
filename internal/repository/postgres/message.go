@@ -631,9 +631,21 @@ func (r *MessageRepo) ListMentions(
 		limit = 50
 	}
 
+	// regexp_replace escapes POSIX regex metachars in the caller's local-part
+	// before splicing it into the body regex. Without it, emails like `john.doe`
+	// or `user+tag` would broaden matching (`.`, `+` are metachars), and an
+	// attacker-shaped local-part could trigger catastrophic backtracking (ReDoS).
+	// Saved-message channels (own scratch space) are excluded — they cannot
+	// produce real cross-user @mentions.
 	query := `
 		WITH caller AS (
-			SELECT id, LOWER(SPLIT_PART(email, '@', 1)) AS handle
+			SELECT id,
+				regexp_replace(
+					LOWER(SPLIT_PART(email, '@', 1)),
+					'([.+*?()\[\]{}|\\^$])',
+					'\\\1',
+					'g'
+				) AS handle
 			FROM users
 			WHERE id = $2
 		)
@@ -656,11 +668,12 @@ func (r *MessageRepo) ListMentions(
 		INNER JOIN users u ON u.id = m.user_id
 		INNER JOIN caller ON TRUE
 		WHERE c.workspace_id = $1
+		  AND c.type NOT IN ('saved', 'saved_global')
 		  AND m.deleted_at IS NULL
 		  AND m.user_id <> caller.id
 		  AND caller.handle <> ''
 		  AND m.content ~* ('(^|[^A-Za-z0-9_])@' || caller.handle || '([^A-Za-z0-9_.-]|$)')
-		ORDER BY m.created_at DESC
+		ORDER BY m.created_at DESC, m.id DESC
 		LIMIT $3`
 
 	rows, err := r.db.Query(ctx, query, workspaceID, userID, limit)

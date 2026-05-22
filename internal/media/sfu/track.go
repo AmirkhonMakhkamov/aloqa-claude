@@ -34,6 +34,24 @@ type TrackRouter struct {
 	done chan struct{}
 }
 
+// newLocalTrackForSource is the single source of truth for the §B1 invariant:
+// the outbound local-track StreamID equals sourceUserID, NOT any publisher- or
+// caller-supplied streamID. Both NewTrackRouter and NewInjectedTrackRouter
+// delegate here so the contract is unit-testable without a real webrtc.TrackRemote.
+// Returns the constructed track and the outbound StreamID it was created with.
+// See ALK-465 / ALOQA-256.
+func newLocalTrackForSource(
+	sourceUserID, trackID string,
+	capability webrtc.RTPCodecCapability,
+) (*webrtc.TrackLocalStaticRTP, string, error) {
+	outboundStreamID := sourceUserID
+	localTrack, err := webrtc.NewTrackLocalStaticRTP(capability, trackID, outboundStreamID)
+	if err != nil {
+		return nil, "", err
+	}
+	return localTrack, outboundStreamID, nil
+}
+
 // NewTrackRouter creates a TrackRouter that mirrors a remote track into a
 // local static RTP track with the same codec parameters. It immediately
 // starts a forwarding goroutine that copies RTP packets from the remote
@@ -43,11 +61,10 @@ type TrackRouter struct {
 // publisher browser's StreamID) so subscribers can map remote streams
 // back to a user via stream.id. See ALOQA-245 / BE-PR3 §B1.
 func NewTrackRouter(sourceUserID string, remoteTrack *webrtc.TrackRemote) (*TrackRouter, error) {
-	outboundStreamID := sourceUserID
-	localTrack, err := webrtc.NewTrackLocalStaticRTP(
-		remoteTrack.Codec().RTPCodecCapability,
+	localTrack, outboundStreamID, err := newLocalTrackForSource(
+		sourceUserID,
 		remoteTrack.ID(),
-		outboundStreamID,
+		remoteTrack.Codec().RTPCodecCapability,
 	)
 	if err != nil {
 		return nil, err
@@ -91,8 +108,11 @@ func NewTrackRouter(sourceUserID string, remoteTrack *webrtc.TrackRemote) (*Trac
 // See ALOQA-245 / BE-PR3 §B1.
 func NewInjectedTrackRouter(sourceUserID, trackID, streamID, mimeType string) (*TrackRouter, error) {
 	_ = streamID
-	outboundStreamID := sourceUserID
-	localTrack, err := webrtc.NewTrackLocalStaticRTP(codecCapabilityForMimeType(mimeType), trackID, outboundStreamID)
+	localTrack, outboundStreamID, err := newLocalTrackForSource(
+		sourceUserID,
+		trackID,
+		codecCapabilityForMimeType(mimeType),
+	)
 	if err != nil {
 		return nil, err
 	}

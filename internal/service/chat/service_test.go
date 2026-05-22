@@ -547,6 +547,21 @@ func TestSendMessageForwardedFromValidationAndPersistence(t *testing.T) {
 			wantErrMessage: "content is required",
 		},
 		{
+			// Share flow: source message becomes a quoted_snapshot and the
+			// author may publish without their own comment text.
+			name:            "empty content with quoted_snapshot is accepted",
+			content:         "",
+			quotedMessageID: &quotedMessageID,
+			quotedSnapshot: &ParsedQuotedSnapshotInput{
+				UserID:          uuid.New(),
+				ContentExcerpt:  "Original",
+				CreatedAt:       quotedCreatedAt,
+				ParentMessageID: &quotedParentID,
+			},
+			wantQuotedSnapshot:  true,
+			wantCreatedMessages: 1,
+		},
+		{
 			name:           "oversize content rejected",
 			content:        strings.Repeat("a", 40001),
 			wantErrCode:    cerrors.CodeInvalidInput,

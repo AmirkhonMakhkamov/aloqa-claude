@@ -1183,7 +1183,10 @@ func (s *Service) SendMessage(
 		return nil, err
 	}
 	contentLen := utf8.RuneCountInString(input.Content)
-	if len(input.ForwardedFrom) == 0 && contentLen < 1 {
+	// Empty content is allowed when the message carries forwarded content
+	// (ForwardedFrom) OR a quoted snapshot (Share message flow — the source
+	// message becomes a quote and the author may omit their own text).
+	if len(input.ForwardedFrom) == 0 && input.QuotedSnapshot == nil && contentLen < 1 {
 		return nil, cerrors.InvalidInput("content is required")
 	}
 	if contentLen > 40000 {

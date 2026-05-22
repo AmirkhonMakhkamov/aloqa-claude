@@ -33,7 +33,15 @@ type User struct {
 	Position *string `json:"position"`
 	// Department is the org-chart bucket (e.g. "Engineering", "Product",
 	// "Design"). Nullable, free-form text.
-	Department        *string           `json:"department"`
+	Department *string `json:"department"`
+	// Phone is a free-form contact number (any format; the client formats
+	// it for display). Nullable; absent for users that haven't set one.
+	Phone *string `json:"phone"`
+	// Timezone is the user's IANA timezone name (e.g. "Asia/Tashkent",
+	// "Europe/Moscow", "America/Los_Angeles"). Nullable; clients fall back
+	// to a missing-tz UX when absent. Stored as TEXT so the backend stays
+	// agnostic of the tz-database version on the client.
+	Timezone          *string           `json:"timezone"`
 	PasswordHash      string            `json:"-"`
 	Status            UserStatus        `json:"status"`
 	DeactivatedAt     *time.Time        `json:"deactivated_at,omitempty"`

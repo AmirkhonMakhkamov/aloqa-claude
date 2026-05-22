@@ -59,6 +59,8 @@ type DirectoryPerson struct {
 	Email       string               `json:"email"`
 	AvatarURL   string               `json:"avatar_url,omitempty"`
 	Role        entity.WorkspaceRole `json:"role"`
+	Position    *string              `json:"position"`
+	Department  *string              `json:"department"`
 }
 
 type DirectoryChannel struct {
@@ -703,6 +705,8 @@ func (s *Service) ListDirectory(ctx context.Context, workspaceID, userID uuid.UU
 			Email:       member.User.Email,
 			AvatarURL:   member.User.AvatarURL,
 			Role:        member.Role,
+			Position:    member.User.Position,
+			Department:  member.User.Department,
 		})
 	}
 

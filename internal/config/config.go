@@ -402,7 +402,7 @@ func Load() (*Config, error) {
 			ConsumerLagCritical:         int64(envInt("OBS_CONSUMER_LAG_CRITICAL", 1000)),
 		},
 		CORS: CORSConfig{
-			AllowedOrigins: envList("CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173"),
+			AllowedOrigins: envList("CORS_ALLOWED_ORIGINS", defaultDevCORSOrigins()),
 		},
 	}
 
@@ -617,6 +617,22 @@ func envFloat(key string, fallback float64) float64 {
 		return n
 	}
 	return fallback
+}
+
+// defaultDevCORSOrigins returns the dev-only allow-list used when
+// CORS_ALLOWED_ORIGINS is not set. Covers http://localhost:3000..3100 so
+// any parallel-session Next.js dev server (sessionN → port 300N+ etc.)
+// can talk to the test backend without per-port .env edits, plus Vite's
+// :5173 for tooling.
+func defaultDevCORSOrigins() string {
+	const lowPort = 3000
+	const highPort = 3100
+	parts := make([]string, 0, highPort-lowPort+2)
+	for port := lowPort; port <= highPort; port++ {
+		parts = append(parts, fmt.Sprintf("http://localhost:%d", port))
+	}
+	parts = append(parts, "http://localhost:5173")
+	return strings.Join(parts, ",")
 }
 
 func envList(key, fallback string) []string {

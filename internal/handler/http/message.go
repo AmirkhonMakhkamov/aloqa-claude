@@ -176,6 +176,39 @@ func (h *MessageHandler) ListPinned(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, messages)
 }
 
+// ListMentions returns recent @-mentions of the calling user across every
+// channel they are a member of inside the workspace. The response is
+// denormalised so the frontend can render mention cards without per-row
+// roundtrips.
+func (h *MessageHandler) ListMentions(w http.ResponseWriter, r *http.Request) {
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+	if workspaceID == uuid.Nil {
+		writeErr(w, cerrors.InvalidInput("workspace context is required"))
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 100 {
+			limit = n
+		}
+	}
+
+	mentions, err := h.svc.ListMentions(r.Context(), workspaceID, userID, limit)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	if mentions == nil {
+		mentions = []entity.MentionRow{}
+	}
+
+	writeOK(w, map[string]any{"mentions": mentions})
+}
+
 func (h *MessageHandler) ListThread(w http.ResponseWriter, r *http.Request) {
 	parentID, err := id.Parse(chi.URLParam(r, "messageID"))
 	if err != nil {

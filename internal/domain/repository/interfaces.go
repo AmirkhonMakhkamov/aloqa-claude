@@ -69,6 +69,7 @@ type ChannelRepository interface {
 	GetByID(ctx context.Context, id uuid.UUID) (*entity.Channel, error)
 	ListByWorkspace(ctx context.Context, workspaceID uuid.UUID, p pagination.Params) ([]entity.Channel, error)
 	ListByUser(ctx context.Context, workspaceID, userID uuid.UUID) ([]entity.Channel, error)
+	ListArchivedByUser(ctx context.Context, workspaceID, userID uuid.UUID) ([]entity.ArchivedChannelInfo, error)
 	Update(ctx context.Context, ch *entity.Channel) error
 	Archive(ctx context.Context, id uuid.UUID) error
 

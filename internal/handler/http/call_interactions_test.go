@@ -242,6 +242,9 @@ func (httpChannelRepo) ListByWorkspace(context.Context, uuid.UUID, pagination.Pa
 func (httpChannelRepo) ListByUser(context.Context, uuid.UUID, uuid.UUID) ([]entity.Channel, error) {
 	return nil, nil
 }
+func (httpChannelRepo) ListArchivedByUser(context.Context, uuid.UUID, uuid.UUID) ([]entity.ArchivedChannelInfo, error) {
+	return nil, nil
+}
 func (httpChannelRepo) Update(context.Context, *entity.Channel) error { return nil }
 func (httpChannelRepo) Archive(context.Context, uuid.UUID) error      { return nil }
 func (httpChannelRepo) AddMember(context.Context, *entity.ChannelMember) error {

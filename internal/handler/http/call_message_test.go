@@ -255,6 +255,9 @@ func (fakeHTTPChannelRepo) ListByWorkspace(context.Context, uuid.UUID, paginatio
 func (fakeHTTPChannelRepo) ListByUser(context.Context, uuid.UUID, uuid.UUID) ([]entity.Channel, error) {
 	return nil, nil
 }
+func (fakeHTTPChannelRepo) ListArchivedByUser(context.Context, uuid.UUID, uuid.UUID) ([]entity.ArchivedChannelInfo, error) {
+	return nil, nil
+}
 func (fakeHTTPChannelRepo) Update(context.Context, *entity.Channel) error          { return nil }
 func (fakeHTTPChannelRepo) Archive(context.Context, uuid.UUID) error               { return nil }
 func (fakeHTTPChannelRepo) AddMember(context.Context, *entity.ChannelMember) error { return nil }

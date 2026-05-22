@@ -175,6 +175,9 @@ func mountWorkspaceScopedRoutes(r chi.Router, deps RouterDeps) {
 	// counterparts and the "New DM" picker without admin permissions.
 	r.Get("/members", deps.Account.ListWorkspaceMembers)
 	r.Get("/directory", deps.Channels.Directory)
+	// Channels both viewer and target user belong to — used by the User
+	// Profile popup (ALK-618). Requires viewer to be a workspace member.
+	r.Get("/users/{targetUserID}/common-channels", deps.Account.ListCommonChannels)
 
 	// Admin (workspace management).
 	r.Route("/admin", func(r chi.Router) {
@@ -243,6 +246,10 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 		r.Post("/{notificationID}/read", deps.Notifications.MarkRead)
 	})
 
+	// Mentions feed (ALK-624). Direct-query read model, see
+	// chat.Service.ListMentions / postgres.MessageRepo.ListMentions.
+	r.Get("/mentions", deps.Messages.ListMentions)
+
 	// Search.
 	r.Get("/search", deps.Search.Search)
 
@@ -261,6 +268,7 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 	r.Route("/channels", func(r chi.Router) {
 		r.Post("/", deps.Channels.Create)
 		r.Get("/", deps.Channels.List)
+		r.Get("/archived", deps.Channels.ListArchived)
 		r.Post("/dm", deps.Channels.CreateDM)
 		r.Get("/unread", deps.Channels.UnreadCounts)
 

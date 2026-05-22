@@ -59,6 +59,8 @@ type DirectoryPerson struct {
 	Email       string               `json:"email"`
 	AvatarURL   string               `json:"avatar_url,omitempty"`
 	Role        entity.WorkspaceRole `json:"role"`
+	Position    *string              `json:"position"`
+	Department  *string              `json:"department"`
 }
 
 type DirectoryChannel struct {
@@ -466,19 +468,27 @@ func (s *Service) buildInitialChannelMembers(
 }
 
 func (s *Service) UpdateChannel(ctx context.Context, channelID, userID uuid.UUID, name, topic string, archived *bool) (*entity.Channel, error) {
-	input := CreateChannelInput{Name: name, Topic: topic}
-	if err := validate.Struct(input); err != nil {
-		return nil, err
-	}
-
+	// Unarchive bypass (ALK-617): an unarchive request (archived=false against
+	// a currently-archived channel) must be allowed through the archived guard
+	// below so users can recover channels from the Archived list view.
+	// Name/topic edits remain forbidden until the channel is unarchived first.
 	ch, err := s.GetAccessibleChannel(ctx, channelID, userID)
 	if err != nil {
 		return nil, err
 	}
+	isUnarchive := archived != nil && !*archived && ch.Archived
+
+	if !isUnarchive {
+		input := CreateChannelInput{Name: name, Topic: topic}
+		if err := validate.Struct(input); err != nil {
+			return nil, err
+		}
+	}
+
 	if ch.Type == entity.ChannelTypeDM {
 		return nil, cerrors.Forbidden("direct messages cannot be renamed")
 	}
-	if ch.Archived {
+	if ch.Archived && !isUnarchive {
 		return nil, cerrors.Forbidden("cannot update an archived channel")
 	}
 
@@ -503,8 +513,15 @@ func (s *Service) UpdateChannel(ctx context.Context, channelID, userID uuid.UUID
 		}
 	}
 
-	ch.Name = name
-	ch.Topic = &topic
+	// Unarchive bypass preserves the existing Name and Topic instead of
+	// copying the (validation-skipped) request fields onto the entity. This
+	// closes the data-corruption hole flagged by review where a caller could
+	// POST `{archived: false}` with no name/topic and land an empty name
+	// (validation was skipped above to allow the unarchive flow).
+	if !isUnarchive {
+		ch.Name = name
+		ch.Topic = &topic
+	}
 	if archived != nil {
 		ch.Archived = *archived
 	}
@@ -616,6 +633,17 @@ func (s *Service) ListChannels(ctx context.Context, workspaceID, userID uuid.UUI
 	// already removed before they reached us.
 	channels = s.filterAbandonedRecipientDMs(ctx, userID, channels)
 
+	// Archived visibility: hide archived channels from the main list (ALK-617).
+	// They are surfaced exclusively via ListArchivedChannels so the sidebar
+	// only renders live channels.
+	visible := channels[:0]
+	for _, ch := range channels {
+		if !ch.Archived {
+			visible = append(visible, ch)
+		}
+	}
+	channels = visible
+
 	ptrs := make([]*entity.Channel, len(channels))
 	for i := range channels {
 		ptrs[i] = &channels[i]
@@ -624,6 +652,25 @@ func (s *Service) ListChannels(ctx context.Context, workspaceID, userID uuid.UUI
 		return nil, err
 	}
 	return channels, nil
+}
+
+// ListArchivedChannels returns the archived channels the user is a member of
+// in the given workspace, enriched with member count and last-activity
+// timestamp so the Archived Channels list view (ALK-617) can render
+// meaningful rows without per-row round-trips.
+func (s *Service) ListArchivedChannels(ctx context.Context, workspaceID, userID uuid.UUID) ([]entity.ArchivedChannelInfo, error) {
+	if err := s.CanAccessWorkspace(ctx, workspaceID, userID); err != nil {
+		return nil, err
+	}
+	infos, err := s.channels.ListArchivedByUser(ctx, workspaceID, userID)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to list archived channels", "workspace_id", workspaceID, "user_id", userID, "error", err)
+		return nil, cerrors.Internal("failed to list archived channels", err)
+	}
+	if infos == nil {
+		return []entity.ArchivedChannelInfo{}, nil
+	}
+	return infos, nil
 }
 
 func (s *Service) ListDirectory(ctx context.Context, workspaceID, userID uuid.UUID) (*Directory, error) {
@@ -658,6 +705,8 @@ func (s *Service) ListDirectory(ctx context.Context, workspaceID, userID uuid.UU
 			Email:       member.User.Email,
 			AvatarURL:   member.User.AvatarURL,
 			Role:        member.Role,
+			Position:    member.User.Position,
+			Department:  member.User.Department,
 		})
 	}
 
@@ -1134,7 +1183,10 @@ func (s *Service) SendMessage(
 		return nil, err
 	}
 	contentLen := utf8.RuneCountInString(input.Content)
-	if len(input.ForwardedFrom) == 0 && contentLen < 1 {
+	// Empty content is allowed when the message carries forwarded content
+	// (ForwardedFrom) OR a quoted snapshot (Share message flow — the source
+	// message becomes a quote and the author may omit their own text).
+	if len(input.ForwardedFrom) == 0 && input.QuotedSnapshot == nil && contentLen < 1 {
 		return nil, cerrors.InvalidInput("content is required")
 	}
 	if contentLen > 40000 {

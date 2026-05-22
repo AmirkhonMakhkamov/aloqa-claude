@@ -367,6 +367,9 @@ func (r *fakeChannelRepo) ListByWorkspace(context.Context, uuid.UUID, pagination
 func (r *fakeChannelRepo) ListByUser(context.Context, uuid.UUID, uuid.UUID) ([]entity.Channel, error) {
 	return nil, nil
 }
+func (r *fakeChannelRepo) ListArchivedByUser(context.Context, uuid.UUID, uuid.UUID) ([]entity.ArchivedChannelInfo, error) {
+	return nil, nil
+}
 func (r *fakeChannelRepo) Update(context.Context, *entity.Channel) error          { return nil }
 func (r *fakeChannelRepo) Archive(context.Context, uuid.UUID) error               { return nil }
 func (r *fakeChannelRepo) AddMember(context.Context, *entity.ChannelMember) error { return nil }

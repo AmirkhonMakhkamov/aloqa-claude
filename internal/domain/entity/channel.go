@@ -46,6 +46,17 @@ type Channel struct {
 	Members []uuid.UUID `json:"members,omitempty"`
 }
 
+// ArchivedChannelInfo carries the per-row data the Archived Channels list
+// view needs (ALK-617): the underlying channel plus the timestamps and
+// member count required to render a meaningful row without per-row
+// round-trips.
+type ArchivedChannelInfo struct {
+	Channel
+	ArchivedAt     *time.Time `json:"archived_at"`
+	MembersCount   int        `json:"members_count"`
+	LastActivityAt *time.Time `json:"last_activity_at"`
+}
+
 type ChannelMember struct {
 	ID         uuid.UUID   `json:"id"`
 	ChannelID  uuid.UUID   `json:"channel_id"`

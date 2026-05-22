@@ -381,6 +381,7 @@ func run() error {
 	calendarSvc := calendarsvc.NewService(calendarRepo, workspaceRepo, callSvc, realtimePublisher)
 	calendarSvc.SetTransactionManager(txManager)
 	authSvc.SetNewUserSeeder(demosvc.NewService(userRepo, workspaceRepo, channelRepo, calendarSvc))
+	authSvc.SetCommonChannelsLister(channelRepo)
 	mediaOpsSvc.SetEventPublisher(realtimePublisher)
 	mediaOpsSvc.SetRelayTransport(ps)
 	presenceSvc := presence.NewService(rdb,

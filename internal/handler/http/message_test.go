@@ -611,6 +611,9 @@ func (r *messageHTTPChannelRepo) ListByWorkspace(context.Context, uuid.UUID, pag
 func (r *messageHTTPChannelRepo) ListByUser(context.Context, uuid.UUID, uuid.UUID) ([]entity.Channel, error) {
 	return nil, nil
 }
+func (r *messageHTTPChannelRepo) ListArchivedByUser(context.Context, uuid.UUID, uuid.UUID) ([]entity.ArchivedChannelInfo, error) {
+	return nil, nil
+}
 func (r *messageHTTPChannelRepo) Update(context.Context, *entity.Channel) error { return nil }
 func (r *messageHTTPChannelRepo) Archive(context.Context, uuid.UUID) error      { return nil }
 func (r *messageHTTPChannelRepo) AddMember(context.Context, *entity.ChannelMember) error {

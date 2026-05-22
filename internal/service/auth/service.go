@@ -26,20 +26,29 @@ import (
 
 // Service handles authentication, registration, and token management.
 type Service struct {
-	users         repository.UserRepository
-	workspaces    repository.WorkspaceRepository
-	sessions      *SessionManager
-	jwtSecret     []byte
-	accessTTL     time.Duration
-	refreshTTL    time.Duration
-	newUserSeeder NewUserSeeder
-	search        interface {
+	users          repository.UserRepository
+	workspaces     repository.WorkspaceRepository
+	sessions       *SessionManager
+	jwtSecret      []byte
+	accessTTL      time.Duration
+	refreshTTL     time.Duration
+	newUserSeeder  NewUserSeeder
+	commonChannels CommonChannelsLister
+	search         interface {
 		IndexUser(ctx context.Context, workspaceID, userID uuid.UUID, displayName, email string, createdAt, updatedAt time.Time) error
 	}
 }
 
 type NewUserSeeder interface {
 	SeedNewUser(ctx context.Context, user *entity.User) error
+}
+
+// CommonChannelsLister returns every non-archived channel in the given
+// workspace where both `viewerID` and `targetID` are members. Wired
+// post-construction so the auth.Service constructor signature (and every
+// fake in the test suite) stays stable.
+type CommonChannelsLister interface {
+	ListCommonChannels(ctx context.Context, workspaceID, viewerID, targetID uuid.UUID) ([]entity.Channel, error)
 }
 
 // NewService creates a new auth service with Redis-backed session management.
@@ -69,6 +78,18 @@ func (s *Service) SetNewUserSeeder(seeder NewUserSeeder) {
 		return
 	}
 	s.newUserSeeder = seeder
+}
+
+// SetCommonChannelsLister wires the channel repository used by
+// ListCommonChannels. Optional: when unset, ListCommonChannels returns
+// `cerrors.Internal("common channels not configured")`. main.go sets this
+// after the channel repo is constructed; auth-service unit tests can leave
+// it nil.
+func (s *Service) SetCommonChannelsLister(lister CommonChannelsLister) {
+	if s == nil {
+		return
+	}
+	s.commonChannels = lister
 }
 
 func (s *Service) SetSessionNotifier(notifier SessionEventNotifier) {
@@ -396,6 +417,27 @@ func (s *Service) ListWorkspaceMembers(ctx context.Context, workspaceID, actorID
 		return nil, cerrors.Internal("failed to verify workspace membership", err)
 	}
 	return s.workspaces.ListMembers(ctx, workspaceID, p)
+}
+
+// ListCommonChannels returns every non-archived channel in the workspace
+// where both the viewer (`actorID`) and the target user (`targetID`) are
+// members. Used by the User Profile popup (ALK-618).
+func (s *Service) ListCommonChannels(ctx context.Context, workspaceID, actorID, targetID uuid.UUID) ([]entity.Channel, error) {
+	if s.commonChannels == nil {
+		return nil, cerrors.Internal("common channels not configured", nil)
+	}
+	if _, err := s.workspaces.GetMember(ctx, workspaceID, actorID); err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return nil, cerrors.Forbidden("user is not a member of this workspace")
+		}
+		return nil, cerrors.Internal("failed to verify workspace membership", err)
+	}
+	// Target presence in the workspace is not strictly required to return a
+	// channel list (the JOIN already filters to channels the target shares
+	// with the viewer), so we skip the redundant GetMember call. An empty
+	// result is the correct response when the target is in a different
+	// workspace or has been removed.
+	return s.commonChannels.ListCommonChannels(ctx, workspaceID, actorID, targetID)
 }
 
 func (s *Service) GetWorkspace(ctx context.Context, workspaceID, userID uuid.UUID) (*entity.Workspace, error) {

@@ -466,19 +466,27 @@ func (s *Service) buildInitialChannelMembers(
 }
 
 func (s *Service) UpdateChannel(ctx context.Context, channelID, userID uuid.UUID, name, topic string, archived *bool) (*entity.Channel, error) {
-	input := CreateChannelInput{Name: name, Topic: topic}
-	if err := validate.Struct(input); err != nil {
-		return nil, err
-	}
-
+	// Unarchive bypass (ALK-617): an unarchive request (archived=false against
+	// a currently-archived channel) must be allowed through the archived guard
+	// below so users can recover channels from the Archived list view.
+	// Name/topic edits remain forbidden until the channel is unarchived first.
 	ch, err := s.GetAccessibleChannel(ctx, channelID, userID)
 	if err != nil {
 		return nil, err
 	}
+	isUnarchive := archived != nil && !*archived && ch.Archived
+
+	if !isUnarchive {
+		input := CreateChannelInput{Name: name, Topic: topic}
+		if err := validate.Struct(input); err != nil {
+			return nil, err
+		}
+	}
+
 	if ch.Type == entity.ChannelTypeDM {
 		return nil, cerrors.Forbidden("direct messages cannot be renamed")
 	}
-	if ch.Archived {
+	if ch.Archived && !isUnarchive {
 		return nil, cerrors.Forbidden("cannot update an archived channel")
 	}
 
@@ -616,6 +624,17 @@ func (s *Service) ListChannels(ctx context.Context, workspaceID, userID uuid.UUI
 	// already removed before they reached us.
 	channels = s.filterAbandonedRecipientDMs(ctx, userID, channels)
 
+	// Archived visibility: hide archived channels from the main list (ALK-617).
+	// They are surfaced exclusively via ListArchivedChannels so the sidebar
+	// only renders live channels.
+	visible := channels[:0]
+	for _, ch := range channels {
+		if !ch.Archived {
+			visible = append(visible, ch)
+		}
+	}
+	channels = visible
+
 	ptrs := make([]*entity.Channel, len(channels))
 	for i := range channels {
 		ptrs[i] = &channels[i]
@@ -624,6 +643,25 @@ func (s *Service) ListChannels(ctx context.Context, workspaceID, userID uuid.UUI
 		return nil, err
 	}
 	return channels, nil
+}
+
+// ListArchivedChannels returns the archived channels the user is a member of
+// in the given workspace, enriched with member count and last-activity
+// timestamp so the Archived Channels list view (ALK-617) can render
+// meaningful rows without per-row round-trips.
+func (s *Service) ListArchivedChannels(ctx context.Context, workspaceID, userID uuid.UUID) ([]entity.ArchivedChannelInfo, error) {
+	if err := s.CanAccessWorkspace(ctx, workspaceID, userID); err != nil {
+		return nil, err
+	}
+	infos, err := s.channels.ListArchivedByUser(ctx, workspaceID, userID)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to list archived channels", "workspace_id", workspaceID, "user_id", userID, "error", err)
+		return nil, cerrors.Internal("failed to list archived channels", err)
+	}
+	if infos == nil {
+		return []entity.ArchivedChannelInfo{}, nil
+	}
+	return infos, nil
 }
 
 func (s *Service) ListDirectory(ctx context.Context, workspaceID, userID uuid.UUID) (*Directory, error) {

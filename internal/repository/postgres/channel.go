@@ -210,9 +210,16 @@ func (r *ChannelRepo) ListByUser(ctx context.Context, workspaceID, userID uuid.U
 }
 
 func (r *ChannelRepo) Update(ctx context.Context, ch *entity.Channel) error {
+	// archived_at follows the archived flag: stamped to now on the first
+	// transition into archived, preserved on a redundant write, and cleared
+	// when the channel is unarchived (ALK-617).
 	query := `
 		UPDATE channels
-		SET name = $2, topic = $3, archived = $4, updated_at = $5
+		SET name = $2,
+		    topic = $3,
+		    archived = $4,
+		    archived_at = CASE WHEN $4 THEN COALESCE(archived_at, $5) ELSE NULL END,
+		    updated_at = $5
 		WHERE id = $1`
 
 	ch.UpdatedAt = time.Now().UTC()
@@ -241,7 +248,9 @@ func (r *ChannelRepo) Update(ctx context.Context, ch *entity.Channel) error {
 func (r *ChannelRepo) Archive(ctx context.Context, id uuid.UUID) error {
 	query := `
 		UPDATE channels
-		SET archived = true, updated_at = $2
+		SET archived = true,
+		    archived_at = COALESCE(archived_at, $2),
+		    updated_at = $2
 		WHERE id = $1`
 
 	tag, err := r.db.Exec(ctx, query, id, time.Now().UTC())
@@ -253,6 +262,59 @@ func (r *ChannelRepo) Archive(ctx context.Context, id uuid.UUID) error {
 	}
 
 	return nil
+}
+
+// ListArchivedByUser returns archived channels the user is a member of in the
+// given workspace, enriched with member count and last-activity timestamp.
+// DMs/group DMs/saved channels are excluded — only conventional public/private
+// channels can be browsed for unarchive.
+func (r *ChannelRepo) ListArchivedByUser(ctx context.Context, workspaceID, userID uuid.UUID) ([]entity.ArchivedChannelInfo, error) {
+	query := `
+		SELECT c.id, c.workspace_id, c.name, c.topic, c.type, c.created_by, c.owner_user_id,
+		       c.archived, c.created_at, c.updated_at, c.archived_at,
+		       (SELECT COUNT(*) FROM channel_members cm2 WHERE cm2.channel_id = c.id) AS members_count,
+		       (SELECT MAX(m.created_at) FROM messages m WHERE m.channel_id = c.id AND m.deleted_at IS NULL) AS last_activity_at
+		FROM channels c
+		INNER JOIN channel_members cm ON cm.channel_id = c.id
+		WHERE c.workspace_id = $1
+		  AND cm.user_id = $2
+		  AND c.archived = TRUE
+		  AND c.type IN ('public', 'private')
+		ORDER BY c.archived_at DESC NULLS LAST, c.name ASC`
+
+	rows, err := r.db.Query(ctx, query, workspaceID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list archived channels by user: %w", err)
+	}
+	defer rows.Close()
+
+	infos := make([]entity.ArchivedChannelInfo, 0)
+	for rows.Next() {
+		var info entity.ArchivedChannelInfo
+		if err := rows.Scan(
+			&info.ID,
+			&info.WorkspaceID,
+			&info.Name,
+			&info.Topic,
+			&info.Type,
+			&info.CreatedBy,
+			&info.OwnerUserID,
+			&info.Archived,
+			&info.CreatedAt,
+			&info.UpdatedAt,
+			&info.ArchivedAt,
+			&info.MembersCount,
+			&info.LastActivityAt,
+		); err != nil {
+			return nil, fmt.Errorf("postgres: list archived channels by user scan: %w", err)
+		}
+		infos = append(infos, info)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list archived channels by user rows: %w", err)
+	}
+
+	return infos, nil
 }
 
 // --- Channel Member methods ---

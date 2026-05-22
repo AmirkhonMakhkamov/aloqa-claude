@@ -370,6 +370,9 @@ func (r *fakeChannelRepo) ListByUser(context.Context, uuid.UUID, uuid.UUID) ([]e
 	return nil, nil
 }
 
+func (r *fakeChannelRepo) ListArchivedByUser(context.Context, uuid.UUID, uuid.UUID) ([]entity.ArchivedChannelInfo, error) {
+	return nil, nil
+}
 func (r *fakeChannelRepo) Update(context.Context, *entity.Channel) error {
 	return nil
 }

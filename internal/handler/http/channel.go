@@ -82,6 +82,23 @@ func (h *ChannelHandler) List(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, channels)
 }
 
+// ListArchived returns the workspace's archived channels for the caller,
+// enriched with member count, last-activity timestamp and archived-at
+// timestamp so the Archived Channels list view (ALK-617) can render rows
+// without per-row round-trips.
+func (h *ChannelHandler) ListArchived(w http.ResponseWriter, r *http.Request) {
+	wsID := middleware.WorkspaceIDFromContext(r.Context())
+	userID := middleware.UserIDFromContext(r.Context())
+
+	infos, err := h.svc.ListArchivedChannels(r.Context(), wsID, userID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, infos)
+}
+
 func (h *ChannelHandler) Get(w http.ResponseWriter, r *http.Request) {
 	channelID, err := id.Parse(chi.URLParam(r, "channelID"))
 	if err != nil {

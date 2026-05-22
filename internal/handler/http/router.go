@@ -268,6 +268,7 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 	r.Route("/channels", func(r chi.Router) {
 		r.Post("/", deps.Channels.Create)
 		r.Get("/", deps.Channels.List)
+		r.Get("/archived", deps.Channels.ListArchived)
 		r.Post("/dm", deps.Channels.CreateDM)
 		r.Get("/unread", deps.Channels.UnreadCounts)
 

@@ -181,3 +181,31 @@ func (h *AccountHandler) ListWorkspaceMembers(w http.ResponseWriter, r *http.Req
 
 	writeOK(w, members)
 }
+
+// ListCommonChannels returns the list of channels in the workspace where
+// both the viewer and the target user are members. Used by the User Profile
+// popup (ALK-618). The viewer must be a member of the workspace; an empty
+// result is returned when there are no shared channels.
+func (h *AccountHandler) ListCommonChannels(w http.ResponseWriter, r *http.Request) {
+	workspaceID, err := workspaceIDFromRequest(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	targetUserID, err := id.Parse(chi.URLParam(r, "targetUserID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	viewerID := middleware.UserIDFromContext(r.Context())
+
+	channels, err := h.svc.ListCommonChannels(r.Context(), workspaceID, viewerID, targetUserID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, channels)
+}

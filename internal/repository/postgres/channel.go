@@ -408,3 +408,51 @@ func (r *ChannelRepo) GetDMChannel(ctx context.Context, workspaceID, userA, user
 
 	return ch, nil
 }
+
+// ListCommonChannels returns every non-archived channel in the workspace
+// where both the viewer (`viewerID`) and the target user (`targetID`) are
+// members. The result includes DMs, group DMs, public and private channels.
+// Newest first by id so the popup shows the most-recent shared surfaces at
+// the top.
+func (r *ChannelRepo) ListCommonChannels(ctx context.Context, workspaceID, viewerID, targetID uuid.UUID) ([]entity.Channel, error) {
+	query := `
+		SELECT c.id, c.workspace_id, c.name, c.topic, c.type, c.created_by, c.owner_user_id, c.archived, c.created_at, c.updated_at
+		FROM channels c
+		INNER JOIN channel_members cm1 ON cm1.channel_id = c.id AND cm1.user_id = $2
+		INNER JOIN channel_members cm2 ON cm2.channel_id = c.id AND cm2.user_id = $3
+		WHERE c.workspace_id = $1
+		  AND c.archived = FALSE
+		  AND c.type NOT IN ('saved', 'saved_global')
+		ORDER BY c.id DESC`
+
+	rows, err := r.db.Query(ctx, query, workspaceID, viewerID, targetID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list common channels: %w", err)
+	}
+	defer rows.Close()
+
+	channels := make([]entity.Channel, 0)
+	for rows.Next() {
+		var ch entity.Channel
+		if err := rows.Scan(
+			&ch.ID,
+			&ch.WorkspaceID,
+			&ch.Name,
+			&ch.Topic,
+			&ch.Type,
+			&ch.CreatedBy,
+			&ch.OwnerUserID,
+			&ch.Archived,
+			&ch.CreatedAt,
+			&ch.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("postgres: list common channels scan: %w", err)
+		}
+		channels = append(channels, ch)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list common channels rows: %w", err)
+	}
+
+	return channels, nil
+}

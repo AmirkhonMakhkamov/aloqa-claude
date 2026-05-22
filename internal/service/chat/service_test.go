@@ -114,6 +114,90 @@ func TestCreateChannelAddsSelectedWorkspaceMembers(t *testing.T) {
 	}
 }
 
+// TestUpdateChannelUnarchiveBypassPreservesNameAndTopic locks in the
+// ALK-617 unarchive bypass contract: a `{archived:false}` request against a
+// currently-archived channel must flip Archived without copying the
+// (possibly empty / unvalidated) request name/topic onto the entity.
+func TestUpdateChannelUnarchiveBypassPreservesNameAndTopic(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	userID := uuid.New()
+	channelID := uuid.New()
+	originalTopic := "Q1 launches"
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {
+				ID:          channelID,
+				WorkspaceID: &workspaceID,
+				Name:        "announcements-q1",
+				Topic:       &originalTopic,
+				Type:        entity.ChannelTypePublic,
+				CreatedBy:   userID,
+				Archived:    true,
+			},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, userID}: {ChannelID: channelID, UserID: userID, Role: entity.ChannelRoleOwner},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleOwner},
+	}}
+	publisher := &recordingSubjectPublisher{}
+	svc := NewService(channels, nil, workspaces, nil, publisher, nil, nil, nil, nil)
+
+	archived := false
+	updated, err := svc.UpdateChannel(ctx, channelID, userID, "", "", &archived)
+	if err != nil {
+		t.Fatalf("UpdateChannel unarchive returned error: %v", err)
+	}
+	if updated.Archived {
+		t.Fatalf("Archived flag was not cleared: %+v", updated)
+	}
+	if updated.Name != "announcements-q1" {
+		t.Fatalf("Name overwritten by empty bypass request: got %q want %q", updated.Name, "announcements-q1")
+	}
+	if updated.Topic == nil || *updated.Topic != originalTopic {
+		t.Fatalf("Topic overwritten by empty bypass request: got %v want %q", updated.Topic, originalTopic)
+	}
+}
+
+// TestUpdateChannelRejectsArchivedNameEdit confirms the archived guard still
+// rejects name/topic edits on an archived channel — the bypass only exists
+// for the `archived=false` unarchive path.
+func TestUpdateChannelRejectsArchivedNameEdit(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	userID := uuid.New()
+	channelID := uuid.New()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {
+				ID:          channelID,
+				WorkspaceID: &workspaceID,
+				Name:        "old-name",
+				Type:        entity.ChannelTypePublic,
+				CreatedBy:   userID,
+				Archived:    true,
+			},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, userID}: {ChannelID: channelID, UserID: userID, Role: entity.ChannelRoleOwner},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleOwner},
+	}}
+	publisher := &recordingSubjectPublisher{}
+	svc := NewService(channels, nil, workspaces, nil, publisher, nil, nil, nil, nil)
+
+	if _, err := svc.UpdateChannel(ctx, channelID, userID, "new-name", "new-topic", nil); err == nil {
+		t.Fatal("expected Forbidden when editing name/topic on archived channel")
+	}
+}
+
 func TestSendMessageAllowsGlobalSavedChannelFromWorkspaceRoute(t *testing.T) {
 	workspaceID := uuid.New()
 	userID := uuid.New()
@@ -1508,7 +1592,14 @@ func (r *fakeChannelRepo) ListByUser(_ context.Context, workspaceID, userID uuid
 func (r *fakeChannelRepo) ListArchivedByUser(_ context.Context, _, _ uuid.UUID) ([]entity.ArchivedChannelInfo, error) {
 	return []entity.ArchivedChannelInfo{}, nil
 }
-func (r *fakeChannelRepo) Update(context.Context, *entity.Channel) error { return nil }
+func (r *fakeChannelRepo) Update(_ context.Context, ch *entity.Channel) error {
+	if r.channels == nil {
+		r.channels = map[uuid.UUID]*entity.Channel{}
+	}
+	stored := *ch
+	r.channels[ch.ID] = &stored
+	return nil
+}
 func (r *fakeChannelRepo) Archive(context.Context, uuid.UUID) error      { return nil }
 func (r *fakeChannelRepo) AddMember(_ context.Context, member *entity.ChannelMember) error {
 	if r.members == nil {

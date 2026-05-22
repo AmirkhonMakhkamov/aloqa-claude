@@ -246,6 +246,10 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 		r.Post("/{notificationID}/read", deps.Notifications.MarkRead)
 	})
 
+	// Mentions feed (ALK-624). Direct-query read model, see
+	// chat.Service.ListMentions / postgres.MessageRepo.ListMentions.
+	r.Get("/mentions", deps.Messages.ListMentions)
+
 	// Search.
 	r.Get("/search", deps.Search.Search)
 

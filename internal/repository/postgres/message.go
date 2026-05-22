@@ -614,6 +614,89 @@ func (r *MessageRepo) ListPinned(ctx context.Context, channelID uuid.UUID) ([]en
 	return messages, nil
 }
 
+// ListMentions returns recent @-mentions of the calling user across every
+// channel the user is a member of in the given workspace.
+//
+// The mention syntax stored in `messages.content` is `@<email-local-part>`
+// (composer-web `mention-transformer.ts`). We derive the local-part from the
+// caller's `users.email` on the fly. Self-mentions and tombstoned messages are
+// excluded. The query intentionally avoids the notifications table — that
+// path is currently unused for chat mentions; this is the express read model.
+func (r *MessageRepo) ListMentions(
+	ctx context.Context,
+	workspaceID, userID uuid.UUID,
+	limit int,
+) ([]entity.MentionRow, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+
+	query := `
+		WITH caller AS (
+			SELECT id, LOWER(SPLIT_PART(email, '@', 1)) AS handle
+			FROM users
+			WHERE id = $2
+		)
+		SELECT
+			m.id,
+			m.channel_id,
+			c.name,
+			c.type,
+			c.archived,
+			u.id,
+			u.display_name,
+			COALESCE(u.avatar_url, ''),
+			u.email,
+			m.content,
+			m.created_at,
+			m.parent_id
+		FROM messages m
+		INNER JOIN channels c ON c.id = m.channel_id
+		INNER JOIN channel_members cm ON cm.channel_id = c.id AND cm.user_id = $2
+		INNER JOIN users u ON u.id = m.user_id
+		INNER JOIN caller ON TRUE
+		WHERE c.workspace_id = $1
+		  AND m.deleted_at IS NULL
+		  AND m.user_id <> caller.id
+		  AND caller.handle <> ''
+		  AND m.content ~* ('(^|[^A-Za-z0-9_])@' || caller.handle || '([^A-Za-z0-9_.-]|$)')
+		ORDER BY m.created_at DESC
+		LIMIT $3`
+
+	rows, err := r.db.Query(ctx, query, workspaceID, userID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list mentions: %w", err)
+	}
+	defer rows.Close()
+
+	mentions := make([]entity.MentionRow, 0)
+	for rows.Next() {
+		var row entity.MentionRow
+		if err := rows.Scan(
+			&row.MessageID,
+			&row.ChannelID,
+			&row.ChannelName,
+			&row.ChannelType,
+			&row.ChannelArchived,
+			&row.AuthorID,
+			&row.AuthorName,
+			&row.AuthorAvatarURL,
+			&row.AuthorEmail,
+			&row.Body,
+			&row.CreatedAt,
+			&row.ParentMessageID,
+		); err != nil {
+			return nil, fmt.Errorf("postgres: list mentions scan: %w", err)
+		}
+		mentions = append(mentions, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list mentions rows: %w", err)
+	}
+
+	return mentions, nil
+}
+
 // --- Reaction methods ---
 
 func (r *MessageRepo) AddReaction(ctx context.Context, reaction *entity.Reaction) error {

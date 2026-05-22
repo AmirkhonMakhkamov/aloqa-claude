@@ -511,8 +511,15 @@ func (s *Service) UpdateChannel(ctx context.Context, channelID, userID uuid.UUID
 		}
 	}
 
-	ch.Name = name
-	ch.Topic = &topic
+	// Unarchive bypass preserves the existing Name and Topic instead of
+	// copying the (validation-skipped) request fields onto the entity. This
+	// closes the data-corruption hole flagged by review where a caller could
+	// POST `{archived: false}` with no name/topic and land an empty name
+	// (validation was skipped above to allow the unarchive flow).
+	if !isUnarchive {
+		ch.Name = name
+		ch.Topic = &topic
+	}
 	if archived != nil {
 		ch.Archived = *archived
 	}

@@ -280,7 +280,8 @@ func (r *ChannelRepo) ListArchivedByUser(ctx context.Context, workspaceID, userI
 		  AND cm.user_id = $2
 		  AND c.archived = TRUE
 		  AND c.type IN ('public', 'private')
-		ORDER BY c.archived_at DESC NULLS LAST, c.name ASC`
+		ORDER BY c.archived_at DESC NULLS LAST, c.name ASC
+		LIMIT 200`
 
 	rows, err := r.db.Query(ctx, query, workspaceID, userID)
 	if err != nil {

@@ -121,6 +121,23 @@ func (h *CallHandler) ListActive(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, calls)
 }
 
+// ListActiveSummaries returns the enriched Live Now projection used by the
+// Calls Home page (GET /calls/active). Response shape matches the FE Zod
+// schema ActiveCallSummarySchema and is wrapped as {"calls": [...]} per
+// the same envelope as /calls/recents.
+func (h *CallHandler) ListActiveSummaries(w http.ResponseWriter, r *http.Request) {
+	wsID := middleware.WorkspaceIDFromContext(r.Context())
+	userID := middleware.UserIDFromContext(r.Context())
+
+	summaries, err := h.svc.ListActiveSummaries(r.Context(), wsID, userID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, map[string]any{"calls": summaries})
+}
+
 func (h *CallHandler) Recents(w http.ResponseWriter, r *http.Request) {
 	wsID := middleware.WorkspaceIDFromContext(r.Context())
 	userID := middleware.UserIDFromContext(r.Context())

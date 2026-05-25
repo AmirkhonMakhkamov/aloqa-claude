@@ -150,6 +150,134 @@ func (r *CallRepo) ListActiveByWorkspace(ctx context.Context, workspaceID uuid.U
 	return calls, nil
 }
 
+// topParticipantsLimit caps how many participant projections we send on the
+// Live Now card; the FE renders the rest as a "+N" pill in the avatar stack.
+const topParticipantsLimit = 4
+
+// ListActiveSummariesByWorkspace returns enriched summaries for every
+// non-ended call in the workspace: channel name, host display name,
+// connected-participant / observer counts, and up to four top participants
+// for the avatar stack. Used by GET /calls/active for the Calls Home page.
+func (r *CallRepo) ListActiveSummariesByWorkspace(
+	ctx context.Context,
+	workspaceID uuid.UUID,
+) ([]entity.ActiveCallSummary, error) {
+	const query = `
+		SELECT
+			c.id, c.type, c.title, c.started_at, c.created_by,
+			c.channel_id, ch.name AS channel_name,
+			COALESCE(u.display_name, '') AS host_display_name,
+			COALESCE((c.settings->>'recording')::bool, false) AS recording,
+			COALESCE(NOT (c.settings->>'waiting_room')::bool, true) AS is_open,
+			COALESCE(pc.participant_count, 0) AS participant_count,
+			COALESCE(pc.observer_count, 0) AS observer_count
+		FROM calls c
+		LEFT JOIN channels ch ON ch.id = c.channel_id
+		LEFT JOIN users u ON u.id = c.created_by
+		LEFT JOIN LATERAL (
+			SELECT
+				COUNT(*) FILTER (WHERE cp.role <> 'viewer' AND cp.status = 'connected') AS participant_count,
+				COUNT(*) FILTER (WHERE cp.role = 'viewer' AND cp.status = 'connected') AS observer_count
+			FROM call_participants cp
+			WHERE cp.call_id = c.id
+		) pc ON TRUE
+		WHERE c.workspace_id = $1 AND c.status <> 'ended'
+		ORDER BY c.started_at DESC NULLS LAST, c.created_at DESC`
+
+	rows, err := r.db.Query(ctx, query, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list active call summaries: %w", err)
+	}
+	defer rows.Close()
+
+	summaries := []entity.ActiveCallSummary{}
+	callIDs := []uuid.UUID{}
+	for rows.Next() {
+		var s entity.ActiveCallSummary
+		var startedAt *time.Time
+		if err := rows.Scan(
+			&s.ID,
+			&s.Type,
+			&s.Title,
+			&startedAt,
+			&s.HostUserID,
+			&s.ChannelID,
+			&s.ChannelName,
+			&s.HostDisplayName,
+			&s.Recording,
+			&s.IsOpen,
+			&s.ParticipantCount,
+			&s.ObserverCount,
+		); err != nil {
+			return nil, fmt.Errorf("postgres: list active call summaries scan: %w", err)
+		}
+		// FE schema requires started_at; fall back to "now" when DB has NULL
+		// (calls in ringing state may not have started_at yet) so the projection
+		// remains a valid time string instead of breaking the Zod parse.
+		if startedAt != nil {
+			s.StartedAt = *startedAt
+		} else {
+			s.StartedAt = time.Now()
+		}
+		s.TopParticipants = []entity.TopParticipant{}
+		summaries = append(summaries, s)
+		callIDs = append(callIDs, s.ID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list active call summaries rows: %w", err)
+	}
+	if len(summaries) == 0 {
+		return summaries, nil
+	}
+
+	const topQuery = `
+		SELECT call_id, user_id, display_name, avatar_url
+		FROM (
+			SELECT
+				cp.call_id,
+				cp.user_id,
+				u.display_name,
+				u.avatar_url,
+				ROW_NUMBER() OVER (
+					PARTITION BY cp.call_id
+					ORDER BY cp.joined_at NULLS LAST, cp.user_id
+				) AS rn
+			FROM call_participants cp
+			JOIN users u ON u.id = cp.user_id
+			WHERE cp.call_id = ANY($1)
+			  AND cp.status = 'connected'
+			  AND cp.role <> 'viewer'
+		) ranked
+		WHERE rn <= $2`
+
+	topRows, err := r.db.Query(ctx, topQuery, callIDs, topParticipantsLimit)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list top participants: %w", err)
+	}
+	defer topRows.Close()
+
+	byCall := map[uuid.UUID][]entity.TopParticipant{}
+	for topRows.Next() {
+		var callID uuid.UUID
+		var p entity.TopParticipant
+		if err := topRows.Scan(&callID, &p.UserID, &p.DisplayName, &p.AvatarURL); err != nil {
+			return nil, fmt.Errorf("postgres: list top participants scan: %w", err)
+		}
+		byCall[callID] = append(byCall[callID], p)
+	}
+	if err := topRows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list top participants rows: %w", err)
+	}
+
+	for i := range summaries {
+		if tops, ok := byCall[summaries[i].ID]; ok {
+			summaries[i].TopParticipants = tops
+		}
+	}
+
+	return summaries, nil
+}
+
 func (r *CallRepo) ListRecentByWorkspace(ctx context.Context, workspaceID uuid.UUID, limit int, before *time.Time) ([]entity.Call, error) {
 	if limit <= 0 {
 		limit = 20

@@ -318,6 +318,7 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 	r.Route("/calls", func(r chi.Router) {
 		r.Post("/", deps.Calls.Start)
 		r.Get("/", deps.Calls.ListActive)
+		r.Get("/active", deps.Calls.ListActiveSummaries)
 		r.Get("/recents", deps.Calls.Recents)
 
 		r.Route("/{callID}", func(r chi.Router) {

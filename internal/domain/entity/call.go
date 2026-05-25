@@ -56,6 +56,37 @@ type CallSettings struct {
 	Watermark       bool `json:"watermark"`
 }
 
+// TopParticipant is a thin user projection used by ActiveCallSummary to
+// render avatar stacks on the Calls Home Live Now section. ColorSeed is
+// optional and reserved for the FE to derive deterministic avatar fallback
+// colors (kept nullable so the BE can omit it without breaking the schema).
+type TopParticipant struct {
+	UserID      uuid.UUID `json:"user_id"`
+	DisplayName string    `json:"display_name"`
+	AvatarURL   *string   `json:"avatar_url"`
+	ColorSeed   *int      `json:"color_seed"`
+}
+
+// ActiveCallSummary is the projection returned by GET /calls/active. It joins
+// the raw call row with its channel, host, and connected participants so the
+// FE can render a Live Now card without follow-up requests. Matches the FE
+// schema in packages/core/src/api/calls.ts (ActiveCallSummarySchema).
+type ActiveCallSummary struct {
+	ID               uuid.UUID        `json:"id"`
+	Type             CallType         `json:"type"`
+	Title            *string          `json:"title"`
+	StartedAt        time.Time        `json:"started_at"`
+	ChannelID        *uuid.UUID       `json:"channel_id"`
+	ChannelName      *string          `json:"channel_name"`
+	HostUserID       uuid.UUID        `json:"host_user_id"`
+	HostDisplayName  string           `json:"host_display_name"`
+	Recording        bool             `json:"recording"`
+	IsOpen           bool             `json:"is_open"`
+	ParticipantCount int              `json:"participant_count"`
+	TopParticipants  []TopParticipant `json:"top_participants"`
+	ObserverCount    int              `json:"observer_count"`
+}
+
 type Call struct {
 	ID              uuid.UUID    `json:"id"`
 	WorkspaceID     uuid.UUID    `json:"workspace_id"`

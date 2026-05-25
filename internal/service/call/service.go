@@ -44,6 +44,14 @@ type recentCallRepository interface {
 	ListRecentByWorkspace(ctx context.Context, workspaceID uuid.UUID, limit int, before *time.Time) ([]entity.Call, error)
 }
 
+// activeCallSummaryRepository is the optional interface that exposes the
+// enriched Live Now projection. The default postgres CallRepo satisfies it;
+// fakes used in unit tests may skip it and the handler will fall back to a
+// "not available" error.
+type activeCallSummaryRepository interface {
+	ListActiveSummariesByWorkspace(ctx context.Context, workspaceID uuid.UUID) ([]entity.ActiveCallSummary, error)
+}
+
 // Service handles call lifecycle, participant management, and WebRTC signaling.
 type Service struct {
 	calls         repository.CallRepository
@@ -886,6 +894,24 @@ func (s *Service) ListActiveCalls(ctx context.Context, workspaceID, userID uuid.
 		return nil, cerrors.Internal("failed to list active calls", err)
 	}
 	return calls, nil
+}
+
+// ListActiveSummaries returns the enriched ActiveCallSummary projection used
+// by GET /calls/active for the Calls Home Live Now section.
+func (s *Service) ListActiveSummaries(ctx context.Context, workspaceID, userID uuid.UUID) ([]entity.ActiveCallSummary, error) {
+	if err := s.requireWorkspaceMember(ctx, workspaceID, userID); err != nil {
+		return nil, err
+	}
+	repo, ok := s.calls.(activeCallSummaryRepository)
+	if !ok {
+		return nil, cerrors.Unavailable("active call summaries are not available")
+	}
+	summaries, err := repo.ListActiveSummariesByWorkspace(ctx, workspaceID)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to list active call summaries", "workspace_id", workspaceID, "error", err)
+		return nil, cerrors.Internal("failed to list active call summaries", err)
+	}
+	return summaries, nil
 }
 
 func (s *Service) ListRecentCalls(ctx context.Context, workspaceID, userID uuid.UUID, limit int, cursor string) (*RecentCallsResult, error) {

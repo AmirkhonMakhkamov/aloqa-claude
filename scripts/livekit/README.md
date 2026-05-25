@@ -17,9 +17,9 @@ export LIVEKIT_API_KEY=APIaloqaDev
 export LIVEKIT_API_SECRET=aloqa-livekit-development-secret-32bytes-min
 ```
 
-The webhook is delivered to `http://host.docker.internal:8080/livekit/webhook`
-which assumes aloqa-claude listens on `0.0.0.0:8080`. Adjust if your local
-server uses a different port.
+The webhook is delivered to `http://host.docker.internal:8090/livekit/webhook`
+which assumes aloqa-claude listens on the default `0.0.0.0:8090` (SERVER_PORT).
+Adjust `livekit.yaml` if your local server uses a different port.
 
 ## Verify
 

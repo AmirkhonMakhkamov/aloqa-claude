@@ -19,6 +19,7 @@ type RouterDeps struct {
 	Saved            *SavedHandler
 	Messages         *MessageHandler
 	Calls            *CallHandler
+	LiveKit          *LiveKitWebhookHandler
 	Calendar         *CalendarHandler
 	Breakout         *BreakoutHandler
 	Files            *FileHandler
@@ -109,6 +110,13 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 		r.Use(authLimiter)
 		r.Post("/api/v1/invites/{token}/redeem", deps.Guests.RedeemInvite)
 	})
+
+	// LiveKit webhook (public). LiveKit Server posts signed events here;
+	// signature verification happens inside the handler via the SDK helper,
+	// so no global auth middleware applies.
+	if deps.LiveKit != nil {
+		r.Post("/livekit/webhook", deps.LiveKit.Webhook)
+	}
 
 	// Authenticated routes.
 	r.Group(func(r chi.Router) {

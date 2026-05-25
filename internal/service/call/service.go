@@ -54,6 +54,8 @@ type Service struct {
 	pubsub        EventPublisher
 	sfu           *sfu.SFU
 	media         MediaConfig
+	livekit       LiveKitSettings
+	livekitDedupe *livekitWebhookDedupe
 	guests        *guestaccess.Checker
 	collab        CollaborationAccessAuthorizer
 	control       MediaControlPlane

@@ -1,8 +1,10 @@
 package http
 
 import (
+	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -13,6 +15,23 @@ import (
 	"aloqa/internal/pkg/id"
 	"aloqa/internal/service/call"
 )
+
+// StartCallResponse carries the created call plus the LiveKit connection info
+// the FE needs to join the SFU room.
+type StartCallResponse struct {
+	Call        *entity.Call `json:"call"`
+	LivekitURL  string       `json:"livekit_url,omitempty"`
+	AccessToken string       `json:"access_token,omitempty"`
+	ExpiresAt   *time.Time   `json:"expires_at,omitempty"`
+}
+
+// JoinCallResponse mirrors StartCallResponse for the join endpoint.
+type JoinCallResponse struct {
+	Participant *entity.CallParticipant `json:"participant"`
+	LivekitURL  string                  `json:"livekit_url,omitempty"`
+	AccessToken string                  `json:"access_token,omitempty"`
+	ExpiresAt   *time.Time              `json:"expires_at,omitempty"`
+}
 
 type CallHandler struct {
 	svc *call.Service
@@ -55,7 +74,20 @@ func (h *CallHandler) Start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeCreated(w, c)
+	resp := StartCallResponse{Call: c}
+	if h.svc.LiveKitConfigured() {
+		info, tokenErr := h.svc.IssueLiveKitJoinInfo(c, userID, "")
+		if tokenErr != nil {
+			// Non-fatal: caller already has the call row; FE surfaces the error and can retry join.
+			slog.WarnContext(r.Context(), "failed to issue livekit join info on start", "call_id", c.ID, "user_id", userID, "error", tokenErr)
+		} else {
+			resp.LivekitURL = info.URL
+			resp.AccessToken = info.AccessToken
+			expires := info.ExpiresAt
+			resp.ExpiresAt = &expires
+		}
+	}
+	writeCreated(w, resp)
 }
 
 func (h *CallHandler) Get(w http.ResponseWriter, r *http.Request) {
@@ -126,7 +158,24 @@ func (h *CallHandler) Join(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeOK(w, participant)
+	resp := JoinCallResponse{Participant: participant}
+	if h.svc.LiveKitConfigured() {
+		c, callErr := h.svc.GetCall(r.Context(), workspaceID, callID, userID)
+		if callErr != nil {
+			slog.WarnContext(r.Context(), "failed to load call after join", "call_id", callID, "user_id", userID, "error", callErr)
+		} else if c != nil {
+			info, tokenErr := h.svc.IssueLiveKitJoinInfo(c, userID, "")
+			if tokenErr != nil {
+				slog.WarnContext(r.Context(), "failed to issue livekit join info on join", "call_id", callID, "user_id", userID, "error", tokenErr)
+			} else {
+				resp.LivekitURL = info.URL
+				resp.AccessToken = info.AccessToken
+				expires := info.ExpiresAt
+				resp.ExpiresAt = &expires
+			}
+		}
+	}
+	writeOK(w, resp)
 }
 
 func (h *CallHandler) Leave(w http.ResponseWriter, r *http.Request) {

@@ -19,10 +19,20 @@ type Config struct {
 	JWT           JWTConfig
 	Media         MediaConfig
 	WebRTC        WebRTCConfig
+	LiveKit       LiveKitConfig
 	Search        SearchConfig
 	Realtime      RealtimeConfig
 	Observability ObservabilityConfig
 	CORS          CORSConfig
+}
+
+// LiveKitConfig holds connection parameters for the LiveKit SFU.
+type LiveKitConfig struct {
+	URL         string        // wss://livekit.example.com (FE-facing signaling URL)
+	APIKey      string        // shared with the LiveKit server keys map
+	APISecret   string        // 32-byte hex secret
+	TokenTTL    time.Duration // access-token validity (default 6h)
+	WebhookPath string        // public path that LiveKit posts to (default /livekit/webhook)
 }
 
 type ObservabilityConfig struct {
@@ -366,6 +376,13 @@ func Load() (*Config, error) {
 			AdaptiveGoodSamplesForUpgrade:   envInt("WEBRTC_ADAPTIVE_GOOD_SAMPLES_FOR_UPGRADE", 3),
 			AdaptivePoorSamplesForDowngrade: envInt("WEBRTC_ADAPTIVE_POOR_SAMPLES_FOR_DOWNGRADE", 1),
 			AdaptiveEWMAAlpha:               envFloat("WEBRTC_ADAPTIVE_EWMA_ALPHA", 0.35),
+		},
+		LiveKit: LiveKitConfig{
+			URL:         env("LIVEKIT_URL", ""),
+			APIKey:      env("LIVEKIT_API_KEY", ""),
+			APISecret:   env("LIVEKIT_API_SECRET", ""),
+			TokenTTL:    envDuration("LIVEKIT_TOKEN_TTL", 6*time.Hour),
+			WebhookPath: env("LIVEKIT_WEBHOOK_PATH", "/livekit/webhook"),
 		},
 		Search: SearchConfig{
 			TextConfig:     env("SEARCH_TEXT_CONFIG", "simple"),

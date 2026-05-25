@@ -478,7 +478,14 @@ func run() error {
 	channelHandler := httphandler.NewChannelHandler(chatSvc)
 	savedHandler := httphandler.NewSavedHandler(savedSvc)
 	messageHandler := httphandler.NewMessageHandler(chatSvc)
+	callSvc.SetLiveKit(call.LiveKitSettings{
+		URL:       cfg.LiveKit.URL,
+		APIKey:    cfg.LiveKit.APIKey,
+		APISecret: cfg.LiveKit.APISecret,
+		TokenTTL:  cfg.LiveKit.TokenTTL,
+	})
 	callHandler := httphandler.NewCallHandler(callSvc)
+	livekitWebhookHandler := httphandler.NewLiveKitWebhookHandler(callSvc, cfg.LiveKit.APIKey, cfg.LiveKit.APISecret)
 	calendarHandler := httphandler.NewCalendarHandler(calendarSvc)
 	breakoutHandler := httphandler.NewBreakoutHandler(callSvc)
 	fileHandler := httphandler.NewFileHandler(fileSvc, cfg.Media.MaxFileSize)
@@ -500,6 +507,7 @@ func run() error {
 		Saved:            savedHandler,
 		Messages:         messageHandler,
 		Calls:            callHandler,
+		LiveKit:          livekitWebhookHandler,
 		Calendar:         calendarHandler,
 		Breakout:         breakoutHandler,
 		Files:            fileHandler,

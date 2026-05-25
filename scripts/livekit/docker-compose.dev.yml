@@ -1,0 +1,21 @@
+services:
+  livekit-server:
+    image: livekit/livekit-server:v1.7.0
+    command: --config /etc/livekit.yaml
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - livekit-redis-data:/data
+
+volumes:
+  livekit-redis-data:

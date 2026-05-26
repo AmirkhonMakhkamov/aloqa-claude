@@ -74,8 +74,8 @@ type callParticipantDisconnectRepository interface {
 }
 
 type liveKitWebhookRepository interface {
-	ClaimLiveKitWebhookEvent(ctx context.Context, event *entity.LiveKitWebhookEvent) (bool, error)
-	ReleaseLiveKitWebhookEvent(ctx context.Context, eventID string) error
+	ClaimLiveKitWebhookEvent(ctx context.Context, event *entity.LiveKitWebhookEvent) (entity.LiveKitWebhookClaimResult, error)
+	MarkLiveKitWebhookEventProcessed(ctx context.Context, eventID string) error
 }
 
 type LeaveCallResult struct {

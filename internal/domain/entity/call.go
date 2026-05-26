@@ -138,11 +138,22 @@ type CallParticipant struct {
 }
 
 type LiveKitWebhookEvent struct {
-	EventID    string    `json:"event_id"`
-	CallID     uuid.UUID `json:"call_id"`
-	EventType  string    `json:"event_type"`
-	ReceivedAt time.Time `json:"received_at"`
+	EventID        string     `json:"event_id"`
+	CallID         uuid.UUID  `json:"call_id"`
+	EventType      string     `json:"event_type"`
+	Status         string     `json:"status"`
+	ReceivedAt     time.Time  `json:"received_at"`
+	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
+	ProcessedAt    *time.Time `json:"processed_at,omitempty"`
 }
+
+type LiveKitWebhookClaimResult string
+
+const (
+	LiveKitWebhookClaimProcess    LiveKitWebhookClaimResult = "process"
+	LiveKitWebhookClaimDuplicate  LiveKitWebhookClaimResult = "duplicate"
+	LiveKitWebhookClaimInProgress LiveKitWebhookClaimResult = "in_progress"
+)
 
 // --- Breakout Rooms ---
 

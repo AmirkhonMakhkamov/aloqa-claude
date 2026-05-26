@@ -23,6 +23,8 @@ type LiveKitSettings struct {
 	TokenTTL  time.Duration
 }
 
+const liveKitWebhookClaimLease = 2 * time.Minute
+
 // LiveKitJoinInfo is appended to the StartCall / JoinCall response so the FE
 // can connect to the LiveKit room without a second round-trip.
 type LiveKitJoinInfo struct {
@@ -204,17 +206,22 @@ func (s *Service) HandleLiveKitWebhook(ctx context.Context, ev *livekitpb.Webhoo
 		return nil
 	}
 
-	claimed, err := s.claimLiveKitWebhookEvent(ctx, ev, callID)
+	claim, err := s.claimLiveKitWebhookEvent(ctx, ev, callID)
 	if err != nil {
 		return cerrors.Internal("failed to claim livekit webhook event", err)
 	}
-	if !claimed {
+	switch claim {
+	case entity.LiveKitWebhookClaimDuplicate:
 		return nil
+	case entity.LiveKitWebhookClaimInProgress:
+		return cerrors.Conflict("livekit webhook event is already processing")
 	}
 
 	if err := s.processLiveKitWebhook(ctx, ev, callID); err != nil {
-		s.releaseLiveKitWebhookEvent(ctx, ev.GetId())
 		return err
+	}
+	if err := s.markLiveKitWebhookEventProcessed(ctx, ev.GetId()); err != nil {
+		return cerrors.Internal("failed to mark livekit webhook processed", err)
 	}
 	return nil
 }
@@ -237,34 +244,38 @@ func (s *Service) processLiveKitWebhook(ctx context.Context, ev *livekitpb.Webho
 	}
 }
 
-func (s *Service) claimLiveKitWebhookEvent(ctx context.Context, ev *livekitpb.WebhookEvent, callID uuid.UUID) (bool, error) {
+func (s *Service) claimLiveKitWebhookEvent(ctx context.Context, ev *livekitpb.WebhookEvent, callID uuid.UUID) (entity.LiveKitWebhookClaimResult, error) {
 	eventID := ev.GetId()
 	if eventID == "" {
-		return true, nil
+		return entity.LiveKitWebhookClaimProcess, nil
 	}
 	webhookRepo, ok := s.calls.(liveKitWebhookRepository)
 	if !ok {
-		return true, nil
+		return entity.LiveKitWebhookClaimProcess, nil
 	}
+	leaseExpiresAt := time.Now().Add(liveKitWebhookClaimLease).UTC()
 	return webhookRepo.ClaimLiveKitWebhookEvent(ctx, &entity.LiveKitWebhookEvent{
-		EventID:    eventID,
-		CallID:     callID,
-		EventType:  ev.GetEvent(),
-		ReceivedAt: time.Now().UTC(),
+		EventID:        eventID,
+		CallID:         callID,
+		EventType:      ev.GetEvent(),
+		Status:         "processing",
+		ReceivedAt:     time.Now().UTC(),
+		LeaseExpiresAt: &leaseExpiresAt,
 	})
 }
 
-func (s *Service) releaseLiveKitWebhookEvent(ctx context.Context, eventID string) {
+func (s *Service) markLiveKitWebhookEventProcessed(ctx context.Context, eventID string) error {
 	if eventID == "" {
-		return
+		return nil
 	}
 	webhookRepo, ok := s.calls.(liveKitWebhookRepository)
 	if !ok {
-		return
+		return nil
 	}
-	if err := webhookRepo.ReleaseLiveKitWebhookEvent(ctx, eventID); err != nil {
-		slog.WarnContext(ctx, "failed to release livekit webhook claim", "event_id", eventID, "error", err)
+	if err := webhookRepo.MarkLiveKitWebhookEventProcessed(ctx, eventID); err != nil {
+		return err
 	}
+	return nil
 }
 
 func (s *Service) handleLiveKitRoomFinished(ctx context.Context, callID uuid.UUID) error {
@@ -376,20 +387,21 @@ func (s *Service) handleLiveKitParticipantLeft(ctx context.Context, callID uuid.
 		}
 		return cerrors.Internal("failed to load participant for livekit participant_left", err)
 	}
-	if participant.Status == entity.ParticipantStatusDisconnected {
-		return nil
+	if participant.Status != entity.ParticipantStatusDisconnected {
+		disconnected, err := disconnectParticipantIfConnected(ctx, s.calls, participant.ID, entity.ParticipantLeftReasonLeft)
+		if err != nil {
+			return cerrors.Internal("failed to mark participant disconnected", err)
+		}
+		if disconnected {
+			markParticipantDisconnected(participant, entity.ParticipantLeftReasonLeft)
+			s.publishParticipantEvent(ctx, event.TypeCallParticipantLeft, call, participant)
+		}
 	}
 
-	disconnected, err := disconnectParticipantIfConnected(ctx, s.calls, participant.ID, entity.ParticipantLeftReasonLeft)
-	if err != nil {
-		return cerrors.Internal("failed to mark participant disconnected", err)
-	}
-	if !disconnected {
-		return nil
-	}
-	markParticipantDisconnected(participant, entity.ParticipantLeftReasonLeft)
+	return s.autoEndAfterLiveKitParticipantLeft(ctx, call, callID, userID, p.GetDisconnectReason().String())
+}
 
-	s.publishParticipantEvent(ctx, event.TypeCallParticipantLeft, call, participant)
+func (s *Service) autoEndAfterLiveKitParticipantLeft(ctx context.Context, call *entity.Call, callID, userID uuid.UUID, reason string) error {
 	participants, err := s.calls.ListParticipants(ctx, callID)
 	if err != nil {
 		return cerrors.Internal("failed to list participants for livekit participant_left", err)
@@ -410,7 +422,7 @@ func (s *Service) handleLiveKitParticipantLeft(ctx context.Context, callID uuid.
 			s.sfu.CloseRoom(callID.String())
 		}
 	}
-	slog.InfoContext(ctx, "livekit participant_left bridged", "call_id", callID, "user_id", userID, "reason", p.GetDisconnectReason().String())
+	slog.InfoContext(ctx, "livekit participant_left bridged", "call_id", callID, "user_id", userID, "reason", reason)
 	return nil
 }
 
@@ -433,14 +445,12 @@ func (s *Service) handleLiveKitTrackChanged(ctx context.Context, callID uuid.UUI
 		}
 		return cerrors.Internal("failed to load participant for livekit track event", err)
 	}
-	if participant.ScreenSharing == screenSharing {
-		return nil
+	if participant.ScreenSharing != screenSharing {
+		if err := s.calls.UpdateParticipantMedia(ctx, participant.ID, participant.AudioMuted, participant.VideoMuted, screenSharing); err != nil {
+			return cerrors.Internal("failed to update participant screen share from livekit", err)
+		}
+		participant.ScreenSharing = screenSharing
 	}
-
-	if err := s.calls.UpdateParticipantMedia(ctx, participant.ID, participant.AudioMuted, participant.VideoMuted, screenSharing); err != nil {
-		return cerrors.Internal("failed to update participant screen share from livekit", err)
-	}
-	participant.ScreenSharing = screenSharing
 
 	call, err := s.calls.GetByID(ctx, callID)
 	if err != nil {

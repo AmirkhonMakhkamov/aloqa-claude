@@ -655,6 +655,37 @@ func TestLiveKitWebhookDedupesRoomFinishedAcrossServiceInstances(t *testing.T) {
 	}
 }
 
+func TestLiveKitWebhookInProgressDuplicateReturnsRetryableConflict(t *testing.T) {
+	ctx := context.Background()
+	callID := uuid.New()
+	eventID := uuid.New().String()
+	leaseExpiresAt := time.Now().Add(time.Minute).UTC()
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {ID: callID, WorkspaceID: uuid.New(), Type: entity.CallTypeMeeting, Status: entity.CallStatusActive},
+		},
+		liveKitWebhookEvents: map[string]*entity.LiveKitWebhookEvent{
+			eventID: {
+				EventID:        eventID,
+				CallID:         callID,
+				EventType:      "room_finished",
+				Status:         "processing",
+				LeaseExpiresAt: &leaseExpiresAt,
+			},
+		},
+	}
+	pub := &capturingPublisher{}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+
+	err := svc.HandleLiveKitWebhook(ctx, liveKitWebhookEvent(eventID, "room_finished", callID, uuid.Nil))
+	if !hasCode(err, cerrors.CodeConflict) {
+		t.Fatalf("HandleLiveKitWebhook in-progress duplicate error = %v, want CONFLICT", err)
+	}
+	if got := len(pub.captures); got != 0 {
+		t.Fatalf("publish count = %d, want 0", got)
+	}
+}
+
 func TestLiveKitWebhookIgnoresParticipantLeftAfterRoomFinished(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -683,6 +714,46 @@ func TestLiveKitWebhookIgnoresParticipantLeftAfterRoomFinished(t *testing.T) {
 	}
 	if calls.participants[[2]uuid.UUID{callID, userID}].Status != entity.ParticipantStatusConnected {
 		t.Fatalf("participant status changed after ended call")
+	}
+}
+
+func TestLiveKitParticipantLeftRetryAfterDisconnectStillAutoEnds(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	userID := uuid.New()
+	now := time.Now().UTC()
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive, CreatedBy: userID},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, userID}: {
+				ID:         uuid.New(),
+				CallID:     callID,
+				UserID:     userID,
+				Role:       entity.CallRoleParticipant,
+				Status:     entity.ParticipantStatusDisconnected,
+				LeftAt:     &now,
+				LeftReason: entity.ParticipantLeftReasonLeft,
+			},
+		},
+		liveKitWebhookEvents: map[string]*entity.LiveKitWebhookEvent{},
+	}
+	pub := &capturingPublisher{}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+
+	if err := svc.HandleLiveKitWebhook(ctx, liveKitWebhookEvent(uuid.New().String(), "participant_left", callID, userID)); err != nil {
+		t.Fatalf("HandleLiveKitWebhook returned error: %v", err)
+	}
+	if calls.calls[callID].Status != entity.CallStatusEnded {
+		t.Fatalf("call status = %q, want ended", calls.calls[callID].Status)
+	}
+	if calls.calls[callID].EndReason != entity.CallEndReasonAllLeft {
+		t.Fatalf("end reason = %q, want all_left", calls.calls[callID].EndReason)
+	}
+	if got := len(pub.captures); got != 1 {
+		t.Fatalf("publish count = %d, want 1 call-ended event", got)
 	}
 }
 
@@ -877,7 +948,7 @@ func TestLeaveCallConcurrentDisconnectIsAlreadyLeftNoPublish(t *testing.T) {
 	}
 }
 
-func TestLiveKitParticipantLeftConcurrentDisconnectDoesNotPublish(t *testing.T) {
+func TestLiveKitParticipantLeftConcurrentDisconnectStillAutoEnds(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
 	callID := uuid.New()
@@ -912,8 +983,14 @@ func TestLiveKitParticipantLeftConcurrentDisconnectDoesNotPublish(t *testing.T) 
 	if err != nil {
 		t.Fatalf("handleLiveKitParticipantLeft returned error: %v", err)
 	}
-	if pub.called {
-		t.Fatalf("concurrent livekit leave published %q; want no event", pub.subject)
+	if calls.calls[callID].Status != entity.CallStatusEnded {
+		t.Fatalf("call status = %q, want ended", calls.calls[callID].Status)
+	}
+	if calls.calls[callID].EndReason != entity.CallEndReasonAllLeft {
+		t.Fatalf("end reason = %q, want all_left", calls.calls[callID].EndReason)
+	}
+	if got := len(pub.captures); got != 1 {
+		t.Fatalf("publish count = %d, want 1 call-ended event", got)
 	}
 }
 
@@ -1425,7 +1502,7 @@ func (r *fakeCallRepo) ActivateRinging(_ context.Context, id uuid.UUID) (bool, e
 func (r *fakeCallRepo) End(ctx context.Context, id uuid.UUID) error {
 	return r.EndWithReason(ctx, id, "")
 }
-func (r *fakeCallRepo) ClaimLiveKitWebhookEvent(_ context.Context, event *entity.LiveKitWebhookEvent) (bool, error) {
+func (r *fakeCallRepo) ClaimLiveKitWebhookEvent(_ context.Context, event *entity.LiveKitWebhookEvent) (entity.LiveKitWebhookClaimResult, error) {
 	if r.liveKitWebhookEvents == nil {
 		r.liveKitWebhookEvents = map[string]*entity.LiveKitWebhookEvent{}
 	}
@@ -1433,14 +1510,26 @@ func (r *fakeCallRepo) ClaimLiveKitWebhookEvent(_ context.Context, event *entity
 		r.liveKitWebhookClaimAttempts = map[string]int{}
 	}
 	r.liveKitWebhookClaimAttempts[event.EventID]++
-	if _, exists := r.liveKitWebhookEvents[event.EventID]; exists {
-		return false, nil
+	if existing := r.liveKitWebhookEvents[event.EventID]; existing != nil {
+		if existing.Status == "processed" {
+			return entity.LiveKitWebhookClaimDuplicate, nil
+		}
+		if existing.LeaseExpiresAt != nil && existing.LeaseExpiresAt.After(time.Now().UTC()) {
+			return entity.LiveKitWebhookClaimInProgress, nil
+		}
 	}
 	r.liveKitWebhookEvents[event.EventID] = event
-	return true, nil
+	return entity.LiveKitWebhookClaimProcess, nil
 }
-func (r *fakeCallRepo) ReleaseLiveKitWebhookEvent(_ context.Context, eventID string) error {
-	delete(r.liveKitWebhookEvents, eventID)
+func (r *fakeCallRepo) MarkLiveKitWebhookEventProcessed(_ context.Context, eventID string) error {
+	event := r.liveKitWebhookEvents[eventID]
+	if event == nil {
+		return nil
+	}
+	now := time.Now().UTC()
+	event.Status = "processed"
+	event.ProcessedAt = &now
+	event.LeaseExpiresAt = nil
 	return nil
 }
 func (r *fakeCallRepo) EndWithReason(_ context.Context, id uuid.UUID, reason entity.CallEndReason) error {

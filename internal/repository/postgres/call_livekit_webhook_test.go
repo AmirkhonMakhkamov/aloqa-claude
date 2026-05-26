@@ -40,8 +40,8 @@ func TestCallRepoClaimLiveKitWebhookEventIsDurable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first ClaimLiveKitWebhookEvent returned error: %v", err)
 	}
-	if !claimed {
-		t.Fatalf("first ClaimLiveKitWebhookEvent claimed = false, want true")
+	if claimed != entity.LiveKitWebhookClaimProcess {
+		t.Fatalf("first ClaimLiveKitWebhookEvent claimed = %q, want %q", claimed, entity.LiveKitWebhookClaimProcess)
 	}
 
 	secondRepo := NewCallRepo(pool)
@@ -49,18 +49,18 @@ func TestCallRepoClaimLiveKitWebhookEventIsDurable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second ClaimLiveKitWebhookEvent returned error: %v", err)
 	}
-	if claimed {
-		t.Fatalf("second ClaimLiveKitWebhookEvent claimed = true, want false")
+	if claimed != entity.LiveKitWebhookClaimInProgress {
+		t.Fatalf("second ClaimLiveKitWebhookEvent claimed = %q, want %q", claimed, entity.LiveKitWebhookClaimInProgress)
 	}
 
-	if err := repo.ReleaseLiveKitWebhookEvent(ctx, eventID); err != nil {
-		t.Fatalf("ReleaseLiveKitWebhookEvent returned error: %v", err)
+	if err := repo.MarkLiveKitWebhookEventProcessed(ctx, eventID); err != nil {
+		t.Fatalf("MarkLiveKitWebhookEventProcessed returned error: %v", err)
 	}
 	claimed, err = secondRepo.ClaimLiveKitWebhookEvent(ctx, event)
 	if err != nil {
-		t.Fatalf("claim after release returned error: %v", err)
+		t.Fatalf("claim after processed returned error: %v", err)
 	}
-	if !claimed {
-		t.Fatalf("claim after release = false, want true")
+	if claimed != entity.LiveKitWebhookClaimDuplicate {
+		t.Fatalf("claim after processed = %q, want %q", claimed, entity.LiveKitWebhookClaimDuplicate)
 	}
 }

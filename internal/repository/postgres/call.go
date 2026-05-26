@@ -34,32 +34,85 @@ func (r *CallRepo) withTx(tx pgx.Tx) *CallRepo {
 	return &CallRepo{pool: r.pool, db: tx}
 }
 
-func (r *CallRepo) ClaimLiveKitWebhookEvent(ctx context.Context, event *entity.LiveKitWebhookEvent) (bool, error) {
+func (r *CallRepo) ClaimLiveKitWebhookEvent(ctx context.Context, event *entity.LiveKitWebhookEvent) (entity.LiveKitWebhookClaimResult, error) {
 	if event == nil {
-		return false, cerrors.InvalidInput("livekit webhook event is required")
+		return "", cerrors.InvalidInput("livekit webhook event is required")
 	}
 	query := `
-		INSERT INTO call_livekit_webhook_events (event_id, call_id, event_type, received_at)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO call_livekit_webhook_events (event_id, call_id, event_type, status, received_at, lease_expires_at)
+		VALUES ($1, $2, $3, 'processing', $4, $5)
 		ON CONFLICT (event_id) DO NOTHING`
 
 	receivedAt := event.ReceivedAt
 	if receivedAt.IsZero() {
 		receivedAt = time.Now().UTC()
 	}
-	tag, err := r.db.Exec(ctx, query, event.EventID, event.CallID, event.EventType, receivedAt)
-	if err != nil {
-		return false, fmt.Errorf("postgres: claim livekit webhook event: %w", err)
+	leaseExpiresAt := event.LeaseExpiresAt
+	if leaseExpiresAt == nil {
+		lease := time.Now().Add(2 * time.Minute).UTC()
+		leaseExpiresAt = &lease
 	}
-	return tag.RowsAffected() == 1, nil
+	tag, err := r.db.Exec(ctx, query, event.EventID, event.CallID, event.EventType, receivedAt, leaseExpiresAt)
+	if err != nil {
+		return "", fmt.Errorf("postgres: claim livekit webhook event: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return entity.LiveKitWebhookClaimProcess, nil
+	}
+
+	return r.reclaimLiveKitWebhookEvent(ctx, event.EventID, receivedAt, *leaseExpiresAt)
 }
 
-func (r *CallRepo) ReleaseLiveKitWebhookEvent(ctx context.Context, eventID string) error {
+func (r *CallRepo) reclaimLiveKitWebhookEvent(ctx context.Context, eventID string, receivedAt, leaseExpiresAt time.Time) (entity.LiveKitWebhookClaimResult, error) {
+	var status string
+	var currentLease *time.Time
+	if err := r.db.QueryRow(ctx, `
+		SELECT status, lease_expires_at
+		FROM call_livekit_webhook_events
+		WHERE event_id = $1`, eventID).Scan(&status, &currentLease); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return entity.LiveKitWebhookClaimInProgress, nil
+		}
+		return "", fmt.Errorf("postgres: load livekit webhook event claim: %w", err)
+	}
+	if status == "processed" {
+		return entity.LiveKitWebhookClaimDuplicate, nil
+	}
+	if currentLease != nil && currentLease.After(time.Now().UTC()) {
+		return entity.LiveKitWebhookClaimInProgress, nil
+	}
+
+	tag, err := r.db.Exec(ctx, `
+		UPDATE call_livekit_webhook_events
+		SET received_at = $2,
+		    lease_expires_at = $3
+		WHERE event_id = $1
+		  AND status = 'processing'
+		  AND (lease_expires_at IS NULL OR lease_expires_at <= now())`,
+		eventID,
+		receivedAt,
+		leaseExpiresAt,
+	)
+	if err != nil {
+		return "", fmt.Errorf("postgres: reclaim livekit webhook event: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return entity.LiveKitWebhookClaimProcess, nil
+	}
+	return entity.LiveKitWebhookClaimInProgress, nil
+}
+
+func (r *CallRepo) MarkLiveKitWebhookEventProcessed(ctx context.Context, eventID string) error {
 	if eventID == "" {
 		return nil
 	}
-	if _, err := r.db.Exec(ctx, `DELETE FROM call_livekit_webhook_events WHERE event_id = $1`, eventID); err != nil {
-		return fmt.Errorf("postgres: release livekit webhook event: %w", err)
+	if _, err := r.db.Exec(ctx, `
+		UPDATE call_livekit_webhook_events
+		SET status = 'processed',
+		    processed_at = now(),
+		    lease_expires_at = NULL
+		WHERE event_id = $1`, eventID); err != nil {
+		return fmt.Errorf("postgres: mark livekit webhook event processed: %w", err)
 	}
 	return nil
 }

@@ -2,7 +2,11 @@ package call
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -144,5 +148,54 @@ func TestIssueTurnCredentials_PartialMisconfig_URLsSetButNoAuth_Returns500(t *te
 	}
 	if !strings.Contains(appErr.Message, "turn service partially configured") {
 		t.Fatalf("message = %q, want to contain 'turn service partially configured'", appErr.Message)
+	}
+}
+
+func TestGenerateTurnCredentials_DeterministicHmac(t *testing.T) {
+	t.Parallel()
+	secret := "shared-secret-32-bytes-for-hmac-sha1"
+	userID := uuid.MustParse("11111111-2222-3333-4444-555555555555")
+	expiry := int64(1714600000)
+	username := fmt.Sprintf("%d:%s", expiry, userID.String())
+
+	h := hmac.New(sha1.New, []byte(secret))
+	h.Write([]byte(username))
+	expected := base64.StdEncoding.EncodeToString(h.Sum(nil))
+
+	actual := computeHmacCredential(secret, username)
+	if actual != expected {
+		t.Fatalf("computeHmacCredential = %q, want %q", actual, expected)
+	}
+}
+
+func TestIssueTurnCredentials_HmacBranch_WhenTurnSecretSet(t *testing.T) {
+	svc, fx := newTestServiceWithConnectedParticipant(t)
+	svc.media.TURNURLs = []string{"turn:80.240.27.72:3478?transport=udp"}
+	svc.media.TURNSecret = "shared-secret"
+	svc.media.TURNUsername = ""
+	svc.media.TURNCredential = ""
+
+	creds, err := svc.IssueTurnCredentials(context.Background(), fx.workspaceID, fx.callID, fx.userID)
+	if err != nil {
+		t.Fatalf("IssueTurnCredentials err = %v, want nil", err)
+	}
+	if creds.Username == "" {
+		t.Fatal("HMAC username must be set")
+	}
+	if !strings.Contains(creds.Username, ":"+fx.userID.String()) {
+		t.Fatalf("Username = %q, want to contain :<userID>", creds.Username)
+	}
+	if creds.Credential == "" {
+		t.Fatal("HMAC credential must be set")
+	}
+	if creds.TTL <= 0 || creds.TTL > 600 {
+		t.Fatalf("TTL = %d, want 1..600 (clamped to 10 min)", creds.TTL)
+	}
+	// Independently verify the credential matches the HMAC of username with the shared secret.
+	h := hmac.New(sha1.New, []byte("shared-secret"))
+	h.Write([]byte(creds.Username))
+	want := base64.StdEncoding.EncodeToString(h.Sum(nil))
+	if creds.Credential != want {
+		t.Fatalf("Credential = %q, want HMAC-SHA1(secret, username) = %q", creds.Credential, want)
 	}
 }

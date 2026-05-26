@@ -2,6 +2,9 @@ package call
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha1"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -93,6 +96,22 @@ type mediaTokenClaims struct {
 	Region      string `json:"region,omitempty"`
 }
 
+// computeHmacCredential is the coturn `--use-auth-secret` scheme: HMAC-SHA1 of
+// the timestamp:userID username, encoded as base64. Coturn validates the credential
+// server-side using the same shared secret.
+func computeHmacCredential(secret, username string) string {
+	h := hmac.New(sha1.New, []byte(secret))
+	h.Write([]byte(username))
+	return base64.StdEncoding.EncodeToString(h.Sum(nil))
+}
+
+// generateTurnHmacUsername builds a TTL-bound coturn username carrying the
+// userID scope for operational log attribution.
+func generateTurnHmacUsername(ttl time.Duration, userID uuid.UUID) string {
+	expiry := time.Now().Add(ttl).Unix()
+	return fmt.Sprintf("%d:%s", expiry, userID.String())
+}
+
 // IssueTurnCredentials returns TURN servers and credentials scoped to an active call participant.
 // When TURN is not configured (no TURNURLs), falls back to a public STUN response so FE clients
 // can still complete direct/LAN paths. Access check runs FIRST so non-participants cannot probe.
@@ -109,6 +128,22 @@ func (s *Service) IssueTurnCredentials(ctx context.Context, workspaceID, callID,
 	}
 	if participant.Status != entity.ParticipantStatusConnected {
 		return nil, cerrors.Forbidden("participant is not connected")
+	}
+
+	// TURN HMAC branch — when a shared secret is configured, issue short-lived
+	// per-participant creds against coturn's --use-auth-secret mode.
+	if s.media.TURNSecret != "" && len(s.media.TURNURLs) > 0 {
+		ttl := s.media.TURNCredentialsTTL
+		if ttl <= 0 || ttl > 10*time.Minute {
+			ttl = 10 * time.Minute
+		}
+		username := generateTurnHmacUsername(ttl, userID)
+		return &TurnCredentials{
+			URLs:       append([]string(nil), s.media.TURNURLs...),
+			Username:   username,
+			Credential: computeHmacCredential(s.media.TURNSecret, username),
+			TTL:        int(ttl.Seconds()),
+		}, nil
 	}
 
 	// STUN-only fallback when TURN is not configured. BE includes the google STUN

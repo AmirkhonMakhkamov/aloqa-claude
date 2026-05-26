@@ -85,7 +85,7 @@ func (s *Service) CleanupStaleOpenCalls(ctx context.Context, grace time.Duration
 	ended := 0
 	for i := range calls {
 		call := calls[i]
-		hasMediaParticipants, err := s.hasActiveMediaParticipants(ctx, call.ID)
+		hasMediaParticipants, err := s.hasActiveMediaParticipants(ctx, call)
 		if err != nil {
 			slog.WarnContext(ctx, "skipping stale call cleanup after media inspection error", "call_id", call.ID, "error", err)
 			continue
@@ -254,16 +254,24 @@ func disconnectStaleParticipants(
 	return nil
 }
 
-func (s *Service) hasActiveMediaParticipants(ctx context.Context, callID uuid.UUID) (bool, error) {
+func (s *Service) hasActiveMediaParticipants(ctx context.Context, call entity.Call) (bool, error) {
 	if !s.livekit.IsConfigured() {
 		return true, nil
 	}
 	if s.livekitRooms == nil {
 		return true, cerrors.Unavailable("livekit room service is not configured")
 	}
-	participants, err := s.livekitRooms.ListParticipants(ctx, callID)
+	participants, err := s.livekitRooms.ListParticipants(ctx, call.ID)
 	if err != nil {
 		return true, err
+	}
+	if call.Status == entity.CallStatusRinging {
+		for i := range participants {
+			if participants[i].GetIdentity() != call.CreatedBy.String() {
+				return true, nil
+			}
+		}
+		return false, nil
 	}
 	return len(participants) > 0, nil
 }

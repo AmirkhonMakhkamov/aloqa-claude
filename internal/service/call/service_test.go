@@ -976,6 +976,129 @@ func TestCleanupStaleOpenCallsEndsRingingAsMissed(t *testing.T) {
 	}
 }
 
+func TestCleanupStaleOpenCallsEndsRingingWithOnlyCallerInLiveKit(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	inviteeID := uuid.New()
+	startedAt := time.Now().Add(-10 * time.Minute)
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {
+				ID:          callID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeOneToOne,
+				Status:      entity.CallStatusRinging,
+				CreatedBy:   hostID,
+				StartedAt:   &startedAt,
+				CreatedAt:   startedAt,
+			},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: {
+				ID:       uuid.New(),
+				CallID:   callID,
+				UserID:   hostID,
+				Role:     entity.CallRoleHost,
+				Status:   entity.ParticipantStatusConnected,
+				JoinedAt: &startedAt,
+			},
+			{callID, inviteeID}: {
+				ID:     uuid.New(),
+				CallID: callID,
+				UserID: inviteeID,
+				Role:   entity.CallRoleParticipant,
+				Status: entity.ParticipantStatusInvited,
+			},
+		},
+	}
+	roomClient := &fakeLiveKitRoomClient{
+		participantsByCall: map[uuid.UUID][]*livekitpb.ParticipantInfo{
+			callID: {
+				{Identity: hostID.String()},
+			},
+		},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+	configureCleanupLiveKit(svc, roomClient)
+
+	ended, err := svc.CleanupStaleOpenCalls(ctx, 5*time.Minute, 100)
+	if err != nil {
+		t.Fatalf("CleanupStaleOpenCalls returned error: %v", err)
+	}
+	if ended != 1 {
+		t.Fatalf("ended = %d, want 1", ended)
+	}
+	callEntity := calls.calls[callID]
+	if callEntity.Status != entity.CallStatusEnded || callEntity.EndReason != entity.CallEndReasonMissed {
+		t.Fatalf("call lifecycle = status %q reason %q, want ended/missed", callEntity.Status, callEntity.EndReason)
+	}
+}
+
+func TestCleanupStaleOpenCallsKeepsRingingWithAnsweredParticipantInLiveKit(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	inviteeID := uuid.New()
+	startedAt := time.Now().Add(-10 * time.Minute)
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {
+				ID:          callID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeOneToOne,
+				Status:      entity.CallStatusRinging,
+				CreatedBy:   hostID,
+				StartedAt:   &startedAt,
+				CreatedAt:   startedAt,
+			},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: {
+				ID:       uuid.New(),
+				CallID:   callID,
+				UserID:   hostID,
+				Role:     entity.CallRoleHost,
+				Status:   entity.ParticipantStatusConnected,
+				JoinedAt: &startedAt,
+			},
+			{callID, inviteeID}: {
+				ID:       uuid.New(),
+				CallID:   callID,
+				UserID:   inviteeID,
+				Role:     entity.CallRoleParticipant,
+				Status:   entity.ParticipantStatusConnected,
+				JoinedAt: &startedAt,
+			},
+		},
+	}
+	roomClient := &fakeLiveKitRoomClient{
+		participantsByCall: map[uuid.UUID][]*livekitpb.ParticipantInfo{
+			callID: {
+				{Identity: hostID.String()},
+				{Identity: inviteeID.String()},
+			},
+		},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+	configureCleanupLiveKit(svc, roomClient)
+
+	ended, err := svc.CleanupStaleOpenCalls(ctx, 5*time.Minute, 100)
+	if err != nil {
+		t.Fatalf("CleanupStaleOpenCalls returned error: %v", err)
+	}
+	if ended != 0 {
+		t.Fatalf("ended = %d, want 0", ended)
+	}
+	if calls.calls[callID].Status != entity.CallStatusRinging {
+		t.Fatalf("call status = %q, want ringing", calls.calls[callID].Status)
+	}
+}
+
 func TestCleanupStaleOpenCallsSkipsWhenLiveKitDisabled(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()

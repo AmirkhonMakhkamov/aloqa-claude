@@ -33,12 +33,14 @@ type PostgresRuntimeStats struct {
 type RedisRuntimeStats struct {
 	PoolSize           int     `json:"pool_size"`
 	TotalConns         uint32  `json:"total_conns"`
+	ActiveConns        uint32  `json:"active_conns"`
 	IdleConns          uint32  `json:"idle_conns"`
 	StaleConns         uint32  `json:"stale_conns"`
 	Misses             uint32  `json:"misses"`
 	Hits               uint32  `json:"hits"`
 	Timeouts           uint32  `json:"timeouts"`
 	UtilizationPct     float64 `json:"utilization_pct"`
+	OpenConnsPct       float64 `json:"open_conns_pct"`
 	Saturated          bool    `json:"saturated"`
 	OperationTimeoutMs int64   `json:"operation_timeout_ms"`
 	PresenceShards     int     `json:"presence_shards"`

@@ -320,9 +320,83 @@ func (r *CallRepo) ListStaleOpen(ctx context.Context, before time.Time, limit in
 }
 
 const (
-	defaultStaleOpenCallLimit = 100
-	maxStaleOpenCallLimit     = 500
+	defaultStaleOpenCallLimit     = 100
+	maxStaleOpenCallLimit         = 500
+	defaultActiveObservationLimit = 100
+	maxActiveObservationLimit     = 500
 )
+
+// ListActiveObservations returns active/ringing calls across workspaces for
+// Prometheus/Grafana observability. Keep the projection compact because every
+// text field becomes a metric label on the active call table.
+func (r *CallRepo) ListActiveObservations(ctx context.Context, limit int) ([]entity.ActiveCallObservation, error) {
+	if limit <= 0 {
+		limit = defaultActiveObservationLimit
+	}
+	if limit > maxActiveObservationLimit {
+		limit = maxActiveObservationLimit
+	}
+
+	const query = `
+		SELECT
+			c.id,
+			c.workspace_id,
+			c.type,
+			c.status,
+			c.title,
+			COALESCE(c.started_at, c.created_at) AS started_at,
+			ch.name AS channel_name,
+			COALESCE(u.display_name, '') AS host_display_name,
+			COALESCE((c.settings->>'recording')::bool, false) AS recording,
+			COALESCE(NOT (c.settings->>'waiting_room')::bool, true) AS is_open,
+			COALESCE(pc.participant_count, 0) AS participant_count,
+			COALESCE(pc.observer_count, 0) AS observer_count
+		FROM calls c
+		LEFT JOIN channels ch ON ch.id = c.channel_id
+		LEFT JOIN users u ON u.id = c.created_by
+		LEFT JOIN LATERAL (
+			SELECT
+				COUNT(*) FILTER (WHERE cp.role <> 'viewer' AND cp.status = 'connected') AS participant_count,
+				COUNT(*) FILTER (WHERE cp.role = 'viewer' AND cp.status = 'connected') AS observer_count
+			FROM call_participants cp
+			WHERE cp.call_id = c.id
+		) pc ON TRUE
+		WHERE c.status <> 'ended'
+		ORDER BY c.started_at DESC NULLS LAST, c.created_at DESC
+		LIMIT $1`
+
+	rows, err := r.db.Query(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list active call observations: %w", err)
+	}
+	defer rows.Close()
+
+	observations := []entity.ActiveCallObservation{}
+	for rows.Next() {
+		var item entity.ActiveCallObservation
+		if err := rows.Scan(
+			&item.ID,
+			&item.WorkspaceID,
+			&item.Type,
+			&item.Status,
+			&item.Title,
+			&item.StartedAt,
+			&item.ChannelName,
+			&item.HostDisplayName,
+			&item.Recording,
+			&item.IsOpen,
+			&item.ParticipantCount,
+			&item.ObserverCount,
+		); err != nil {
+			return nil, fmt.Errorf("postgres: list active call observations scan: %w", err)
+		}
+		observations = append(observations, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list active call observations rows: %w", err)
+	}
+	return observations, nil
+}
 
 // topParticipantsLimit caps how many participant projections we send on the
 // Live Now card; the FE renders the rest as a "+N" pill in the avatar stack.

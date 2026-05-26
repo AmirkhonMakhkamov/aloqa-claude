@@ -25,6 +25,10 @@ type ConsumerLagProvider interface {
 	ListConsumerLag(ctx context.Context, limit int) ([]entity.EventConsumerLag, error)
 }
 
+type ActiveCallProvider interface {
+	ListActiveObservations(ctx context.Context, limit int) ([]entity.ActiveCallObservation, error)
+}
+
 type Config struct {
 	Namespace                   string
 	EventLagWarn                time.Duration
@@ -49,6 +53,7 @@ type Service struct {
 	realtime  QueueStatsProvider
 	search    QueueStatsProvider
 	consumers ConsumerLagProvider
+	calls     ActiveCallProvider
 	config    Config
 
 	mu sync.RWMutex
@@ -146,6 +151,10 @@ func (s *Service) SetRealtimeProvider(provider QueueStatsProvider, consumers Con
 
 func (s *Service) SetSearchProvider(provider QueueStatsProvider) {
 	s.search = provider
+}
+
+func (s *Service) SetActiveCallProvider(provider ActiveCallProvider) {
+	s.calls = provider
 }
 
 func (s *Service) RecordRealtimeBatch(processed, failed, dead int, duration time.Duration, err error) {
@@ -294,6 +303,14 @@ func (s *Service) Dashboard(ctx context.Context) (*entity.ObservabilityDashboard
 		}
 		consumers = items
 	}
+	activeCalls := []entity.ActiveCallObservation{}
+	if s.calls != nil {
+		items, err := s.calls.ListActiveObservations(ctx, 100)
+		if err != nil {
+			return nil, err
+		}
+		activeCalls = items
+	}
 
 	s.mu.RLock()
 	realtimeTotals := s.realtimeTotals
@@ -354,6 +371,7 @@ func (s *Service) Dashboard(ctx context.Context) (*entity.ObservabilityDashboard
 		RealtimeQueue: realtimeStats,
 		SearchQueue:   searchStats,
 		Consumers:     consumers,
+		ActiveCalls:   activeCalls,
 		WebSocket:     wsStats,
 		Recording:     recording,
 		Workers:       workers,
@@ -397,6 +415,18 @@ func (s *Service) Metrics(ctx context.Context) (string, error) {
 	writeGauge("call_quality_avg_packet_loss_pct", fmt.Sprintf("%.2f", dashboard.CallQuality.AvgPacketLossPct))
 	writeGauge("call_quality_avg_jitter_ms", fmt.Sprintf("%.2f", dashboard.CallQuality.AvgJitterMs))
 	writeGauge("call_quality_avg_rtt_ms", fmt.Sprintf("%.2f", dashboard.CallQuality.AvgRoundTripTimeMs))
+	writeGauge("active_calls_total", len(dashboard.ActiveCalls))
+	for _, call := range dashboard.ActiveCalls {
+		labels := activeCallMetricLabels(call)
+		durationSeconds := time.Since(call.StartedAt).Seconds()
+		if durationSeconds < 0 {
+			durationSeconds = 0
+		}
+		fmt.Fprintf(&b, "%s_active_call_info{%s} 1\n", ns, labels)
+		fmt.Fprintf(&b, "%s_active_call_participants{%s} %d\n", ns, labels, call.ParticipantCount)
+		fmt.Fprintf(&b, "%s_active_call_observers{%s} %d\n", ns, labels, call.ObserverCount)
+		fmt.Fprintf(&b, "%s_active_call_duration_seconds{%s} %.0f\n", ns, labels, durationSeconds)
+	}
 
 	writeGauge("realtime_queue_pending", dashboard.RealtimeQueue.Pending)
 	writeGauge("realtime_queue_processing", dashboard.RealtimeQueue.Processing)
@@ -412,6 +442,14 @@ func (s *Service) Metrics(ctx context.Context) (string, error) {
 	writeGauge("db_pool_utilization_pct", fmt.Sprintf("%.2f", dashboard.Storage.Postgres.AcquiredConnsPct))
 	writeGauge("db_pool_saturated", boolToInt(dashboard.Storage.Postgres.Saturated))
 	writeGauge("redis_pool_utilization_pct", fmt.Sprintf("%.2f", dashboard.Storage.Redis.UtilizationPct))
+	writeGauge("redis_pool_open_conns_pct", fmt.Sprintf("%.2f", dashboard.Storage.Redis.OpenConnsPct))
+	writeGauge("redis_pool_total_conns", dashboard.Storage.Redis.TotalConns)
+	writeGauge("redis_pool_active_conns", dashboard.Storage.Redis.ActiveConns)
+	writeGauge("redis_pool_idle_conns", dashboard.Storage.Redis.IdleConns)
+	writeGauge("redis_pool_stale_conns", dashboard.Storage.Redis.StaleConns)
+	writeGauge("redis_pool_hits_total", dashboard.Storage.Redis.Hits)
+	writeGauge("redis_pool_misses_total", dashboard.Storage.Redis.Misses)
+	writeGauge("redis_pool_timeouts_total", dashboard.Storage.Redis.Timeouts)
 	writeGauge("redis_pool_saturated", boolToInt(dashboard.Storage.Redis.Saturated))
 
 	writeGauge("ws_reconnect_total", dashboard.WebSocket.Reconnects)
@@ -765,6 +803,40 @@ func inverseThresholdStatus(current, target, warnFloor float64) entity.SLOStatus
 		return entity.SLOStatusWarning
 	}
 	return entity.SLOStatusHealthy
+}
+
+func activeCallMetricLabels(call entity.ActiveCallObservation) string {
+	return fmt.Sprintf(
+		`call_id="%s",workspace_id="%s",type="%s",status="%s",title="%s",channel_name="%s",host_display_name="%s",participants="%d",observers="%d",recording="%t",is_open="%t"`,
+		prometheusLabelValue(call.ID.String()),
+		prometheusLabelValue(call.WorkspaceID.String()),
+		prometheusLabelValue(string(call.Type)),
+		prometheusLabelValue(string(call.Status)),
+		prometheusLabelValue(optionalString(call.Title)),
+		prometheusLabelValue(optionalString(call.ChannelName)),
+		prometheusLabelValue(call.HostDisplayName),
+		call.ParticipantCount,
+		call.ObserverCount,
+		call.Recording,
+		call.IsOpen,
+	)
+}
+
+func optionalString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func prometheusLabelValue(value string) string {
+	value = strings.TrimSpace(value)
+	runes := []rune(value)
+	if len(runes) > 120 {
+		value = string(runes[:120])
+	}
+	replacer := strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\n", " ", "\r", " ")
+	return replacer.Replace(value)
 }
 
 func sanitizeMetricName(value string) string {

@@ -341,6 +341,7 @@ func run() error {
 	observabilitySvc.SetStorageProvider(storageOpsSvc)
 	observabilitySvc.SetRealtimeProvider(realtimeRepo, realtimeRepo)
 	observabilitySvc.SetSearchProvider(searchRepo)
+	observabilitySvc.SetActiveCallProvider(callRepo)
 	searchRepo.SetObserver(observabilitySvc)
 	realtimePublisher.SetObserver(observabilitySvc)
 	mediaOpsSvc.SetObserver(observabilitySvc)

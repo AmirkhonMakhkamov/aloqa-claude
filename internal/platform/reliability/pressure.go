@@ -35,12 +35,20 @@ func RedisPressure(stat *redis.PoolStats, poolSize int) Pressure {
 	}
 	size := float64(poolSize)
 	utilization := 0.0
-	if size > 0 {
-		utilization = float64(stat.TotalConns) / size
+	activeConns := stat.TotalConns
+	if activeConns >= stat.IdleConns {
+		activeConns -= stat.IdleConns
+	} else {
+		activeConns = 0
 	}
+	if size > 0 {
+		utilization = float64(activeConns) / size
+	}
+	// go-redis PoolStats.Timeouts is cumulative. Treating any historical
+	// timeout as current pressure would leave the runtime "saturated" forever.
 	return Pressure{
 		Utilization:   utilization,
-		Saturated:     stat.Timeouts > 0 || (size > 0 && utilization >= 0.9),
+		Saturated:     size > 0 && utilization >= 0.9,
 		QueuedWaiters: int64(stat.Timeouts),
 	}
 }

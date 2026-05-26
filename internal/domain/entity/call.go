@@ -106,6 +106,23 @@ type ActiveCallSummary struct {
 	ObserverCount    int              `json:"observer_count"`
 }
 
+// ActiveCallObservation is the cross-workspace projection exported to
+// observability systems for the staging calls dashboard.
+type ActiveCallObservation struct {
+	ID               uuid.UUID  `json:"id"`
+	WorkspaceID      uuid.UUID  `json:"workspace_id"`
+	Type             CallType   `json:"type"`
+	Status           CallStatus `json:"status"`
+	Title            *string    `json:"title"`
+	StartedAt        time.Time  `json:"started_at"`
+	ChannelName      *string    `json:"channel_name"`
+	HostDisplayName  string     `json:"host_display_name"`
+	Recording        bool       `json:"recording"`
+	IsOpen           bool       `json:"is_open"`
+	ParticipantCount int        `json:"participant_count"`
+	ObserverCount    int        `json:"observer_count"`
+}
+
 type Call struct {
 	ID              uuid.UUID     `json:"id"`
 	WorkspaceID     uuid.UUID     `json:"workspace_id"`

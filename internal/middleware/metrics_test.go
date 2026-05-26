@@ -3,6 +3,7 @@ package middleware
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -64,6 +65,40 @@ func TestRequestMetricsMiddleware(t *testing.T) {
 	}
 	if !strings.Contains(text, `app_http_requests_total{method="POST"} 1`) {
 		t.Errorf("expected POST counter of 1, got:\n%s", text)
+	}
+}
+
+func TestRequestMetricsCollectorHistogramBucketsAreMonotonic(t *testing.T) {
+	c := NewRequestMetricsCollector()
+	c.record("GET", http.StatusOK, 4*time.Millisecond)
+	c.record("GET", http.StatusOK, 2*time.Second)
+	c.record("GET", http.StatusOK, 6*time.Second)
+
+	text := c.PrometheusText("app")
+	var previous float64
+	for _, line := range strings.Split(text, "\n") {
+		if !strings.HasPrefix(line, `app_http_request_duration_seconds_bucket`) {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) != 2 {
+			t.Fatalf("expected metric and value, got %q", line)
+		}
+		value, err := strconv.ParseFloat(parts[1], 64)
+		if err != nil {
+			t.Fatalf("parse bucket value %q: %v", parts[1], err)
+		}
+		if value < previous {
+			t.Fatalf("histogram buckets must be monotonic, got %f after %f in:\n%s", value, previous, text)
+		}
+		previous = value
+	}
+
+	if !strings.Contains(text, `app_http_request_duration_seconds_bucket{le="0.005"} 1`) {
+		t.Fatalf("expected 5ms bucket to contain only the fastest request, got:\n%s", text)
+	}
+	if !strings.Contains(text, `app_http_request_duration_seconds_bucket{le="+Inf"} 3`) {
+		t.Fatalf("expected +Inf bucket to match total request count, got:\n%s", text)
 	}
 }
 

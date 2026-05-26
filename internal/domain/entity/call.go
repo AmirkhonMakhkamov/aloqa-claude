@@ -137,6 +137,13 @@ type CallParticipant struct {
 	LeftReason     ParticipantLeftReason `json:"left_reason,omitempty"`
 }
 
+type LiveKitWebhookEvent struct {
+	EventID    string    `json:"event_id"`
+	CallID     uuid.UUID `json:"call_id"`
+	EventType  string    `json:"event_type"`
+	ReceivedAt time.Time `json:"received_at"`
+}
+
 // --- Breakout Rooms ---
 
 type BreakoutRoomStatus string

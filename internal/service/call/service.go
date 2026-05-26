@@ -73,6 +73,11 @@ type callParticipantDisconnectRepository interface {
 	DisconnectParticipantIfConnectedWithReason(ctx context.Context, id uuid.UUID, reason entity.ParticipantLeftReason) (bool, error)
 }
 
+type liveKitWebhookRepository interface {
+	ClaimLiveKitWebhookEvent(ctx context.Context, event *entity.LiveKitWebhookEvent) (bool, error)
+	ReleaseLiveKitWebhookEvent(ctx context.Context, eventID string) error
+}
+
 type LeaveCallResult struct {
 	AlreadyLeft bool `json:"already_left"`
 }
@@ -93,7 +98,6 @@ type Service struct {
 	media         MediaConfig
 	livekit       LiveKitSettings
 	livekitRooms  LiveKitRoomClient
-	livekitDedupe *livekitWebhookDedupe
 	guests        *guestaccess.Checker
 	collab        CollaborationAccessAuthorizer
 	control       MediaControlPlane
@@ -146,7 +150,6 @@ func NewService(
 		pubsub:        pubsub,
 		sfu:           sfuServer,
 		media:         media,
-		livekitDedupe: newLiveKitWebhookDedupe(10 * time.Minute),
 		guests:        guests,
 		collab:        collab,
 	}

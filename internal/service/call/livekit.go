@@ -141,6 +141,19 @@ func (s *Service) EnsureLiveKitRoom(ctx context.Context, call *entity.Call) erro
 	})
 }
 
+func (s *Service) EnsureLiveKitRoomRequired(ctx context.Context, call *entity.Call) error {
+	if call == nil {
+		return cerrors.InvalidInput("call is required")
+	}
+	if !s.livekit.IsConfigured() {
+		return nil
+	}
+	if s.livekitRooms == nil {
+		return cerrors.Unavailable("livekit room service is not configured")
+	}
+	return s.EnsureLiveKitRoom(ctx, call)
+}
+
 func (s *Service) DeleteLiveKitRoom(ctx context.Context, callID uuid.UUID) error {
 	if !s.livekit.IsConfigured() || s.livekitRooms == nil {
 		return nil
@@ -260,15 +273,17 @@ func (s *Service) handleLiveKitRoomFinished(ctx context.Context, callID uuid.UUI
 		return nil
 	}
 
-	if err := s.calls.End(ctx, callID); err != nil {
+	if err := endCallWithReason(ctx, s.calls, callID, entity.CallEndReasonAllLeft); err != nil {
 		return cerrors.Internal("failed to mark call ended", err)
 	}
-	now := time.Now()
-	call.Status = entity.CallStatusEnded
-	call.EndedAt = &now
+	markCallEnded(call, entity.CallEndReasonAllLeft)
 
 	s.publishCallEvent(ctx, event.TypeCallEnded, call, call.CreatedBy)
+	s.closeAllBreakoutSFURooms(ctx, callID)
 	s.deleteLiveKitRoomBestEffort(ctx, callID)
+	if s.sfu != nil {
+		s.sfu.CloseRoom(callID.String())
+	}
 	slog.InfoContext(ctx, "livekit room_finished bridged", "call_id", callID)
 	return nil
 }
@@ -335,12 +350,10 @@ func (s *Service) handleLiveKitParticipantLeft(ctx context.Context, callID uuid.
 	}
 
 	if participant.Status != entity.ParticipantStatusDisconnected {
-		if err := s.calls.UpdateParticipantStatus(ctx, participant.ID, entity.ParticipantStatusDisconnected); err != nil {
+		if err := updateParticipantStatusWithReason(ctx, s.calls, participant.ID, entity.ParticipantStatusDisconnected, entity.ParticipantLeftReasonLeft); err != nil {
 			return cerrors.Internal("failed to mark participant disconnected", err)
 		}
-		now := time.Now()
-		participant.Status = entity.ParticipantStatusDisconnected
-		participant.LeftAt = &now
+		markParticipantDisconnected(participant, entity.ParticipantLeftReasonLeft)
 	}
 
 	call, err := s.calls.GetByID(ctx, callID)
@@ -356,14 +369,13 @@ func (s *Service) handleLiveKitParticipantLeft(ctx context.Context, callID uuid.
 	if err != nil {
 		return cerrors.Internal("failed to list participants for livekit participant_left", err)
 	}
-	if shouldEndCallAfterLiveKitLeft(call, participants) {
-		if err := s.calls.End(ctx, callID); err != nil {
+	if shouldAutoEndAfterLeave(call, participants) {
+		if err := endCallWithReason(ctx, s.calls, callID, entity.CallEndReasonAllLeft); err != nil {
 			return cerrors.Internal("failed to auto-end call for livekit participant_left", err)
 		}
-		now := time.Now()
-		call.Status = entity.CallStatusEnded
-		call.EndedAt = &now
+		markCallEnded(call, entity.CallEndReasonAllLeft)
 		s.publishCallEvent(ctx, event.TypeCallEnded, call, userID)
+		s.closeAllBreakoutSFURooms(ctx, callID)
 		s.deleteLiveKitRoomBestEffort(ctx, callID)
 		if s.sfu != nil {
 			s.sfu.CloseRoom(callID.String())
@@ -411,22 +423,6 @@ func (s *Service) handleLiveKitTrackChanged(ctx context.Context, callID uuid.UUI
 	s.publishParticipantEvent(ctx, event.TypeCallParticipantUpdated, call, participant)
 	slog.InfoContext(ctx, "livekit screen-share track bridged", "call_id", callID, "user_id", userID, "screen_sharing", screenSharing)
 	return nil
-}
-
-func shouldEndCallAfterLiveKitLeft(call *entity.Call, participants []entity.CallParticipant) bool {
-	if call == nil || call.Status == entity.CallStatusEnded {
-		return false
-	}
-	activeCount := 0
-	for _, participant := range participants {
-		if participant.Status == entity.ParticipantStatusConnected || participant.Status == entity.ParticipantStatusJoining {
-			activeCount++
-		}
-	}
-	if call.Type == entity.CallTypeOneToOne {
-		return activeCount < 2
-	}
-	return activeCount == 0
 }
 
 func isNotFound(err error) bool {

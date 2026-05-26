@@ -577,6 +577,154 @@ func TestLiveKitParticipantJoinedDoesNotAdmitWaitingParticipant(t *testing.T) {
 	}
 }
 
+func TestStartCallRequiresLiveKitRoomBeforePersist(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	userID := uuid.New()
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	calls := &fakeCallRepo{calls: map[uuid.UUID]*entity.Call{}, participants: map[[2]uuid.UUID]*entity.CallParticipant{}}
+	roomClient := &fakeLiveKitRoomClient{ensureErr: cerrors.Unavailable("livekit unavailable")}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+	svc.SetLiveKit(LiveKitSettings{URL: "https://livekit.example.com", APIKey: "key", APISecret: "secret", TokenTTL: time.Minute})
+	svc.SetLiveKitRoomClient(roomClient)
+
+	callEntity, err := svc.StartCall(ctx, workspaceID, userID, entity.CallTypeOneToOne, "dm", nil, entity.CallSettings{})
+	if !hasCode(err, cerrors.CodeUnavailable) {
+		t.Fatalf("StartCall error = %v, want UNAVAILABLE", err)
+	}
+	if callEntity != nil {
+		t.Fatalf("StartCall returned call despite LiveKit failure: %+v", callEntity)
+	}
+	if roomClient.ensureCalls != 1 {
+		t.Fatalf("EnsureRoom calls = %d, want 1", roomClient.ensureCalls)
+	}
+	if len(calls.calls) != 0 {
+		t.Fatalf("calls persisted after LiveKit failure = %d, want 0", len(calls.calls))
+	}
+}
+
+func TestJoinCallRequiresLiveKitRoomBeforeParticipantInsert(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	userID := uuid.New()
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeGroup, Status: entity.CallStatusActive},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: {ID: uuid.New(), CallID: callID, UserID: hostID, Role: entity.CallRoleHost, Status: entity.ParticipantStatusConnected},
+		},
+	}
+	roomClient := &fakeLiveKitRoomClient{ensureErr: cerrors.Unavailable("livekit unavailable")}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+	svc.SetLiveKit(LiveKitSettings{URL: "https://livekit.example.com", APIKey: "key", APISecret: "secret", TokenTTL: time.Minute})
+	svc.SetLiveKitRoomClient(roomClient)
+
+	participant, err := svc.JoinCall(ctx, workspaceID, callID, userID)
+	if !hasCode(err, cerrors.CodeUnavailable) {
+		t.Fatalf("JoinCall error = %v, want UNAVAILABLE", err)
+	}
+	if participant != nil {
+		t.Fatalf("JoinCall returned participant despite LiveKit failure: %+v", participant)
+	}
+	if roomClient.ensureCalls != 1 {
+		t.Fatalf("EnsureRoom calls = %d, want 1", roomClient.ensureCalls)
+	}
+	if _, ok := calls.participants[[2]uuid.UUID{callID, userID}]; ok {
+		t.Fatalf("participant was inserted after LiveKit failure")
+	}
+}
+
+func TestLeaveCallIsIdempotentAndAutoEndsOneToOne(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	userID := uuid.New()
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeOneToOne, Status: entity.CallStatusActive, CreatedBy: hostID},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: {ID: uuid.New(), CallID: callID, UserID: hostID, Role: entity.CallRoleHost, Status: entity.ParticipantStatusConnected},
+			{callID, userID}: {ID: uuid.New(), CallID: callID, UserID: userID, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected},
+		},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	result, err := svc.LeaveCall(ctx, workspaceID, callID, userID)
+	if err != nil {
+		t.Fatalf("LeaveCall returned error: %v", err)
+	}
+	if result == nil || result.AlreadyLeft {
+		t.Fatalf("LeaveCall result = %+v, want not already left", result)
+	}
+	participant := calls.participants[[2]uuid.UUID{callID, userID}]
+	if participant.Status != entity.ParticipantStatusDisconnected || participant.LeftReason != entity.ParticipantLeftReasonLeft {
+		t.Fatalf("participant lifecycle = status %q reason %q, want disconnected/left", participant.Status, participant.LeftReason)
+	}
+	callEntity := calls.calls[callID]
+	if callEntity.Status != entity.CallStatusEnded || callEntity.EndReason != entity.CallEndReasonAllLeft {
+		t.Fatalf("call lifecycle = status %q reason %q, want ended/all_left", callEntity.Status, callEntity.EndReason)
+	}
+
+	second, err := svc.LeaveCall(ctx, workspaceID, callID, userID)
+	if err != nil {
+		t.Fatalf("second LeaveCall returned error: %v", err)
+	}
+	if second == nil || !second.AlreadyLeft {
+		t.Fatalf("second LeaveCall result = %+v, want already left", second)
+	}
+}
+
+func TestCancelCallEndsRingingByCreator(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	userID := uuid.New()
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeOneToOne, Status: entity.CallStatusRinging, CreatedBy: userID},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, userID}: {ID: uuid.New(), CallID: callID, UserID: userID, Role: entity.CallRoleHost, Status: entity.ParticipantStatusConnected},
+		},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	result, err := svc.CancelCall(ctx, workspaceID, callID, userID)
+	if err != nil {
+		t.Fatalf("CancelCall returned error: %v", err)
+	}
+	if result == nil || !result.Ended {
+		t.Fatalf("CancelCall result = %+v, want ended", result)
+	}
+	if callEntity := calls.calls[callID]; callEntity.Status != entity.CallStatusEnded || callEntity.EndReason != entity.CallEndReasonCancelled {
+		t.Fatalf("call lifecycle = status %q reason %q, want ended/cancelled", callEntity.Status, callEntity.EndReason)
+	}
+
+	second, err := svc.CancelCall(ctx, workspaceID, callID, userID)
+	if err != nil {
+		t.Fatalf("second CancelCall returned error: %v", err)
+	}
+	if second == nil || second.Ended {
+		t.Fatalf("second CancelCall result = %+v, want not ended", second)
+	}
+}
+
 func TestIssueLiveKitJoinInfoUsesParticipantRoleForPublishGrant(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()

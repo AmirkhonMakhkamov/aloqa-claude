@@ -325,6 +325,7 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 			r.Get("/", deps.Calls.Get)
 			r.Post("/join", deps.Calls.Join)
 			r.Post("/leave", deps.Calls.Leave)
+			r.Post("/cancel", deps.Calls.Cancel)
 			r.Post("/end", deps.Calls.End)
 			r.Post("/hand", deps.Calls.RaiseHand)
 			r.Delete("/hand", deps.Calls.LowerHand)

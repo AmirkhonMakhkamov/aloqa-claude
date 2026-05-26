@@ -34,6 +34,20 @@ func (r *CallRepo) withTx(tx pgx.Tx) *CallRepo {
 	return &CallRepo{pool: r.pool, db: tx}
 }
 
+func nullableCallEndReason(reason entity.CallEndReason) any {
+	if reason == "" {
+		return nil
+	}
+	return string(reason)
+}
+
+func nullableParticipantLeftReason(reason entity.ParticipantLeftReason) any {
+	if reason == "" {
+		return nil
+	}
+	return string(reason)
+}
+
 func (r *CallRepo) Create(ctx context.Context, call *entity.Call) error {
 	settingsJSON, err := json.Marshal(call.Settings)
 	if err != nil {
@@ -41,8 +55,8 @@ func (r *CallRepo) Create(ctx context.Context, call *entity.Call) error {
 	}
 
 	query := `
-		INSERT INTO calls (id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`
+		INSERT INTO calls (id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, end_reason, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`
 
 	_, err = r.db.Exec(ctx, query,
 		call.ID,
@@ -56,6 +70,7 @@ func (r *CallRepo) Create(ctx context.Context, call *entity.Call) error {
 		settingsJSON,
 		call.StartedAt,
 		call.EndedAt,
+		nullableCallEndReason(call.EndReason),
 		call.CreatedAt,
 	)
 	if err != nil {
@@ -67,7 +82,7 @@ func (r *CallRepo) Create(ctx context.Context, call *entity.Call) error {
 
 func (r *CallRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Call, error) {
 	query := `
-		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, created_at
+		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), created_at
 		FROM calls
 		WHERE id = $1`
 
@@ -86,6 +101,7 @@ func (r *CallRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Call, err
 		&settingsJSON,
 		&call.StartedAt,
 		&call.EndedAt,
+		&call.EndReason,
 		&call.CreatedAt,
 	)
 	if err != nil {
@@ -104,7 +120,7 @@ func (r *CallRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Call, err
 
 func (r *CallRepo) ListActiveByWorkspace(ctx context.Context, workspaceID uuid.UUID) ([]entity.Call, error) {
 	query := `
-		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, created_at
+		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), created_at
 		FROM calls
 		WHERE workspace_id = $1 AND status != 'ended'
 		ORDER BY created_at DESC`
@@ -132,6 +148,7 @@ func (r *CallRepo) ListActiveByWorkspace(ctx context.Context, workspaceID uuid.U
 			&settingsJSON,
 			&call.StartedAt,
 			&call.EndedAt,
+			&call.EndReason,
 			&call.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("postgres: list active calls scan: %w", err)
@@ -287,7 +304,7 @@ func (r *CallRepo) ListRecentByWorkspace(ctx context.Context, workspaceID uuid.U
 	}
 
 	query := `
-		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, created_at
+		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), created_at
 		FROM calls
 		WHERE workspace_id = $1`
 	args := []any{workspaceID}
@@ -323,6 +340,7 @@ func (r *CallRepo) ListRecentByWorkspace(ctx context.Context, workspaceID uuid.U
 			&settingsJSON,
 			&call.StartedAt,
 			&call.EndedAt,
+			&call.EndReason,
 			&call.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("postgres: list recent calls scan: %w", err)
@@ -356,13 +374,19 @@ func (r *CallRepo) UpdateStatus(ctx context.Context, id uuid.UUID, status entity
 }
 
 func (r *CallRepo) End(ctx context.Context, id uuid.UUID) error {
+	return r.EndWithReason(ctx, id, "")
+}
+
+func (r *CallRepo) EndWithReason(ctx context.Context, id uuid.UUID, reason entity.CallEndReason) error {
 	now := time.Now().UTC()
 	query := `
 		UPDATE calls
-		SET status = 'ended', ended_at = $2
+		SET status = 'ended',
+		    ended_at = COALESCE(ended_at, $2),
+		    end_reason = COALESCE($3, end_reason)
 		WHERE id = $1`
 
-	tag, err := r.db.Exec(ctx, query, id, now)
+	tag, err := r.db.Exec(ctx, query, id, now, nullableCallEndReason(reason))
 	if err != nil {
 		return fmt.Errorf("postgres: end call: %w", err)
 	}
@@ -377,8 +401,8 @@ func (r *CallRepo) End(ctx context.Context, id uuid.UUID) error {
 
 func (r *CallRepo) AddParticipant(ctx context.Context, p *entity.CallParticipant) error {
 	query := `
-		INSERT INTO call_participants (id, call_id, user_id, role, status, audio_muted, video_muted, screen_sharing, joined_at, left_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
+		INSERT INTO call_participants (id, call_id, user_id, role, status, audio_muted, video_muted, screen_sharing, joined_at, left_at, left_reason)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
 
 	_, err := r.db.Exec(ctx, query,
 		p.ID,
@@ -391,6 +415,7 @@ func (r *CallRepo) AddParticipant(ctx context.Context, p *entity.CallParticipant
 		p.ScreenSharing,
 		p.JoinedAt,
 		p.LeftAt,
+		nullableParticipantLeftReason(p.LeftReason),
 	)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -408,17 +433,17 @@ func (r *CallRepo) AddParticipantIfCapacity(ctx context.Context, p *entity.CallP
 	// count within the same statement, eliminating the TOCTOU race between
 	// checking capacity and inserting.
 	query := `
-		INSERT INTO call_participants (id, call_id, user_id, role, status, audio_muted, video_muted, screen_sharing, joined_at, left_at)
-		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+		INSERT INTO call_participants (id, call_id, user_id, role, status, audio_muted, video_muted, screen_sharing, joined_at, left_at, left_reason)
+		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
 		WHERE (
 			SELECT COUNT(*) FROM call_participants
-			WHERE call_id = $2 AND status IN ('active', 'reconnecting')
-		) < $11`
+			WHERE call_id = $2 AND status IN ('connected', 'joining')
+		) < $12`
 
 	tag, err := r.db.Exec(ctx, query,
 		p.ID, p.CallID, p.UserID, p.Role, p.Status,
 		p.AudioMuted, p.VideoMuted, p.ScreenSharing,
-		p.JoinedAt, p.LeftAt, maxParticipants,
+		p.JoinedAt, p.LeftAt, nullableParticipantLeftReason(p.LeftReason), maxParticipants,
 	)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -435,7 +460,7 @@ func (r *CallRepo) AddParticipantIfCapacity(ctx context.Context, p *entity.CallP
 
 func (r *CallRepo) GetParticipant(ctx context.Context, callID, userID uuid.UUID) (*entity.CallParticipant, error) {
 	query := `
-		SELECT id, call_id, user_id, breakout_room_id, role, status, audio_muted, video_muted, screen_sharing, joined_at, left_at
+		SELECT id, call_id, user_id, breakout_room_id, role, status, audio_muted, video_muted, screen_sharing, joined_at, left_at, COALESCE(left_reason, '')
 		FROM call_participants
 		WHERE call_id = $1 AND user_id = $2`
 
@@ -452,6 +477,7 @@ func (r *CallRepo) GetParticipant(ctx context.Context, callID, userID uuid.UUID)
 		&p.ScreenSharing,
 		&p.JoinedAt,
 		&p.LeftAt,
+		&p.LeftReason,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -465,7 +491,7 @@ func (r *CallRepo) GetParticipant(ctx context.Context, callID, userID uuid.UUID)
 
 func (r *CallRepo) ListParticipants(ctx context.Context, callID uuid.UUID) ([]entity.CallParticipant, error) {
 	query := `
-		SELECT id, call_id, user_id, breakout_room_id, role, status, audio_muted, video_muted, screen_sharing, joined_at, left_at
+		SELECT id, call_id, user_id, breakout_room_id, role, status, audio_muted, video_muted, screen_sharing, joined_at, left_at, COALESCE(left_reason, '')
 		FROM call_participants
 		WHERE call_id = $1
 		ORDER BY joined_at`
@@ -491,6 +517,7 @@ func (r *CallRepo) ListParticipants(ctx context.Context, callID uuid.UUID) ([]en
 			&p.ScreenSharing,
 			&p.JoinedAt,
 			&p.LeftAt,
+			&p.LeftReason,
 		); err != nil {
 			return nil, fmt.Errorf("postgres: list call participants scan: %w", err)
 		}
@@ -504,12 +531,31 @@ func (r *CallRepo) ListParticipants(ctx context.Context, callID uuid.UUID) ([]en
 }
 
 func (r *CallRepo) UpdateParticipantStatus(ctx context.Context, id uuid.UUID, status entity.ParticipantStatus) error {
+	return r.UpdateParticipantStatusWithReason(ctx, id, status, "")
+}
+
+func (r *CallRepo) UpdateParticipantStatusWithReason(ctx context.Context, id uuid.UUID, status entity.ParticipantStatus, leftReason entity.ParticipantLeftReason) error {
+	now := time.Now().UTC()
 	query := `
 		UPDATE call_participants
-		SET status = $2
+		SET status = $2,
+		    joined_at = CASE
+		        WHEN $2 = 'connected' AND joined_at IS NULL THEN $3
+		        ELSE joined_at
+		    END,
+		    left_at = CASE
+		        WHEN $2 = 'disconnected' AND left_at IS NULL THEN $3
+		        WHEN $2 = 'connected' THEN NULL
+		        ELSE left_at
+		    END,
+		    left_reason = CASE
+		        WHEN $2 = 'disconnected' THEN $4
+		        WHEN $2 = 'connected' THEN NULL
+		        ELSE left_reason
+		    END
 		WHERE id = $1`
 
-	tag, err := r.db.Exec(ctx, query, id, status)
+	tag, err := r.db.Exec(ctx, query, id, status, now, nullableParticipantLeftReason(leftReason))
 	if err != nil {
 		return fmt.Errorf("postgres: update participant status: %w", err)
 	}

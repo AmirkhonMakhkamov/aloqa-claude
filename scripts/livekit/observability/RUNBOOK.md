@@ -49,7 +49,7 @@ queries:
 
 ```bash
 scripts/livekit/observability/scripts/generate-metrics-inventory.sh
-scripts/livekit/observability/scripts/validate-dashboard.py
+(cd scripts/livekit/observability && scripts/validate-dashboard.py)
 ```
 
 Generated files live under `.state/` and are intentionally ignored by Git.
@@ -79,11 +79,11 @@ offline and is validated against the captured metric inventory.
 
 ## Troubleshooting
 
-| Symptom | Check | Likely Cause | Fix |
-|---|---|---|---|
-| Prometheus target is down | `status.sh --json` | LiveKit was started before `prometheus_port: 6789` existed or the SFU is not running | Recreate the SFU with `docker compose -f scripts/livekit/docker-compose.dev.yml up -d --force-recreate livekit-server` |
-| `LIVEKIT_NETWORK` not found | `docker network ls` | The SFU compose project name differs from the default repo name | Export `LIVEKIT_PROJECT` and `LIVEKIT_NETWORK` |
-| Grafana says datasource missing | Grafana `Connections` page | Provisioning did not reload after file edits | Run `down.sh`, then `up.sh` |
-| Fallback dashboard has blank LiveKit panels | Prometheus query tab | LiveKit did not emit room or participant series until a room exists | Run `lk-runbook.sh publish-test <room>` or start a browser call |
-| Webhook delivery is unclear | `lk-runbook.sh webhook-tail` | aloqa-claude is not listening on `0.0.0.0:8090` | Start the backend or update `scripts/livekit/livekit.yaml` webhook URL |
-| TURN or ICE failures | LiveKit logs and browser WebRTC internals | Local host candidates differ by OS and Docker backend | Capture `chrome://webrtc-internals` plus Grafana CPU/memory and LiveKit logs |
+| Symptom                                     | Check                                     | Likely Cause                                                                         | Fix                                                                                                                    |
+| ------------------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
+| Prometheus target is down                   | `status.sh --json`                        | LiveKit was started before `prometheus_port: 6789` existed or the SFU is not running | Recreate the SFU with `docker compose -f scripts/livekit/docker-compose.dev.yml up -d --force-recreate livekit-server` |
+| `LIVEKIT_NETWORK` not found                 | `docker network ls`                       | The SFU compose project name differs from the default repo name                      | Export `LIVEKIT_PROJECT` and `LIVEKIT_NETWORK`                                                                         |
+| Grafana says datasource missing             | Grafana `Connections` page                | Provisioning did not reload after file edits                                         | Run `down.sh`, then `up.sh`                                                                                            |
+| Fallback dashboard has blank LiveKit panels | Prometheus query tab                      | LiveKit did not emit room or participant series until a room exists                  | Run `lk-runbook.sh publish-test <room>` or start a browser call                                                        |
+| Webhook delivery is unclear                 | `lk-runbook.sh webhook-tail`              | aloqa-claude is not listening on `0.0.0.0:8090`                                      | Start the backend or update `scripts/livekit/livekit.yaml` webhook URL                                                 |
+| TURN or ICE failures                        | LiveKit logs and browser WebRTC internals | Local host candidates differ by OS and Docker backend                                | Capture `chrome://webrtc-internals` plus Grafana CPU/memory and LiveKit logs                                           |

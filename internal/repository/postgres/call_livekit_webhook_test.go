@@ -32,6 +32,7 @@ func TestCallRepoClaimLiveKitWebhookEventIsDurable(t *testing.T) {
 	event := &entity.LiveKitWebhookEvent{
 		EventID:    eventID,
 		CallID:     uuid.New(),
+		ClaimToken: "first-claim",
 		EventType:  "participant_left",
 		ReceivedAt: time.Now().UTC(),
 	}
@@ -53,8 +54,19 @@ func TestCallRepoClaimLiveKitWebhookEventIsDurable(t *testing.T) {
 		t.Fatalf("second ClaimLiveKitWebhookEvent claimed = %q, want %q", claimed, entity.LiveKitWebhookClaimInProgress)
 	}
 
-	if err := repo.MarkLiveKitWebhookEventProcessed(ctx, eventID); err != nil {
+	marked, err := repo.MarkLiveKitWebhookEventProcessed(ctx, eventID, "wrong-claim")
+	if err != nil {
+		t.Fatalf("MarkLiveKitWebhookEventProcessed with wrong claim returned error: %v", err)
+	}
+	if marked {
+		t.Fatalf("MarkLiveKitWebhookEventProcessed with wrong claim marked row")
+	}
+	marked, err = repo.MarkLiveKitWebhookEventProcessed(ctx, eventID, "first-claim")
+	if err != nil {
 		t.Fatalf("MarkLiveKitWebhookEventProcessed returned error: %v", err)
+	}
+	if !marked {
+		t.Fatalf("MarkLiveKitWebhookEventProcessed did not mark current claim")
 	}
 	claimed, err = secondRepo.ClaimLiveKitWebhookEvent(ctx, event)
 	if err != nil {

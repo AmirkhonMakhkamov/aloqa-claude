@@ -577,6 +577,30 @@ func TestLiveKitParticipantJoinedDoesNotAdmitWaitingParticipant(t *testing.T) {
 	}
 }
 
+func TestLiveKitParticipantJoinedDoesNotRepublishAlreadyActiveParticipant(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	userID := uuid.New()
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive, CreatedBy: uuid.New()},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, userID}: {ID: uuid.New(), CallID: callID, UserID: userID, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected},
+		},
+	}
+	pub := &capturingPublisher{}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+
+	if err := svc.handleLiveKitParticipantJoined(ctx, callID, &livekitpb.ParticipantInfo{Identity: userID.String()}); err != nil {
+		t.Fatalf("handleLiveKitParticipantJoined returned error: %v", err)
+	}
+	if got := len(pub.captures); got != 0 {
+		t.Fatalf("publish count = %d, want 0 for duplicate participant_joined", got)
+	}
+}
+
 func TestLiveKitWebhookDedupesParticipantLeftAcrossServiceInstances(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -686,6 +710,31 @@ func TestLiveKitWebhookInProgressDuplicateReturnsRetryableConflict(t *testing.T)
 	}
 }
 
+func TestLiveKitWebhookSupersededClaimDoesNotMarkProcessed(t *testing.T) {
+	ctx := context.Background()
+	callID := uuid.New()
+	eventID := uuid.New().String()
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {ID: callID, WorkspaceID: uuid.New(), Type: entity.CallTypeMeeting, Status: entity.CallStatusActive, CreatedBy: uuid.New()},
+		},
+		liveKitWebhookEvents: map[string]*entity.LiveKitWebhookEvent{},
+		markLiveKitWebhookBeforeProcessed: func(event *entity.LiveKitWebhookEvent) {
+			event.ClaimToken = "newer-claim"
+		},
+	}
+	pub := &capturingPublisher{}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+
+	err := svc.HandleLiveKitWebhook(ctx, liveKitWebhookEvent(eventID, "room_finished", callID, uuid.Nil))
+	if !hasCode(err, cerrors.CodeConflict) {
+		t.Fatalf("HandleLiveKitWebhook superseded claim error = %v, want CONFLICT", err)
+	}
+	if calls.liveKitWebhookEvents[eventID].Status != "processing" {
+		t.Fatalf("event status = %q, want processing", calls.liveKitWebhookEvents[eventID].Status)
+	}
+}
+
 func TestLiveKitWebhookIgnoresParticipantLeftAfterRoomFinished(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -714,6 +763,27 @@ func TestLiveKitWebhookIgnoresParticipantLeftAfterRoomFinished(t *testing.T) {
 	}
 	if calls.participants[[2]uuid.UUID{callID, userID}].Status != entity.ParticipantStatusConnected {
 		t.Fatalf("participant status changed after ended call")
+	}
+}
+
+func TestLiveKitTrackChangedDoesNotPublishWhenScreenShareStateAlreadyMatches(t *testing.T) {
+	ctx := context.Background()
+	callID := uuid.New()
+	userID := uuid.New()
+	calls := &fakeCallRepo{
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, userID}: {ID: uuid.New(), CallID: callID, UserID: userID, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected, ScreenSharing: true},
+		},
+	}
+	pub := &capturingPublisher{}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+
+	err := svc.handleLiveKitTrackChanged(ctx, callID, &livekitpb.ParticipantInfo{Identity: userID.String()}, &livekitpb.TrackInfo{Source: livekitpb.TrackSource_SCREEN_SHARE}, true)
+	if err != nil {
+		t.Fatalf("handleLiveKitTrackChanged returned error: %v", err)
+	}
+	if got := len(pub.captures); got != 0 {
+		t.Fatalf("publish count = %d, want 0 for duplicate track event", got)
 	}
 }
 
@@ -1444,12 +1514,13 @@ func (r *fakeChannelRepo) GetDMChannel(context.Context, uuid.UUID, uuid.UUID, uu
 }
 
 type fakeCallRepo struct {
-	calls                       map[uuid.UUID]*entity.Call
-	participants                map[[2]uuid.UUID]*entity.CallParticipant
-	liveKitWebhookEvents        map[string]*entity.LiveKitWebhookEvent
-	liveKitWebhookClaimAttempts map[string]int
-	cancelBeforeUpdate          func(call *entity.Call)
-	disconnectBeforeUpdate      func(participant *entity.CallParticipant)
+	calls                             map[uuid.UUID]*entity.Call
+	participants                      map[[2]uuid.UUID]*entity.CallParticipant
+	liveKitWebhookEvents              map[string]*entity.LiveKitWebhookEvent
+	liveKitWebhookClaimAttempts       map[string]int
+	markLiveKitWebhookBeforeProcessed func(event *entity.LiveKitWebhookEvent)
+	cancelBeforeUpdate                func(call *entity.Call)
+	disconnectBeforeUpdate            func(participant *entity.CallParticipant)
 }
 
 func liveKitWebhookEvent(eventID, eventType string, callID, userID uuid.UUID) *livekitpb.WebhookEvent {
@@ -1521,16 +1592,22 @@ func (r *fakeCallRepo) ClaimLiveKitWebhookEvent(_ context.Context, event *entity
 	r.liveKitWebhookEvents[event.EventID] = event
 	return entity.LiveKitWebhookClaimProcess, nil
 }
-func (r *fakeCallRepo) MarkLiveKitWebhookEventProcessed(_ context.Context, eventID string) error {
+func (r *fakeCallRepo) MarkLiveKitWebhookEventProcessed(_ context.Context, eventID, claimToken string) (bool, error) {
 	event := r.liveKitWebhookEvents[eventID]
 	if event == nil {
-		return nil
+		return true, nil
+	}
+	if r.markLiveKitWebhookBeforeProcessed != nil {
+		r.markLiveKitWebhookBeforeProcessed(event)
+	}
+	if event.ClaimToken != claimToken {
+		return false, nil
 	}
 	now := time.Now().UTC()
 	event.Status = "processed"
 	event.ProcessedAt = &now
 	event.LeaseExpiresAt = nil
-	return nil
+	return true, nil
 }
 func (r *fakeCallRepo) EndWithReason(_ context.Context, id uuid.UUID, reason entity.CallEndReason) error {
 	_, err := r.EndWithReasonIfNotEnded(context.Background(), id, reason)

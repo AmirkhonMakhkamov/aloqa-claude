@@ -7,6 +7,7 @@ import (
 	"github.com/livekit/protocol/auth"
 	"github.com/livekit/protocol/webhook"
 
+	"aloqa/internal/pkg/cerrors"
 	"aloqa/internal/service/call"
 )
 
@@ -46,6 +47,10 @@ func (h *LiveKitWebhookHandler) Webhook(w http.ResponseWriter, r *http.Request) 
 
 	if err := h.svc.HandleLiveKitWebhook(r.Context(), ev); err != nil {
 		slog.ErrorContext(r.Context(), "failed to process livekit webhook", "event", ev.GetEvent(), "id", ev.GetId(), "error", err)
+		if appErr, ok := cerrors.AsAppError(err); ok {
+			http.Error(w, "failed to process webhook", appErr.HTTPStatus())
+			return
+		}
 		http.Error(w, "failed to process webhook", http.StatusInternalServerError)
 		return
 	}

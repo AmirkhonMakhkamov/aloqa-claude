@@ -142,6 +142,7 @@ type LiveKitWebhookEvent struct {
 	CallID         uuid.UUID  `json:"call_id"`
 	EventType      string     `json:"event_type"`
 	Status         string     `json:"status"`
+	ClaimToken     string     `json:"claim_token"`
 	ReceivedAt     time.Time  `json:"received_at"`
 	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
 	ProcessedAt    *time.Time `json:"processed_at,omitempty"`

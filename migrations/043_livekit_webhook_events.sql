@@ -8,6 +8,7 @@ CREATE TABLE call_livekit_webhook_events (
     call_id          uuid        NOT NULL,
     event_type       text        NOT NULL CHECK (event_type <> ''),
     status           text        NOT NULL CHECK (status IN ('processing', 'processed')),
+    claim_token      text        NOT NULL CHECK (claim_token <> ''),
     received_at      timestamptz NOT NULL DEFAULT now(),
     lease_expires_at timestamptz,
     processed_at     timestamptz

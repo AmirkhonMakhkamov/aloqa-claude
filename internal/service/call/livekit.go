@@ -206,7 +206,7 @@ func (s *Service) HandleLiveKitWebhook(ctx context.Context, ev *livekitpb.Webhoo
 		return nil
 	}
 
-	claim, err := s.claimLiveKitWebhookEvent(ctx, ev, callID)
+	claim, claimToken, err := s.claimLiveKitWebhookEvent(ctx, ev, callID)
 	if err != nil {
 		return cerrors.Internal("failed to claim livekit webhook event", err)
 	}
@@ -220,8 +220,8 @@ func (s *Service) HandleLiveKitWebhook(ctx context.Context, ev *livekitpb.Webhoo
 	if err := s.processLiveKitWebhook(ctx, ev, callID); err != nil {
 		return err
 	}
-	if err := s.markLiveKitWebhookEventProcessed(ctx, ev.GetId()); err != nil {
-		return cerrors.Internal("failed to mark livekit webhook processed", err)
+	if err := s.markLiveKitWebhookEventProcessed(ctx, ev.GetId(), claimToken); err != nil {
+		return err
 	}
 	return nil
 }
@@ -244,27 +244,30 @@ func (s *Service) processLiveKitWebhook(ctx context.Context, ev *livekitpb.Webho
 	}
 }
 
-func (s *Service) claimLiveKitWebhookEvent(ctx context.Context, ev *livekitpb.WebhookEvent, callID uuid.UUID) (entity.LiveKitWebhookClaimResult, error) {
+func (s *Service) claimLiveKitWebhookEvent(ctx context.Context, ev *livekitpb.WebhookEvent, callID uuid.UUID) (entity.LiveKitWebhookClaimResult, string, error) {
 	eventID := ev.GetId()
 	if eventID == "" {
-		return entity.LiveKitWebhookClaimProcess, nil
+		return entity.LiveKitWebhookClaimProcess, "", nil
 	}
 	webhookRepo, ok := s.calls.(liveKitWebhookRepository)
 	if !ok {
-		return entity.LiveKitWebhookClaimProcess, nil
+		return entity.LiveKitWebhookClaimProcess, "", nil
 	}
 	leaseExpiresAt := time.Now().Add(liveKitWebhookClaimLease).UTC()
-	return webhookRepo.ClaimLiveKitWebhookEvent(ctx, &entity.LiveKitWebhookEvent{
+	claimToken := uuid.NewString()
+	result, err := webhookRepo.ClaimLiveKitWebhookEvent(ctx, &entity.LiveKitWebhookEvent{
 		EventID:        eventID,
 		CallID:         callID,
 		EventType:      ev.GetEvent(),
 		Status:         "processing",
+		ClaimToken:     claimToken,
 		ReceivedAt:     time.Now().UTC(),
 		LeaseExpiresAt: &leaseExpiresAt,
 	})
+	return result, claimToken, err
 }
 
-func (s *Service) markLiveKitWebhookEventProcessed(ctx context.Context, eventID string) error {
+func (s *Service) markLiveKitWebhookEventProcessed(ctx context.Context, eventID, claimToken string) error {
 	if eventID == "" {
 		return nil
 	}
@@ -272,8 +275,12 @@ func (s *Service) markLiveKitWebhookEventProcessed(ctx context.Context, eventID 
 	if !ok {
 		return nil
 	}
-	if err := webhookRepo.MarkLiveKitWebhookEventProcessed(ctx, eventID); err != nil {
-		return err
+	marked, err := webhookRepo.MarkLiveKitWebhookEventProcessed(ctx, eventID, claimToken)
+	if err != nil {
+		return cerrors.Internal("failed to mark livekit webhook processed", err)
+	}
+	if !marked {
+		return cerrors.Conflict("livekit webhook event claim was superseded")
 	}
 	return nil
 }
@@ -344,6 +351,7 @@ func (s *Service) handleLiveKitParticipantJoined(ctx context.Context, callID uui
 	}
 
 	// Transition ringing → active when a non-caller joins (or any first join in a multi-party call).
+	activatedCall := false
 	if call.Status == entity.CallStatusRinging && userID != call.CreatedBy {
 		activated, err := activateRingingCall(ctx, s.calls, callID)
 		if err != nil {
@@ -353,9 +361,12 @@ func (s *Service) handleLiveKitParticipantJoined(ctx context.Context, callID uui
 			return nil
 		}
 		call.Status = entity.CallStatusActive
+		activatedCall = true
 	}
 
-	s.publishParticipantEvent(ctx, event.TypeCallParticipantJoined, call, participant)
+	if activatedCall {
+		s.publishParticipantEvent(ctx, event.TypeCallParticipantJoined, call, participant)
+	}
 	slog.InfoContext(ctx, "livekit participant_joined bridged", "call_id", callID, "user_id", userID)
 	return nil
 }
@@ -445,12 +456,13 @@ func (s *Service) handleLiveKitTrackChanged(ctx context.Context, callID uuid.UUI
 		}
 		return cerrors.Internal("failed to load participant for livekit track event", err)
 	}
-	if participant.ScreenSharing != screenSharing {
-		if err := s.calls.UpdateParticipantMedia(ctx, participant.ID, participant.AudioMuted, participant.VideoMuted, screenSharing); err != nil {
-			return cerrors.Internal("failed to update participant screen share from livekit", err)
-		}
-		participant.ScreenSharing = screenSharing
+	if participant.ScreenSharing == screenSharing {
+		return nil
 	}
+	if err := s.calls.UpdateParticipantMedia(ctx, participant.ID, participant.AudioMuted, participant.VideoMuted, screenSharing); err != nil {
+		return cerrors.Internal("failed to update participant screen share from livekit", err)
+	}
+	participant.ScreenSharing = screenSharing
 
 	call, err := s.calls.GetByID(ctx, callID)
 	if err != nil {

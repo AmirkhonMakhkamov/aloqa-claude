@@ -526,6 +526,7 @@ func TestLiveKitParticipantJoinedDoesNotAdmitWaitingParticipant(t *testing.T) {
 	userID := uuid.New()
 	participantID := uuid.New()
 	pub := &capturingPublisher{}
+	rooms := &fakeLiveKitRoomClient{}
 
 	calls := &fakeCallRepo{
 		calls: map[uuid.UUID]*entity.Call{
@@ -548,6 +549,12 @@ func TestLiveKitParticipantJoinedDoesNotAdmitWaitingParticipant(t *testing.T) {
 		},
 	}
 	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+	svc.SetLiveKit(LiveKitSettings{
+		URL:       "http://livekit.test",
+		APIKey:    "test-key",
+		APISecret: "test-secret",
+	})
+	svc.SetLiveKitRoomClient(rooms)
 
 	err := svc.handleLiveKitParticipantJoined(ctx, callID, &livekitpb.ParticipantInfo{
 		Identity: userID.String(),
@@ -561,6 +568,12 @@ func TestLiveKitParticipantJoinedDoesNotAdmitWaitingParticipant(t *testing.T) {
 	}
 	if pub.called {
 		t.Fatalf("waiting participant livekit join published %q; want no event", pub.subject)
+	}
+	if len(rooms.removedParticipants) != 1 {
+		t.Fatalf("removed participant calls = %d, want 1", len(rooms.removedParticipants))
+	}
+	if got := rooms.removedParticipants[0]; got.callID != callID || got.userID != userID {
+		t.Fatalf("removed participant = (%s, %s), want (%s, %s)", got.callID, got.userID, callID, userID)
 	}
 }
 
@@ -1008,6 +1021,31 @@ func (r *fakeCallRepo) UpdateParticipantMedia(context.Context, uuid.UUID, bool, 
 	return nil
 }
 func (r *fakeCallRepo) RemoveParticipant(context.Context, uuid.UUID, uuid.UUID) error { return nil }
+
+type removedLiveKitParticipant struct {
+	callID uuid.UUID
+	userID uuid.UUID
+}
+
+type fakeLiveKitRoomClient struct {
+	removedParticipants []removedLiveKitParticipant
+}
+
+func (c *fakeLiveKitRoomClient) EnsureRoom(context.Context, LiveKitEnsureRoomArgs) error {
+	return nil
+}
+
+func (c *fakeLiveKitRoomClient) DeleteRoom(context.Context, uuid.UUID) error {
+	return nil
+}
+
+func (c *fakeLiveKitRoomClient) RemoveParticipant(_ context.Context, callID, userID uuid.UUID) error {
+	c.removedParticipants = append(c.removedParticipants, removedLiveKitParticipant{
+		callID: callID,
+		userID: userID,
+	})
+	return nil
+}
 
 type fakeBreakoutRepo struct{}
 

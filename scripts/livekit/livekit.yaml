@@ -1,6 +1,9 @@
 port: 7880
 log_level: info
 
+# Dev-only metrics endpoint scraped by scripts/livekit/observability/prometheus/prometheus.yml.
+prometheus_port: 6789
+
 rtc:
   tcp_port: 7881
   port_range_start: 50000

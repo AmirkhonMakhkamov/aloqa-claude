@@ -39,3 +39,23 @@ on:
 ```bash
 docker compose -f scripts/livekit/docker-compose.dev.yml down
 ```
+
+## Observability
+
+The dev LiveKit config exposes Prometheus metrics on container port `6789`.
+Start Prometheus + Grafana after the SFU is running:
+
+```bash
+scripts/livekit/observability/scripts/up.sh
+```
+
+Prometheus is published at `http://localhost:9090`; Grafana is published at
+`http://localhost:3001` with the dev-only `admin` / `admin` login. The
+observability stop command removes only Prometheus and Grafana:
+
+```bash
+scripts/livekit/observability/scripts/down.sh
+```
+
+See `scripts/livekit/observability/RUNBOOK.md` for CLI probes, dashboard
+validation, and troubleshooting.

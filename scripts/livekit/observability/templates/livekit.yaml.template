@@ -1,0 +1,29 @@
+# Inventory-only LiveKit config rendered by scripts/generate-metrics-inventory.sh.
+# The dev stack config remains scripts/livekit/livekit.yaml.
+port: 7880
+bind_addresses:
+  - 0.0.0.0
+log_level: info
+prometheus_port: 6789
+
+rtc:
+  tcp_port: 7881
+  use_external_ip: false
+  use_ice_lite: true
+
+redis:
+  address: redis:6379
+
+room:
+  auto_create: true
+  enabled_codecs:
+    - mime: audio/opus
+    - mime: video/VP8
+    - mime: video/H264
+
+webhook:
+  api_key: ${LK_API_KEY}
+  urls: []
+
+keys:
+  ${LK_API_KEY}: ${LK_API_SECRET}

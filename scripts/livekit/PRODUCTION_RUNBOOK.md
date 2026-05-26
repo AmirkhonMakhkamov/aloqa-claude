@@ -148,8 +148,10 @@ also accepts `LIVEKIT_WEBHOOK_PREVIOUS_API_KEY` and
 Smoke checks:
 
 ```bash
+LIVEKIT_WEBHOOK_PATH="${LIVEKIT_WEBHOOK_PATH:-/livekit/webhook}"
+
 # Unsigned payload should not be accepted. In a configured environment expect 401.
-curl -i -X POST "https://api.<env>.aloqa.example/livekit/webhook" \
+curl -i -X POST "https://api.<env>.aloqa.example${LIVEKIT_WEBHOOK_PATH}" \
   -H "Content-Type: application/webhook+json" \
   --data '{}'
 
@@ -306,7 +308,9 @@ ALOQA_POSTGRES_TEST_DSN='postgres://aloqa:aloqa@127.0.0.1:5432/aloqa_test?sslmod
 3. Confirm unsigned webhook rejection:
 
    ```bash
-   curl -i -X POST "https://api.<env>.aloqa.example/livekit/webhook" \
+   LIVEKIT_WEBHOOK_PATH="${LIVEKIT_WEBHOOK_PATH:-/livekit/webhook}"
+
+   curl -i -X POST "https://api.<env>.aloqa.example${LIVEKIT_WEBHOOK_PATH}" \
      -H "Content-Type: application/webhook+json" \
      --data '{}'
    ```

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -12,6 +13,7 @@ import (
 	"github.com/twitchtv/twirp"
 
 	"aloqa/internal/domain/entity"
+	"aloqa/internal/pkg/cerrors"
 )
 
 const (
@@ -46,6 +48,27 @@ func newLiveKitRoomServiceClient(settings LiveKitSettings) LiveKitRoomClient {
 	}
 }
 
+// mapTwirpErrorToAppError converts a LiveKit RoomService twirp error into a
+// typed *cerrors.AppError so HTTP handlers and FE classifiers can distinguish
+// transient outage (503) from permanent misconfig (500) and bad input (400).
+func mapTwirpErrorToAppError(err error, defaultMsg string) error {
+	var twerr twirp.Error
+	if !errors.As(err, &twerr) {
+		return cerrors.Internal(defaultMsg, err)
+	}
+	msg := fmt.Sprintf("%s: %s (twirp:%s)", defaultMsg, twerr.Msg(), twerr.Code())
+	switch twerr.Code() {
+	case twirp.Unavailable, twirp.DeadlineExceeded:
+		return cerrors.Unavailable(msg)
+	case twirp.InvalidArgument:
+		return cerrors.InvalidInput(msg)
+	case twirp.Unauthenticated, twirp.PermissionDenied, twirp.Internal:
+		return cerrors.Internal(msg, err)
+	default:
+		return cerrors.Internal(msg, err)
+	}
+}
+
 func (c *liveKitRoomServiceClient) EnsureRoom(ctx context.Context, args LiveKitEnsureRoomArgs) error {
 	emptyTimeout := uint32(args.EmptyTimeout.Seconds())
 	if emptyTimeout == 0 {
@@ -62,14 +85,17 @@ func (c *liveKitRoomServiceClient) EnsureRoom(ctx context.Context, args LiveKitE
 		return nil
 	}
 	if !isTwirpCode(err, twirp.AlreadyExists) {
-		return err
+		return mapTwirpErrorToAppError(err, "failed to create livekit room")
 	}
 
 	_, updateErr := c.client.UpdateRoomMetadata(ctx, &livekitpb.UpdateRoomMetadataRequest{
 		Room:     args.CallID.String(),
 		Metadata: args.Metadata,
 	})
-	return updateErr
+	if updateErr != nil {
+		return mapTwirpErrorToAppError(updateErr, "failed to update livekit room metadata")
+	}
+	return nil
 }
 
 func (c *liveKitRoomServiceClient) DeleteRoom(ctx context.Context, callID uuid.UUID) error {
@@ -77,7 +103,10 @@ func (c *liveKitRoomServiceClient) DeleteRoom(ctx context.Context, callID uuid.U
 	if isTwirpCode(err, twirp.NotFound) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return mapTwirpErrorToAppError(err, "failed to delete livekit room")
+	}
+	return nil
 }
 
 func (c *liveKitRoomServiceClient) RemoveParticipant(ctx context.Context, callID, userID uuid.UUID) error {
@@ -88,7 +117,10 @@ func (c *liveKitRoomServiceClient) RemoveParticipant(ctx context.Context, callID
 	if isTwirpCode(err, twirp.NotFound) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return mapTwirpErrorToAppError(err, "failed to remove livekit participant")
+	}
+	return nil
 }
 
 func (c *liveKitRoomServiceClient) ListParticipants(ctx context.Context, callID uuid.UUID) ([]*livekitpb.ParticipantInfo, error) {
@@ -97,7 +129,7 @@ func (c *liveKitRoomServiceClient) ListParticipants(ctx context.Context, callID 
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, mapTwirpErrorToAppError(err, "failed to list livekit participants")
 	}
 	return resp.GetParticipants(), nil
 }

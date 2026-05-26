@@ -116,6 +116,9 @@ type WebRTCConfig struct {
 	CorrelationToleranceMs          float64
 	ServerDrivenEnabled             bool
 	ServerDrivenMinInterval         time.Duration
+	CallCleanupInterval             time.Duration
+	CallEmptyGrace                  time.Duration
+	CallCleanupBatchSize            int
 	AdaptiveLowLayerMinKbps         int
 	AdaptiveMediumLayerMinKbps      int
 	AdaptiveHighLayerMinKbps        int
@@ -372,6 +375,9 @@ func Load() (*Config, error) {
 			CorrelationToleranceMs:          envFloat("WEBRTC_QUALITY_CORRELATION_TOLERANCE_MS", 80),
 			ServerDrivenEnabled:             envBool("WEBRTC_SERVER_DRIVEN_ADAPTATION_ENABLED", true),
 			ServerDrivenMinInterval:         envDuration("WEBRTC_SERVER_DRIVEN_ADAPTATION_MIN_INTERVAL", 4*time.Second),
+			CallCleanupInterval:             envDuration("CALL_STALE_CLEANUP_INTERVAL", 30*time.Second),
+			CallEmptyGrace:                  envDuration("CALL_EMPTY_GRACE", 5*time.Minute),
+			CallCleanupBatchSize:            envInt("CALL_STALE_CLEANUP_BATCH_SIZE", 100),
 			AdaptiveLowLayerMinKbps:         envInt("WEBRTC_ADAPTIVE_LOW_LAYER_MIN_KBPS", 180),
 			AdaptiveMediumLayerMinKbps:      envInt("WEBRTC_ADAPTIVE_MEDIUM_LAYER_MIN_KBPS", 650),
 			AdaptiveHighLayerMinKbps:        envInt("WEBRTC_ADAPTIVE_HIGH_LAYER_MIN_KBPS", 1600),

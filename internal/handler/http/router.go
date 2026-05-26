@@ -115,7 +115,7 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 	// signature verification happens inside the handler via the SDK helper,
 	// so no global auth middleware applies.
 	if deps.LiveKit != nil {
-		r.Post("/livekit/webhook", deps.LiveKit.Webhook)
+		r.Post(deps.LiveKit.WebhookPath(), deps.LiveKit.Webhook)
 	}
 
 	// Authenticated routes.

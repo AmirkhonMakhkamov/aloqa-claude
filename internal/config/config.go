@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -28,12 +29,16 @@ type Config struct {
 
 // LiveKitConfig holds connection parameters for the LiveKit SFU.
 type LiveKitConfig struct {
-	URL         string        // wss://livekit.example.com (FE-facing signaling URL)
-	APIKey      string        // shared with the LiveKit server keys map
-	APISecret   string        // 32-byte hex secret
-	TokenTTL    time.Duration // access-token validity (default 6h)
-	WebhookPath string        // public path that LiveKit posts to (default /livekit/webhook)
+	URL                      string        // wss://livekit.example.com (FE-facing signaling URL)
+	APIKey                   string        // shared with the LiveKit server keys map
+	APISecret                string        // 32-byte hex secret
+	TokenTTL                 time.Duration // access-token validity (default 6h)
+	WebhookPath              string        // public path that LiveKit posts to (default /livekit/webhook)
+	WebhookPreviousAPIKey    string        // previous webhook signing key accepted during rotation
+	WebhookPreviousAPISecret string        // previous webhook signing secret accepted during rotation
 }
+
+const DefaultLiveKitWebhookPath = "/livekit/webhook"
 
 type ObservabilityConfig struct {
 	EventLagWarn                time.Duration
@@ -378,11 +383,13 @@ func Load() (*Config, error) {
 			AdaptiveEWMAAlpha:               envFloat("WEBRTC_ADAPTIVE_EWMA_ALPHA", 0.35),
 		},
 		LiveKit: LiveKitConfig{
-			URL:         env("LIVEKIT_URL", ""),
-			APIKey:      env("LIVEKIT_API_KEY", ""),
-			APISecret:   env("LIVEKIT_API_SECRET", ""),
-			TokenTTL:    envDuration("LIVEKIT_TOKEN_TTL", 6*time.Hour),
-			WebhookPath: env("LIVEKIT_WEBHOOK_PATH", "/livekit/webhook"),
+			URL:                      env("LIVEKIT_URL", ""),
+			APIKey:                   env("LIVEKIT_API_KEY", ""),
+			APISecret:                env("LIVEKIT_API_SECRET", ""),
+			TokenTTL:                 envDuration("LIVEKIT_TOKEN_TTL", 6*time.Hour),
+			WebhookPath:              env("LIVEKIT_WEBHOOK_PATH", DefaultLiveKitWebhookPath),
+			WebhookPreviousAPIKey:    env("LIVEKIT_WEBHOOK_PREVIOUS_API_KEY", ""),
+			WebhookPreviousAPISecret: env("LIVEKIT_WEBHOOK_PREVIOUS_API_SECRET", ""),
 		},
 		Search: SearchConfig{
 			TextConfig:     env("SEARCH_TEXT_CONFIG", "simple"),
@@ -444,6 +451,15 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("JWT_SECRET must be at least 64 characters for HS256")
 	}
 
+	webhookPath, err := NormalizeLiveKitWebhookPath(cfg.LiveKit.WebhookPath)
+	if err != nil {
+		return nil, err
+	}
+	cfg.LiveKit.WebhookPath = webhookPath
+	if (cfg.LiveKit.WebhookPreviousAPIKey == "") != (cfg.LiveKit.WebhookPreviousAPISecret == "") {
+		return nil, fmt.Errorf("LIVEKIT_WEBHOOK_PREVIOUS_API_KEY and LIVEKIT_WEBHOOK_PREVIOUS_API_SECRET must be set together")
+	}
+
 	// Validate S3 credentials when S3 backend is selected.
 	if cfg.Media.StorageBackend == "s3" {
 		if cfg.Media.ObjectStorageAccessKey == "" || cfg.Media.ObjectStorageSecretKey == "" {
@@ -455,6 +471,30 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func NormalizeLiveKitWebhookPath(value string) (string, error) {
+	webhookPath := strings.TrimSpace(value)
+	if webhookPath == "" {
+		return DefaultLiveKitWebhookPath, nil
+	}
+	if !strings.HasPrefix(webhookPath, "/") {
+		return "", fmt.Errorf("LIVEKIT_WEBHOOK_PATH must be an absolute path")
+	}
+	if strings.ContainsAny(webhookPath, "?#*{}") {
+		return "", fmt.Errorf("LIVEKIT_WEBHOOK_PATH must not include query strings, fragments, or route wildcards")
+	}
+	if strings.ContainsAny(webhookPath, " \t\r\n\\") || strings.Contains(webhookPath, "%") {
+		return "", fmt.Errorf("LIVEKIT_WEBHOOK_PATH must be a plain URL path")
+	}
+	cleaned := path.Clean(webhookPath)
+	if cleaned != webhookPath {
+		if strings.HasSuffix(webhookPath, "/") && strings.TrimSuffix(webhookPath, "/") == cleaned {
+			return cleaned, nil
+		}
+		return "", fmt.Errorf("LIVEKIT_WEBHOOK_PATH must not contain empty, dot, or parent path segments")
+	}
+	return cleaned, nil
 }
 
 func loadDotEnv(path string) error {

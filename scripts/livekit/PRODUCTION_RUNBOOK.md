@@ -57,10 +57,12 @@ Use these example files as templates:
    LIVEKIT_API_KEY=<active-livekit-api-key>
    LIVEKIT_API_SECRET=<active-livekit-api-secret>
    LIVEKIT_TOKEN_TTL=6h
+   LIVEKIT_WEBHOOK_PATH=/livekit/webhook
    ```
 
 4. Configure LiveKit `keys` with the same API key/secret pair and configure the
-   webhook URL to the public backend endpoint:
+   webhook URL to the public backend endpoint. The URL path must match
+   `LIVEKIT_WEBHOOK_PATH`:
 
    ```yaml
    webhook:
@@ -68,10 +70,6 @@ Use these example files as templates:
      urls:
        - https://api.<env>.aloqa.example/livekit/webhook
    ```
-
-Current code note: `LIVEKIT_WEBHOOK_PATH` is loaded by config, but the router
-currently mounts the endpoint at `/livekit/webhook`. Keep production webhooks on
-that path until the router is made config-driven.
 
 ## TURN, ICE, And Firewall
 
@@ -131,13 +129,15 @@ packets can be sent. Browser WebRTC validation is the real connectivity gate.
 LiveKit posts signed webhook events to:
 
 ```text
-POST https://api.<env>.aloqa.example/livekit/webhook
+POST https://api.<env>.aloqa.example${LIVEKIT_WEBHOOK_PATH}
 Content-Type: application/webhook+json
-Authorization: Bearer <LiveKit-signed JWT>
+Authorization: <LiveKit-signed JWT>
 ```
 
 The handler uses `webhook.ReceiveWebhookEvent` with the configured
-`LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET`. Expected responses:
+`LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET`. During a planned rotation window it
+also accepts `LIVEKIT_WEBHOOK_PREVIOUS_API_KEY` and
+`LIVEKIT_WEBHOOK_PREVIOUS_API_SECRET` for verification only. Expected responses:
 
 - `204`: valid signature and event processed or duplicate event ignored.
 - `401`: invalid signature, invalid body, or wrong signing key.
@@ -148,8 +148,10 @@ The handler uses `webhook.ReceiveWebhookEvent` with the configured
 Smoke checks:
 
 ```bash
+LIVEKIT_WEBHOOK_PATH="${LIVEKIT_WEBHOOK_PATH:-/livekit/webhook}"
+
 # Unsigned payload should not be accepted. In a configured environment expect 401.
-curl -i -X POST "https://api.<env>.aloqa.example/livekit/webhook" \
+curl -i -X POST "https://api.<env>.aloqa.example${LIVEKIT_WEBHOOK_PATH}" \
   -H "Content-Type: application/webhook+json" \
   --data '{}'
 
@@ -187,9 +189,12 @@ ALOQA_POSTGRES_TEST_DSN='postgres://aloqa:aloqa@127.0.0.1:5432/aloqa_test?sslmod
 
 ## API Key Rotation
 
-Current implementation supports one active backend LiveKit API key/secret pair
-for token signing and webhook verification. LiveKit can hold multiple `keys`,
-but the aloqa webhook handler verifies against a single configured pair.
+The backend signs new room tokens with `LIVEKIT_API_KEY` and
+`LIVEKIT_API_SECRET`. Webhook verification accepts that active pair first, then
+the optional `LIVEKIT_WEBHOOK_PREVIOUS_API_KEY` /
+`LIVEKIT_WEBHOOK_PREVIOUS_API_SECRET` pair during a controlled rotation window.
+LiveKit must keep both pairs in `keys` until old join tokens and webhook retries
+have expired.
 
 Rotation procedure:
 
@@ -198,16 +203,21 @@ Rotation procedure:
 2. Add the new pair to LiveKit `keys` while keeping the old pair.
 3. Reduce `LIVEKIT_TOKEN_TTL` to `15m` for one deploy cycle if the current TTL is
    longer and wait for old join tokens to expire.
-4. During a controlled rollout window, deploy the backend with the new
-   `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET`, and update LiveKit
-   `webhook.api_key` to the new key.
-5. Verify new room tokens, room creation, and signed webhook delivery.
-6. Remove the old key from LiveKit after the longest token TTL plus webhook
-   retry window has elapsed.
+4. Deploy the backend with:
 
-Gap: truly zero-downtime webhook key rotation requires dual-key webhook
-verification in the backend. Until that exists, schedule rotation during a low
-traffic window and watch for `401` webhook responses.
+   ```bash
+   LIVEKIT_API_KEY=<new-livekit-api-key>
+   LIVEKIT_API_SECRET=<new-livekit-api-secret>
+   LIVEKIT_WEBHOOK_PREVIOUS_API_KEY=<old-livekit-api-key>
+   LIVEKIT_WEBHOOK_PREVIOUS_API_SECRET=<old-livekit-api-secret>
+   ```
+
+5. Update LiveKit `webhook.api_key` to the new key and roll LiveKit nodes. Mixed
+   old/new webhook signatures are accepted during this window.
+6. Verify new room tokens, room creation, and signed webhook delivery.
+7. Remove the old key from LiveKit and clear the two
+   `LIVEKIT_WEBHOOK_PREVIOUS_*` backend env vars after the longest token TTL
+   plus webhook retry window has elapsed.
 
 ## Metrics, Logging, And Alerts
 
@@ -298,7 +308,9 @@ ALOQA_POSTGRES_TEST_DSN='postgres://aloqa:aloqa@127.0.0.1:5432/aloqa_test?sslmod
 3. Confirm unsigned webhook rejection:
 
    ```bash
-   curl -i -X POST "https://api.<env>.aloqa.example/livekit/webhook" \
+   LIVEKIT_WEBHOOK_PATH="${LIVEKIT_WEBHOOK_PATH:-/livekit/webhook}"
+
+   curl -i -X POST "https://api.<env>.aloqa.example${LIVEKIT_WEBHOOK_PATH}" \
      -H "Content-Type: application/webhook+json" \
      --data '{}'
    ```
@@ -333,11 +345,8 @@ These are explicit blockers or follow-up gates from Wave 1:
   SDP negotiation, autoplay policy, device permissions, screen sharing, or
   TURN-only behavior. Staging signoff depends on a browser media smoke run with
   two users and a TURN-only scenario.
-- Webhook path config mismatch: `LIVEKIT_WEBHOOK_PATH` is not currently used by
-  the router. Keep `/livekit/webhook` in production config until fixed.
-- Webhook key rotation: single-key verification prevents fully zero-downtime
-  webhook secret rotation. Use the controlled rollout procedure above or add
-  dual-key verification.
+- Webhook path changes require updating both backend `LIVEKIT_WEBHOOK_PATH` and
+  every LiveKit `webhook.urls` entry in the same rollout.
 
 ## Rollback
 

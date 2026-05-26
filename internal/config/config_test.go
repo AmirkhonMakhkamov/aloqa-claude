@@ -8,7 +8,16 @@ import (
 )
 
 func TestLoadReadsDotEnvFromWorkingDirectory(t *testing.T) {
-	preserveEnv(t, "DB_USER", "DB_PASSWORD", "DB_NAME", "JWT_SECRET", "SERVER_PORT")
+	preserveEnv(t,
+		"DB_USER",
+		"DB_PASSWORD",
+		"DB_NAME",
+		"JWT_SECRET",
+		"SERVER_PORT",
+		"LIVEKIT_WEBHOOK_PATH",
+		"LIVEKIT_WEBHOOK_PREVIOUS_API_KEY",
+		"LIVEKIT_WEBHOOK_PREVIOUS_API_SECRET",
+	)
 
 	dir := t.TempDir()
 	secret := strings.Repeat("s", 64)
@@ -44,7 +53,15 @@ func TestLoadReadsDotEnvFromWorkingDirectory(t *testing.T) {
 }
 
 func TestLoadDotEnvDoesNotOverrideExistingEnvironment(t *testing.T) {
-	preserveEnv(t, "DB_USER", "DB_PASSWORD", "DB_NAME", "JWT_SECRET")
+	preserveEnv(t,
+		"DB_USER",
+		"DB_PASSWORD",
+		"DB_NAME",
+		"JWT_SECRET",
+		"LIVEKIT_WEBHOOK_PATH",
+		"LIVEKIT_WEBHOOK_PREVIOUS_API_KEY",
+		"LIVEKIT_WEBHOOK_PREVIOUS_API_SECRET",
+	)
 
 	dir := t.TempDir()
 	secret := strings.Repeat("s", 64)
@@ -64,6 +81,153 @@ func TestLoadDotEnvDoesNotOverrideExistingEnvironment(t *testing.T) {
 
 	if cfg.DB.User != "from-env" {
 		t.Fatalf("DB.User = %q, want from-env", cfg.DB.User)
+	}
+}
+
+func TestNormalizeLiveKitWebhookPath(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    string
+		wantErr bool
+	}{
+		{
+			name:  "default",
+			value: "",
+			want:  DefaultLiveKitWebhookPath,
+		},
+		{
+			name:  "custom path",
+			value: " /ops/livekit-webhook ",
+			want:  "/ops/livekit-webhook",
+		},
+		{
+			name:  "trailing slash",
+			value: "/ops/livekit-webhook/",
+			want:  "/ops/livekit-webhook",
+		},
+		{
+			name:    "relative path",
+			value:   "livekit/webhook",
+			wantErr: true,
+		},
+		{
+			name:    "query string",
+			value:   "/livekit/webhook?token=secret",
+			wantErr: true,
+		},
+		{
+			name:    "fragment",
+			value:   "/livekit/webhook#frag",
+			wantErr: true,
+		},
+		{
+			name:    "wildcard",
+			value:   "/livekit/*",
+			wantErr: true,
+		},
+		{
+			name:    "route parameter",
+			value:   "/livekit/{event}",
+			wantErr: true,
+		},
+		{
+			name:    "parent segment",
+			value:   "/livekit/../webhook",
+			wantErr: true,
+		},
+		{
+			name:    "empty segment",
+			value:   "/livekit//webhook",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NormalizeLiveKitWebhookPath(tt.value)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("NormalizeLiveKitWebhookPath() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NormalizeLiveKitWebhookPath() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("NormalizeLiveKitWebhookPath() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadNormalizesLiveKitWebhookPathAndPreviousKey(t *testing.T) {
+	preserveEnv(t,
+		"DB_USER",
+		"DB_PASSWORD",
+		"DB_NAME",
+		"JWT_SECRET",
+		"LIVEKIT_WEBHOOK_PATH",
+		"LIVEKIT_WEBHOOK_PREVIOUS_API_KEY",
+		"LIVEKIT_WEBHOOK_PREVIOUS_API_SECRET",
+	)
+
+	dir := t.TempDir()
+	secret := strings.Repeat("s", 64)
+	writeDotEnv(t, dir, strings.Join([]string{
+		"DB_USER=aloqa",
+		"DB_PASSWORD=aloqa",
+		"DB_NAME=aloqa",
+		"JWT_SECRET=" + secret,
+		"LIVEKIT_WEBHOOK_PATH=/ops/livekit-webhook/",
+		"LIVEKIT_WEBHOOK_PREVIOUS_API_KEY=previous-key",
+		"LIVEKIT_WEBHOOK_PREVIOUS_API_SECRET=previous-secret",
+	}, "\n"))
+	t.Chdir(dir)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.LiveKit.WebhookPath != "/ops/livekit-webhook" {
+		t.Fatalf("LiveKit.WebhookPath = %q, want /ops/livekit-webhook", cfg.LiveKit.WebhookPath)
+	}
+	if cfg.LiveKit.WebhookPreviousAPIKey != "previous-key" {
+		t.Fatalf("LiveKit.WebhookPreviousAPIKey = %q, want previous-key", cfg.LiveKit.WebhookPreviousAPIKey)
+	}
+	if cfg.LiveKit.WebhookPreviousAPISecret != "previous-secret" {
+		t.Fatalf("LiveKit.WebhookPreviousAPISecret = %q, want previous-secret", cfg.LiveKit.WebhookPreviousAPISecret)
+	}
+}
+
+func TestLoadRejectsPartialLiveKitWebhookPreviousKey(t *testing.T) {
+	preserveEnv(t,
+		"DB_USER",
+		"DB_PASSWORD",
+		"DB_NAME",
+		"JWT_SECRET",
+		"LIVEKIT_WEBHOOK_PREVIOUS_API_KEY",
+		"LIVEKIT_WEBHOOK_PREVIOUS_API_SECRET",
+	)
+
+	dir := t.TempDir()
+	secret := strings.Repeat("s", 64)
+	writeDotEnv(t, dir, strings.Join([]string{
+		"DB_USER=aloqa",
+		"DB_PASSWORD=aloqa",
+		"DB_NAME=aloqa",
+		"JWT_SECRET=" + secret,
+		"LIVEKIT_WEBHOOK_PREVIOUS_API_KEY=previous-key",
+	}, "\n"))
+	t.Chdir(dir)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatalf("Load() error = nil, want partial previous key error")
+	}
+	if !strings.Contains(err.Error(), "LIVEKIT_WEBHOOK_PREVIOUS_API_KEY") {
+		t.Fatalf("Load() error = %v, want previous key env names", err)
 	}
 }
 

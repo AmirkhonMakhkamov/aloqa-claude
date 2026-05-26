@@ -94,10 +94,9 @@ type mediaTokenClaims struct {
 }
 
 // IssueTurnCredentials returns TURN servers and credentials scoped to an active call participant.
+// When TURN is not configured (no TURNURLs), falls back to a public STUN response so FE clients
+// can still complete direct/LAN paths. Access check runs FIRST so non-participants cannot probe.
 func (s *Service) IssueTurnCredentials(ctx context.Context, workspaceID, callID, userID uuid.UUID) (*TurnCredentials, error) {
-	if len(s.media.TURNURLs) == 0 || s.media.TURNUsername == "" || s.media.TURNCredential == "" {
-		return nil, cerrors.Unavailable("turn service is not configured")
-	}
 	if _, err := s.requireCallAccess(ctx, workspaceID, callID, userID); err != nil {
 		return nil, err
 	}
@@ -110,6 +109,26 @@ func (s *Service) IssueTurnCredentials(ctx context.Context, workspaceID, callID,
 	}
 	if participant.Status != entity.ParticipantStatusConnected {
 		return nil, cerrors.Forbidden("participant is not connected")
+	}
+
+	// STUN-only fallback when TURN is not configured. BE includes the google STUN
+	// URL as urls[0] so FE doesn't need a second hardcoded fallback in this branch.
+	// Username/Credential are EMPTY STRINGS (not null) — the FE Zod schema requires
+	// non-optional strings; omitting would surface as a parse error.
+	if len(s.media.TURNURLs) == 0 {
+		return &TurnCredentials{
+			URLs:       []string{"stun:stun.l.google.com:19302"},
+			Username:   "",
+			Credential: "",
+			TTL:        300,
+		}, nil
+	}
+
+	// Partial-misconfig: URLs set but neither static creds nor HMAC secret.
+	// Surface 500 (permanent misconfig) rather than silently returning TURN URLs
+	// with empty creds — browsers would reject the config without a clear error.
+	if s.media.TURNSecret == "" && (s.media.TURNUsername == "" || s.media.TURNCredential == "") {
+		return nil, cerrors.Internal("turn service partially configured: URLs set but credentials missing — set TURN_USERNAME+TURN_CREDENTIAL or TURN_SECRET", nil)
 	}
 
 	ttl := s.media.TURNCredentialsTTL

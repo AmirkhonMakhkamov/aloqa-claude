@@ -110,6 +110,7 @@ type MediaConfig struct {
 	TURNURLs                 []string
 	TURNUsername             string
 	TURNCredential           string
+	TURNSecret               string
 	TURNCredentialsTTL       time.Duration
 	MaxPresentersPerCall     int
 	MaxViewersPerCall        int

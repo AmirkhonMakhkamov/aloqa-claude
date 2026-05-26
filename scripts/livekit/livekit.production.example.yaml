@@ -21,6 +21,7 @@ redis:
 webhook:
   api_key: <active-livekit-api-key>
   urls:
+    # Path must match aloqa LIVEKIT_WEBHOOK_PATH.
     - https://api.<env>.aloqa.example/livekit/webhook
 
 turn:

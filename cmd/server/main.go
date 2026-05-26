@@ -485,7 +485,13 @@ func run() error {
 		TokenTTL:  cfg.LiveKit.TokenTTL,
 	})
 	callHandler := httphandler.NewCallHandler(callSvc)
-	livekitWebhookHandler := httphandler.NewLiveKitWebhookHandler(callSvc, cfg.LiveKit.APIKey, cfg.LiveKit.APISecret)
+	livekitWebhookHandler := httphandler.NewLiveKitWebhookHandler(
+		callSvc,
+		cfg.LiveKit.APIKey,
+		cfg.LiveKit.APISecret,
+		httphandler.WithLiveKitWebhookPath(cfg.LiveKit.WebhookPath),
+		httphandler.WithPreviousLiveKitWebhookKey(cfg.LiveKit.WebhookPreviousAPIKey, cfg.LiveKit.WebhookPreviousAPISecret),
+	)
 	calendarHandler := httphandler.NewCalendarHandler(calendarSvc, callSvc)
 	breakoutHandler := httphandler.NewBreakoutHandler(callSvc)
 	fileHandler := httphandler.NewFileHandler(fileSvc, cfg.Media.MaxFileSize)

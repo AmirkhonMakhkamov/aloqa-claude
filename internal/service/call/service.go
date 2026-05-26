@@ -117,6 +117,7 @@ func NewService(
 		pubsub:        pubsub,
 		sfu:           sfuServer,
 		media:         media,
+		livekitDedupe: newLiveKitWebhookDedupe(10 * time.Minute),
 		guests:        guests,
 		collab:        collab,
 	}
@@ -470,6 +471,12 @@ func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid
 		}
 	}
 	if existing != nil {
+		if existing.Status == entity.ParticipantStatusWaiting {
+			s.ensureLiveKitRoomBestEffort(ctx, call)
+			slog.InfoContext(ctx, "participant remains in waiting room", "call_id", callID, "user_id", userID)
+			return existing, nil
+		}
+
 		// Reconnecting: update status back to connected.
 		if s.tx != nil {
 			if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {

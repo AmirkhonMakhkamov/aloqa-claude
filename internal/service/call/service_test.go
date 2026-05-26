@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/livekit/protocol/auth"
+	livekitpb "github.com/livekit/protocol/livekit"
 
 	"aloqa/internal/domain/entity"
 	"aloqa/internal/domain/event"
@@ -468,6 +470,210 @@ func TestJoinCallHonorsPolicyParticipantCap(t *testing.T) {
 	}
 }
 
+func TestJoinCallKeepsExistingWaitingParticipantWaiting(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	userID := uuid.New()
+	participantID := uuid.New()
+	pub := &capturingPublisher{}
+
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {
+				ID:          callID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeMeeting,
+				Status:      entity.CallStatusRinging,
+				Settings:    entity.CallSettings{WaitingRoom: true},
+			},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, userID}: {
+				ID:     participantID,
+				CallID: callID,
+				UserID: userID,
+				Role:   entity.CallRoleParticipant,
+				Status: entity.ParticipantStatusWaiting,
+			},
+		},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, pub, nil, mediaTestConfig(), nil, nil)
+
+	participant, err := svc.JoinCall(ctx, workspaceID, callID, userID)
+	if err != nil {
+		t.Fatalf("JoinCall returned error: %v", err)
+	}
+
+	if participant.Status != entity.ParticipantStatusWaiting {
+		t.Fatalf("participant status = %q, want %q", participant.Status, entity.ParticipantStatusWaiting)
+	}
+	if got := calls.participants[[2]uuid.UUID{callID, userID}].Status; got != entity.ParticipantStatusWaiting {
+		t.Fatalf("stored participant status = %q, want %q", got, entity.ParticipantStatusWaiting)
+	}
+	if pub.called {
+		t.Fatalf("waiting participant rejoin published %q; want no event", pub.subject)
+	}
+}
+
+func TestLiveKitParticipantJoinedDoesNotAdmitWaitingParticipant(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	userID := uuid.New()
+	participantID := uuid.New()
+	pub := &capturingPublisher{}
+	rooms := &fakeLiveKitRoomClient{}
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {
+				ID:          callID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeMeeting,
+				Status:      entity.CallStatusRinging,
+				Settings:    entity.CallSettings{WaitingRoom: true},
+			},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, userID}: {
+				ID:     participantID,
+				CallID: callID,
+				UserID: userID,
+				Role:   entity.CallRoleParticipant,
+				Status: entity.ParticipantStatusWaiting,
+			},
+		},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+	svc.SetLiveKit(LiveKitSettings{
+		URL:       "http://livekit.test",
+		APIKey:    "test-key",
+		APISecret: "test-secret",
+	})
+	svc.SetLiveKitRoomClient(rooms)
+
+	err := svc.handleLiveKitParticipantJoined(ctx, callID, &livekitpb.ParticipantInfo{
+		Identity: userID.String(),
+	})
+	if err != nil {
+		t.Fatalf("handleLiveKitParticipantJoined returned error: %v", err)
+	}
+
+	if got := calls.participants[[2]uuid.UUID{callID, userID}].Status; got != entity.ParticipantStatusWaiting {
+		t.Fatalf("stored participant status = %q, want %q", got, entity.ParticipantStatusWaiting)
+	}
+	if pub.called {
+		t.Fatalf("waiting participant livekit join published %q; want no event", pub.subject)
+	}
+	if len(rooms.removedParticipants) != 1 {
+		t.Fatalf("removed participant calls = %d, want 1", len(rooms.removedParticipants))
+	}
+	if got := rooms.removedParticipants[0]; got.callID != callID || got.userID != userID {
+		t.Fatalf("removed participant = (%s, %s), want (%s, %s)", got.callID, got.userID, callID, userID)
+	}
+}
+
+func TestIssueLiveKitJoinInfoUsesParticipantRoleForPublishGrant(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	viewerID := uuid.New()
+	apiSecret := "aloqa-livekit-test-secret"
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {
+				ID:          callID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeWebinar,
+				Status:      entity.CallStatusActive,
+			},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, viewerID}: {
+				ID:     uuid.New(),
+				CallID: callID,
+				UserID: viewerID,
+				Role:   entity.CallRoleViewer,
+				Status: entity.ParticipantStatusConnected,
+			},
+		},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+	svc.SetLiveKit(LiveKitSettings{
+		URL:       "ws://livekit.test",
+		APIKey:    "APItest",
+		APISecret: apiSecret,
+		TokenTTL:  time.Hour,
+	})
+
+	info, err := svc.IssueLiveKitJoinInfo(ctx, calls.calls[callID], viewerID, "")
+	if err != nil {
+		t.Fatalf("IssueLiveKitJoinInfo returned error: %v", err)
+	}
+	verifier, err := auth.ParseAPIToken(info.AccessToken)
+	if err != nil {
+		t.Fatalf("ParseAPIToken returned error: %v", err)
+	}
+	_, grants, err := verifier.Verify(apiSecret)
+	if err != nil {
+		t.Fatalf("Verify returned error: %v", err)
+	}
+
+	if grants.Video == nil {
+		t.Fatalf("token video grant = nil")
+	}
+	if grants.Video.CanPublish == nil || *grants.Video.CanPublish {
+		t.Fatalf("CanPublish = %v, want false for viewer", grants.Video.CanPublish)
+	}
+	if grants.Video.CanSubscribe == nil || !*grants.Video.CanSubscribe {
+		t.Fatalf("CanSubscribe = %v, want true for viewer", grants.Video.CanSubscribe)
+	}
+}
+
+func TestIssueLiveKitJoinInfoRejectsWaitingParticipant(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	userID := uuid.New()
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {
+				ID:          callID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeMeeting,
+				Status:      entity.CallStatusActive,
+				Settings:    entity.CallSettings{WaitingRoom: true},
+			},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, userID}: {
+				ID:     uuid.New(),
+				CallID: callID,
+				UserID: userID,
+				Role:   entity.CallRoleParticipant,
+				Status: entity.ParticipantStatusWaiting,
+			},
+		},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+	svc.SetLiveKit(LiveKitSettings{
+		URL:       "ws://livekit.test",
+		APIKey:    "APItest",
+		APISecret: "aloqa-livekit-test-secret",
+		TokenTTL:  time.Hour,
+	})
+
+	if _, err := svc.IssueLiveKitJoinInfo(ctx, calls.calls[callID], userID, ""); !hasCode(err, cerrors.CodeForbidden) {
+		t.Fatalf("IssueLiveKitJoinInfo waiting error = %v, want FORBIDDEN", err)
+	}
+}
+
 func TestReportNetworkQualityAppliesMeetingWidePolicyAndPersistsClientSnapshot(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -815,6 +1021,31 @@ func (r *fakeCallRepo) UpdateParticipantMedia(context.Context, uuid.UUID, bool, 
 	return nil
 }
 func (r *fakeCallRepo) RemoveParticipant(context.Context, uuid.UUID, uuid.UUID) error { return nil }
+
+type removedLiveKitParticipant struct {
+	callID uuid.UUID
+	userID uuid.UUID
+}
+
+type fakeLiveKitRoomClient struct {
+	removedParticipants []removedLiveKitParticipant
+}
+
+func (c *fakeLiveKitRoomClient) EnsureRoom(context.Context, LiveKitEnsureRoomArgs) error {
+	return nil
+}
+
+func (c *fakeLiveKitRoomClient) DeleteRoom(context.Context, uuid.UUID) error {
+	return nil
+}
+
+func (c *fakeLiveKitRoomClient) RemoveParticipant(_ context.Context, callID, userID uuid.UUID) error {
+	c.removedParticipants = append(c.removedParticipants, removedLiveKitParticipant{
+		callID: callID,
+		userID: userID,
+	})
+	return nil
+}
 
 type fakeBreakoutRepo struct{}
 

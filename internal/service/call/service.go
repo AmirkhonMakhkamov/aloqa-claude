@@ -1667,7 +1667,9 @@ func (s *Service) closeAllBreakoutSFURooms(ctx context.Context, callID uuid.UUID
 			continue
 		}
 		sfuRoomID := fmt.Sprintf("%s:breakout:%s", callID, room.ID)
-		s.sfu.CloseRoom(sfuRoomID)
+		if s.sfu != nil {
+			s.sfu.CloseRoom(sfuRoomID)
+		}
 	}
 
 	if err := s.breakoutRooms.CloseAllByCall(ctx, callID); err != nil {

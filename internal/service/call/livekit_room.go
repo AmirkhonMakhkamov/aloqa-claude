@@ -24,6 +24,7 @@ type LiveKitRoomClient interface {
 	EnsureRoom(ctx context.Context, args LiveKitEnsureRoomArgs) error
 	DeleteRoom(ctx context.Context, callID uuid.UUID) error
 	RemoveParticipant(ctx context.Context, callID, userID uuid.UUID) error
+	ListParticipants(ctx context.Context, callID uuid.UUID) ([]*livekitpb.ParticipantInfo, error)
 }
 
 type LiveKitEnsureRoomArgs struct {
@@ -88,6 +89,17 @@ func (c *liveKitRoomServiceClient) RemoveParticipant(ctx context.Context, callID
 		return nil
 	}
 	return err
+}
+
+func (c *liveKitRoomServiceClient) ListParticipants(ctx context.Context, callID uuid.UUID) ([]*livekitpb.ParticipantInfo, error) {
+	resp, err := c.client.ListParticipants(ctx, &livekitpb.ListParticipantsRequest{Room: callID.String()})
+	if isTwirpCode(err, twirp.NotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetParticipants(), nil
 }
 
 func isTwirpCode(err error, code twirp.ErrorCode) bool {

@@ -2,6 +2,7 @@ package call
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -892,6 +893,238 @@ func TestJoinCallRequiresLiveKitRoomBeforeParticipantInsert(t *testing.T) {
 	}
 }
 
+func TestCleanupStaleOpenCallsEndsRingingAsMissed(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	inviteeID := uuid.New()
+	startedAt := time.Now().Add(-10 * time.Minute)
+	pub := &capturingPublisher{}
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {
+				ID:          callID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeOneToOne,
+				Status:      entity.CallStatusRinging,
+				CreatedBy:   hostID,
+				StartedAt:   &startedAt,
+				CreatedAt:   startedAt,
+			},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: {
+				ID:       uuid.New(),
+				CallID:   callID,
+				UserID:   hostID,
+				Role:     entity.CallRoleHost,
+				Status:   entity.ParticipantStatusConnected,
+				JoinedAt: &startedAt,
+			},
+			{callID, inviteeID}: {
+				ID:     uuid.New(),
+				CallID: callID,
+				UserID: inviteeID,
+				Role:   entity.CallRoleParticipant,
+				Status: entity.ParticipantStatusInvited,
+			},
+		},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+
+	ended, err := svc.CleanupStaleOpenCalls(ctx, 5*time.Minute, 100)
+	if err != nil {
+		t.Fatalf("CleanupStaleOpenCalls returned error: %v", err)
+	}
+	if ended != 1 {
+		t.Fatalf("ended = %d, want 1", ended)
+	}
+	callEntity := calls.calls[callID]
+	if callEntity.Status != entity.CallStatusEnded || callEntity.EndReason != entity.CallEndReasonMissed {
+		t.Fatalf("call lifecycle = status %q reason %q, want ended/missed", callEntity.Status, callEntity.EndReason)
+	}
+	for _, participant := range calls.participants {
+		if participant.Status != entity.ParticipantStatusDisconnected || participant.LeftReason != entity.ParticipantLeftReasonMissed {
+			t.Fatalf("participant lifecycle = status %q reason %q, want disconnected/missed", participant.Status, participant.LeftReason)
+		}
+	}
+	if len(pub.captures) != 1 {
+		t.Fatalf("published events = %d, want one call.ended event", len(pub.captures))
+	}
+
+	ended, err = svc.CleanupStaleOpenCalls(ctx, 5*time.Minute, 100)
+	if err != nil {
+		t.Fatalf("second CleanupStaleOpenCalls returned error: %v", err)
+	}
+	if ended != 0 {
+		t.Fatalf("second ended = %d, want 0", ended)
+	}
+	if len(pub.captures) != 1 {
+		t.Fatalf("published events after retry = %d, want still one call.ended event", len(pub.captures))
+	}
+}
+
+func TestCleanupStaleOpenCallsEndsActiveAsAllLeftAndTimeoutsParticipants(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	leftUserID := uuid.New()
+	startedAt := time.Now().Add(-10 * time.Minute)
+	leftAt := startedAt.Add(2 * time.Minute)
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {
+				ID:          callID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeMeeting,
+				Status:      entity.CallStatusActive,
+				CreatedBy:   hostID,
+				StartedAt:   &startedAt,
+				CreatedAt:   startedAt,
+			},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: {
+				ID:       uuid.New(),
+				CallID:   callID,
+				UserID:   hostID,
+				Role:     entity.CallRoleHost,
+				Status:   entity.ParticipantStatusConnected,
+				JoinedAt: &startedAt,
+			},
+			{callID, leftUserID}: {
+				ID:         uuid.New(),
+				CallID:     callID,
+				UserID:     leftUserID,
+				Role:       entity.CallRoleParticipant,
+				Status:     entity.ParticipantStatusDisconnected,
+				JoinedAt:   &startedAt,
+				LeftAt:     &leftAt,
+				LeftReason: entity.ParticipantLeftReasonLeft,
+			},
+		},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	ended, err := svc.CleanupStaleOpenCalls(ctx, 5*time.Minute, 100)
+	if err != nil {
+		t.Fatalf("CleanupStaleOpenCalls returned error: %v", err)
+	}
+	if ended != 1 {
+		t.Fatalf("ended = %d, want 1", ended)
+	}
+	callEntity := calls.calls[callID]
+	if callEntity.Status != entity.CallStatusEnded || callEntity.EndReason != entity.CallEndReasonAllLeft {
+		t.Fatalf("call lifecycle = status %q reason %q, want ended/all_left", callEntity.Status, callEntity.EndReason)
+	}
+	hostParticipant := calls.participants[[2]uuid.UUID{callID, hostID}]
+	if hostParticipant.Status != entity.ParticipantStatusDisconnected || hostParticipant.LeftReason != entity.ParticipantLeftReasonTimeout {
+		t.Fatalf("host lifecycle = status %q reason %q, want disconnected/timeout", hostParticipant.Status, hostParticipant.LeftReason)
+	}
+	leftParticipant := calls.participants[[2]uuid.UUID{callID, leftUserID}]
+	if leftParticipant.LeftReason != entity.ParticipantLeftReasonLeft || leftParticipant.LeftAt == nil || !leftParticipant.LeftAt.Equal(leftAt) {
+		t.Fatalf("left participant was overwritten: %+v", leftParticipant)
+	}
+}
+
+func TestCleanupStaleOpenCallsKeepsCallWithLiveKitParticipants(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	userID := uuid.New()
+	startedAt := time.Now().Add(-10 * time.Minute)
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {
+				ID:          callID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeMeeting,
+				Status:      entity.CallStatusActive,
+				CreatedBy:   userID,
+				StartedAt:   &startedAt,
+				CreatedAt:   startedAt,
+			},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, userID}: {
+				ID:       uuid.New(),
+				CallID:   callID,
+				UserID:   userID,
+				Role:     entity.CallRoleHost,
+				Status:   entity.ParticipantStatusConnected,
+				JoinedAt: &startedAt,
+			},
+		},
+	}
+	roomClient := &fakeLiveKitRoomClient{
+		participantsByCall: map[uuid.UUID][]*livekitpb.ParticipantInfo{
+			callID: {
+				{Identity: userID.String()},
+			},
+		},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+	svc.SetLiveKit(LiveKitSettings{URL: "wss://livekit.test", APIKey: "key", APISecret: "secret", TokenTTL: time.Hour})
+	svc.SetLiveKitRoomClient(roomClient)
+
+	ended, err := svc.CleanupStaleOpenCalls(ctx, 5*time.Minute, 100)
+	if err != nil {
+		t.Fatalf("CleanupStaleOpenCalls returned error: %v", err)
+	}
+	if ended != 0 {
+		t.Fatalf("ended = %d, want 0", ended)
+	}
+	if calls.calls[callID].Status != entity.CallStatusActive {
+		t.Fatalf("call status = %q, want active", calls.calls[callID].Status)
+	}
+	if roomClient.listParticipantsCalls != 1 {
+		t.Fatalf("ListParticipants calls = %d, want 1", roomClient.listParticipantsCalls)
+	}
+}
+
+func TestCleanupStaleOpenCallsKeepsCallOnLiveKitInspectionError(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	userID := uuid.New()
+	startedAt := time.Now().Add(-10 * time.Minute)
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {
+				ID:          callID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeMeeting,
+				Status:      entity.CallStatusActive,
+				CreatedBy:   userID,
+				StartedAt:   &startedAt,
+				CreatedAt:   startedAt,
+			},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{},
+	}
+	roomClient := &fakeLiveKitRoomClient{listParticipantsErr: errors.New("livekit temporarily unavailable")}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+	svc.SetLiveKit(LiveKitSettings{URL: "wss://livekit.test", APIKey: "key", APISecret: "secret", TokenTTL: time.Hour})
+	svc.SetLiveKitRoomClient(roomClient)
+
+	ended, err := svc.CleanupStaleOpenCalls(ctx, 5*time.Minute, 100)
+	if err != nil {
+		t.Fatalf("CleanupStaleOpenCalls returned error: %v", err)
+	}
+	if ended != 0 {
+		t.Fatalf("ended = %d, want 0", ended)
+	}
+	if calls.calls[callID].Status != entity.CallStatusActive {
+		t.Fatalf("call status = %q, want active", calls.calls[callID].Status)
+	}
+}
+
 func TestLeaveCallIsIdempotentAndAutoEndsOneToOne(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -1551,6 +1784,26 @@ func (r *fakeCallRepo) GetByID(_ context.Context, id uuid.UUID) (*entity.Call, e
 func (r *fakeCallRepo) ListActiveByWorkspace(context.Context, uuid.UUID) ([]entity.Call, error) {
 	return nil, nil
 }
+func (r *fakeCallRepo) ListStaleOpen(_ context.Context, before time.Time, limit int) ([]entity.Call, error) {
+	calls := []entity.Call{}
+	for _, call := range r.calls {
+		if call.Status == entity.CallStatusEnded {
+			continue
+		}
+		staleAt := call.CreatedAt
+		if call.StartedAt != nil {
+			staleAt = *call.StartedAt
+		}
+		if !staleAt.Before(before) {
+			continue
+		}
+		calls = append(calls, *call)
+		if limit > 0 && len(calls) >= limit {
+			break
+		}
+	}
+	return calls, nil
+}
 func (r *fakeCallRepo) UpdateStatus(_ context.Context, id uuid.UUID, status entity.CallStatus) error {
 	call := r.calls[id]
 	if call == nil {
@@ -1719,9 +1972,12 @@ type removedLiveKitParticipant struct {
 }
 
 type fakeLiveKitRoomClient struct {
-	ensureCalls         int
-	ensureErr           error
-	removedParticipants []removedLiveKitParticipant
+	ensureCalls           int
+	ensureErr             error
+	removedParticipants   []removedLiveKitParticipant
+	participantsByCall    map[uuid.UUID][]*livekitpb.ParticipantInfo
+	listParticipantsErr   error
+	listParticipantsCalls int
 }
 
 func (c *fakeLiveKitRoomClient) EnsureRoom(context.Context, LiveKitEnsureRoomArgs) error {
@@ -1739,6 +1995,14 @@ func (c *fakeLiveKitRoomClient) RemoveParticipant(_ context.Context, callID, use
 		userID: userID,
 	})
 	return nil
+}
+
+func (c *fakeLiveKitRoomClient) ListParticipants(_ context.Context, callID uuid.UUID) ([]*livekitpb.ParticipantInfo, error) {
+	c.listParticipantsCalls++
+	if c.listParticipantsErr != nil {
+		return nil, c.listParticipantsErr
+	}
+	return c.participantsByCall[callID], nil
 }
 
 type fakeBreakoutRepo struct{}

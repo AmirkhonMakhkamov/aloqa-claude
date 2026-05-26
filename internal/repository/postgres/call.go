@@ -258,6 +258,72 @@ func (r *CallRepo) ListActiveByWorkspace(ctx context.Context, workspaceID uuid.U
 	return calls, nil
 }
 
+// ListStaleOpen returns non-ended calls old enough to reconcile against the
+// media plane. The service performs the LiveKit/SFU presence check before
+// applying any terminal transition.
+func (r *CallRepo) ListStaleOpen(ctx context.Context, before time.Time, limit int) ([]entity.Call, error) {
+	if limit <= 0 {
+		limit = defaultStaleOpenCallLimit
+	}
+	if limit > maxStaleOpenCallLimit {
+		limit = maxStaleOpenCallLimit
+	}
+
+	query := `
+		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), created_at
+		FROM calls
+		WHERE status IN ('ringing', 'active')
+		  AND COALESCE(started_at, created_at) < $1
+		ORDER BY COALESCE(started_at, created_at) ASC
+		LIMIT $2`
+
+	rows, err := r.db.Query(ctx, query, before, limit)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list stale open calls: %w", err)
+	}
+	defer rows.Close()
+
+	var calls []entity.Call
+	for rows.Next() {
+		var call entity.Call
+		var settingsJSON []byte
+
+		if err := rows.Scan(
+			&call.ID,
+			&call.WorkspaceID,
+			&call.ChannelID,
+			&call.Type,
+			&call.Status,
+			&call.Title,
+			&call.CreatedBy,
+			&call.ScheduledCallID,
+			&settingsJSON,
+			&call.StartedAt,
+			&call.EndedAt,
+			&call.EndReason,
+			&call.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("postgres: list stale open calls scan: %w", err)
+		}
+
+		if err := json.Unmarshal(settingsJSON, &call.Settings); err != nil {
+			return nil, fmt.Errorf("postgres: unmarshal stale call settings: %w", err)
+		}
+
+		calls = append(calls, call)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list stale open calls rows: %w", err)
+	}
+
+	return calls, nil
+}
+
+const (
+	defaultStaleOpenCallLimit = 100
+	maxStaleOpenCallLimit     = 500
+)
+
 // topParticipantsLimit caps how many participant projections we send on the
 // Live Now card; the FE renders the rest as a "+N" pill in the avatar stack.
 const topParticipantsLimit = 4

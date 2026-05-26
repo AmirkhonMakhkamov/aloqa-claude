@@ -3,7 +3,6 @@ package call
 import (
 	"context"
 	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -186,51 +185,12 @@ func (s *Service) removeLiveKitParticipantBestEffort(ctx context.Context, callID
 	}
 }
 
-// livekitWebhookDedupe tracks recently-processed webhook event ids so
-// LiveKit retries do not cause double-broadcasts.
-type livekitWebhookDedupe struct {
-	mu     sync.Mutex
-	seen   map[string]time.Time
-	maxAge time.Duration
-}
-
-func newLiveKitWebhookDedupe(maxAge time.Duration) *livekitWebhookDedupe {
-	if maxAge <= 0 {
-		maxAge = 10 * time.Minute
-	}
-	return &livekitWebhookDedupe{seen: make(map[string]time.Time), maxAge: maxAge}
-}
-
-// markFresh returns true if the event id has not been processed within
-// maxAge. It also evicts older entries opportunistically.
-func (d *livekitWebhookDedupe) markFresh(id string) bool {
-	if id == "" {
-		return true
-	}
-	now := time.Now()
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	for k, ts := range d.seen {
-		if now.Sub(ts) > d.maxAge {
-			delete(d.seen, k)
-		}
-	}
-	if _, exists := d.seen[id]; exists {
-		return false
-	}
-	d.seen[id] = now
-	return true
-}
-
 // HandleLiveKitWebhook processes a verified LiveKit WebhookEvent and bridges
 // it to domain state + workspace WS broadcasts. Webhook signature MUST be
 // verified by the caller using protocol/webhook.ReceiveWebhookEvent.
 func (s *Service) HandleLiveKitWebhook(ctx context.Context, ev *livekitpb.WebhookEvent) error {
 	if ev == nil {
 		return cerrors.InvalidInput("livekit webhook event is nil")
-	}
-	if !s.livekitDedupe.markFresh(ev.GetId()) {
-		return nil
 	}
 
 	roomName := ev.GetRoom().GetName()
@@ -244,6 +204,22 @@ func (s *Service) HandleLiveKitWebhook(ctx context.Context, ev *livekitpb.Webhoo
 		return nil
 	}
 
+	claimed, err := s.claimLiveKitWebhookEvent(ctx, ev, callID)
+	if err != nil {
+		return cerrors.Internal("failed to claim livekit webhook event", err)
+	}
+	if !claimed {
+		return nil
+	}
+
+	if err := s.processLiveKitWebhook(ctx, ev, callID); err != nil {
+		s.releaseLiveKitWebhookEvent(ctx, ev.GetId())
+		return err
+	}
+	return nil
+}
+
+func (s *Service) processLiveKitWebhook(ctx context.Context, ev *livekitpb.WebhookEvent, callID uuid.UUID) error {
 	switch ev.GetEvent() {
 	case "room_finished":
 		return s.handleLiveKitRoomFinished(ctx, callID)
@@ -258,6 +234,36 @@ func (s *Service) HandleLiveKitWebhook(ctx context.Context, ev *livekitpb.Webhoo
 	default:
 		// room_started / recording_started — not used in this slice
 		return nil
+	}
+}
+
+func (s *Service) claimLiveKitWebhookEvent(ctx context.Context, ev *livekitpb.WebhookEvent, callID uuid.UUID) (bool, error) {
+	eventID := ev.GetId()
+	if eventID == "" {
+		return true, nil
+	}
+	webhookRepo, ok := s.calls.(liveKitWebhookRepository)
+	if !ok {
+		return true, nil
+	}
+	return webhookRepo.ClaimLiveKitWebhookEvent(ctx, &entity.LiveKitWebhookEvent{
+		EventID:    eventID,
+		CallID:     callID,
+		EventType:  ev.GetEvent(),
+		ReceivedAt: time.Now().UTC(),
+	})
+}
+
+func (s *Service) releaseLiveKitWebhookEvent(ctx context.Context, eventID string) {
+	if eventID == "" {
+		return
+	}
+	webhookRepo, ok := s.calls.(liveKitWebhookRepository)
+	if !ok {
+		return
+	}
+	if err := webhookRepo.ReleaseLiveKitWebhookEvent(ctx, eventID); err != nil {
+		slog.WarnContext(ctx, "failed to release livekit webhook claim", "event_id", eventID, "error", err)
 	}
 }
 

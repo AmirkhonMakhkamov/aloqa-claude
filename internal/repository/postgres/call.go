@@ -34,6 +34,36 @@ func (r *CallRepo) withTx(tx pgx.Tx) *CallRepo {
 	return &CallRepo{pool: r.pool, db: tx}
 }
 
+func (r *CallRepo) ClaimLiveKitWebhookEvent(ctx context.Context, event *entity.LiveKitWebhookEvent) (bool, error) {
+	if event == nil {
+		return false, cerrors.InvalidInput("livekit webhook event is required")
+	}
+	query := `
+		INSERT INTO call_livekit_webhook_events (event_id, call_id, event_type, received_at)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (event_id) DO NOTHING`
+
+	receivedAt := event.ReceivedAt
+	if receivedAt.IsZero() {
+		receivedAt = time.Now().UTC()
+	}
+	tag, err := r.db.Exec(ctx, query, event.EventID, event.CallID, event.EventType, receivedAt)
+	if err != nil {
+		return false, fmt.Errorf("postgres: claim livekit webhook event: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func (r *CallRepo) ReleaseLiveKitWebhookEvent(ctx context.Context, eventID string) error {
+	if eventID == "" {
+		return nil
+	}
+	if _, err := r.db.Exec(ctx, `DELETE FROM call_livekit_webhook_events WHERE event_id = $1`, eventID); err != nil {
+		return fmt.Errorf("postgres: release livekit webhook event: %w", err)
+	}
+	return nil
+}
+
 func nullableCallEndReason(reason entity.CallEndReason) any {
 	if reason == "" {
 		return nil

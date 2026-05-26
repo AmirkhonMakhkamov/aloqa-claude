@@ -577,6 +577,115 @@ func TestLiveKitParticipantJoinedDoesNotAdmitWaitingParticipant(t *testing.T) {
 	}
 }
 
+func TestLiveKitWebhookDedupesParticipantLeftAcrossServiceInstances(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	userID := uuid.New()
+	otherUserID := uuid.New()
+	eventID := uuid.New().String()
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, userID}:      {ID: uuid.New(), CallID: callID, UserID: userID, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected},
+			{callID, otherUserID}: {ID: uuid.New(), CallID: callID, UserID: otherUserID, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected},
+		},
+		liveKitWebhookEvents: map[string]*entity.LiveKitWebhookEvent{},
+	}
+	firstPub := &capturingPublisher{}
+	secondPub := &capturingPublisher{}
+	first := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, firstPub, nil, mediaTestConfig(), nil, nil)
+	second := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, secondPub, nil, mediaTestConfig(), nil, nil)
+	ev := liveKitWebhookEvent(eventID, "participant_left", callID, userID)
+
+	if err := first.HandleLiveKitWebhook(ctx, ev); err != nil {
+		t.Fatalf("first HandleLiveKitWebhook returned error: %v", err)
+	}
+	if got := len(firstPub.captures); got != 1 {
+		t.Fatalf("first publish count = %d, want 1", got)
+	}
+	if firstPub.captures[0].subject == "" {
+		t.Fatalf("first publish subject was empty")
+	}
+	if err := second.HandleLiveKitWebhook(ctx, ev); err != nil {
+		t.Fatalf("second HandleLiveKitWebhook returned error: %v", err)
+	}
+	if got := len(secondPub.captures); got != 0 {
+		t.Fatalf("duplicate publish count = %d, want 0", got)
+	}
+	if got := calls.liveKitWebhookClaimAttempts[eventID]; got != 2 {
+		t.Fatalf("claim attempts = %d, want 2", got)
+	}
+}
+
+func TestLiveKitWebhookDedupesRoomFinishedAcrossServiceInstances(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	userID := uuid.New()
+	eventID := uuid.New().String()
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive, CreatedBy: userID},
+		},
+		liveKitWebhookEvents: map[string]*entity.LiveKitWebhookEvent{},
+	}
+	firstPub := &capturingPublisher{}
+	secondPub := &capturingPublisher{}
+	first := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, firstPub, nil, mediaTestConfig(), nil, nil)
+	second := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, secondPub, nil, mediaTestConfig(), nil, nil)
+	ev := liveKitWebhookEvent(eventID, "room_finished", callID, uuid.Nil)
+
+	if err := first.HandleLiveKitWebhook(ctx, ev); err != nil {
+		t.Fatalf("first HandleLiveKitWebhook returned error: %v", err)
+	}
+	if got := len(firstPub.captures); got != 1 {
+		t.Fatalf("first publish count = %d, want 1", got)
+	}
+	if calls.calls[callID].EndReason != entity.CallEndReasonAllLeft {
+		t.Fatalf("end reason = %q, want %q", calls.calls[callID].EndReason, entity.CallEndReasonAllLeft)
+	}
+	if err := second.HandleLiveKitWebhook(ctx, ev); err != nil {
+		t.Fatalf("second HandleLiveKitWebhook returned error: %v", err)
+	}
+	if got := len(secondPub.captures); got != 0 {
+		t.Fatalf("duplicate publish count = %d, want 0", got)
+	}
+}
+
+func TestLiveKitWebhookIgnoresParticipantLeftAfterRoomFinished(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	userID := uuid.New()
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive, CreatedBy: userID},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, userID}: {ID: uuid.New(), CallID: callID, UserID: userID, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected},
+		},
+		liveKitWebhookEvents: map[string]*entity.LiveKitWebhookEvent{},
+	}
+	pub := &capturingPublisher{}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+
+	if err := svc.HandleLiveKitWebhook(ctx, liveKitWebhookEvent(uuid.New().String(), "room_finished", callID, uuid.Nil)); err != nil {
+		t.Fatalf("room_finished HandleLiveKitWebhook returned error: %v", err)
+	}
+	if err := svc.HandleLiveKitWebhook(ctx, liveKitWebhookEvent(uuid.New().String(), "participant_left", callID, userID)); err != nil {
+		t.Fatalf("participant_left HandleLiveKitWebhook returned error: %v", err)
+	}
+	if got := len(pub.captures); got != 1 {
+		t.Fatalf("publish count after out-of-order delivery = %d, want 1", got)
+	}
+	if calls.participants[[2]uuid.UUID{callID, userID}].Status != entity.ParticipantStatusConnected {
+		t.Fatalf("participant status changed after ended call")
+	}
+}
+
 func TestStartCallRequiresLiveKitRoomBeforePersist(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -1258,10 +1367,24 @@ func (r *fakeChannelRepo) GetDMChannel(context.Context, uuid.UUID, uuid.UUID, uu
 }
 
 type fakeCallRepo struct {
-	calls                  map[uuid.UUID]*entity.Call
-	participants           map[[2]uuid.UUID]*entity.CallParticipant
-	cancelBeforeUpdate     func(call *entity.Call)
-	disconnectBeforeUpdate func(participant *entity.CallParticipant)
+	calls                       map[uuid.UUID]*entity.Call
+	participants                map[[2]uuid.UUID]*entity.CallParticipant
+	liveKitWebhookEvents        map[string]*entity.LiveKitWebhookEvent
+	liveKitWebhookClaimAttempts map[string]int
+	cancelBeforeUpdate          func(call *entity.Call)
+	disconnectBeforeUpdate      func(participant *entity.CallParticipant)
+}
+
+func liveKitWebhookEvent(eventID, eventType string, callID, userID uuid.UUID) *livekitpb.WebhookEvent {
+	ev := &livekitpb.WebhookEvent{
+		Id:    eventID,
+		Event: eventType,
+		Room:  &livekitpb.Room{Name: callID.String()},
+	}
+	if userID != uuid.Nil {
+		ev.Participant = &livekitpb.ParticipantInfo{Identity: userID.String()}
+	}
+	return ev
 }
 
 func (r *fakeCallRepo) Create(_ context.Context, call *entity.Call) error {
@@ -1301,6 +1424,24 @@ func (r *fakeCallRepo) ActivateRinging(_ context.Context, id uuid.UUID) (bool, e
 }
 func (r *fakeCallRepo) End(ctx context.Context, id uuid.UUID) error {
 	return r.EndWithReason(ctx, id, "")
+}
+func (r *fakeCallRepo) ClaimLiveKitWebhookEvent(_ context.Context, event *entity.LiveKitWebhookEvent) (bool, error) {
+	if r.liveKitWebhookEvents == nil {
+		r.liveKitWebhookEvents = map[string]*entity.LiveKitWebhookEvent{}
+	}
+	if r.liveKitWebhookClaimAttempts == nil {
+		r.liveKitWebhookClaimAttempts = map[string]int{}
+	}
+	r.liveKitWebhookClaimAttempts[event.EventID]++
+	if _, exists := r.liveKitWebhookEvents[event.EventID]; exists {
+		return false, nil
+	}
+	r.liveKitWebhookEvents[event.EventID] = event
+	return true, nil
+}
+func (r *fakeCallRepo) ReleaseLiveKitWebhookEvent(_ context.Context, eventID string) error {
+	delete(r.liveKitWebhookEvents, eventID)
+	return nil
 }
 func (r *fakeCallRepo) EndWithReason(_ context.Context, id uuid.UUID, reason entity.CallEndReason) error {
 	_, err := r.EndWithReasonIfNotEnded(context.Background(), id, reason)

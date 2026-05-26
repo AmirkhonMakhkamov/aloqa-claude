@@ -59,3 +59,14 @@ scripts/livekit/observability/scripts/down.sh
 
 See `scripts/livekit/observability/RUNBOOK.md` for CLI probes, dashboard
 validation, and troubleshooting.
+
+## Production
+
+The local compose stack is not a production topology. Use
+`scripts/livekit/PRODUCTION_RUNBOOK.md` for the production deployment checklist,
+public URL/TLS requirements, TURN/ICE firewall rules, webhook validation, Redis
+multi-node assumptions, API key rotation, observability, and Wave 1 release
+gates. Example production inputs live beside this file:
+
+- `scripts/livekit/livekit.production.example.yaml`
+- `scripts/livekit/aloqa.production.env.example`

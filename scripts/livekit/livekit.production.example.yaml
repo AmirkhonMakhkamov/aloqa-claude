@@ -1,0 +1,46 @@
+# Production example only. Render placeholders from the deployment secret
+# manager before passing this file to livekit-server --config.
+port: 7880
+bind_addresses:
+  - 0.0.0.0
+log_level: info
+
+# Private monitoring network only.
+prometheus_port: 6789
+
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 60000
+  use_external_ip: true
+
+redis:
+  address: <livekit-redis.internal:6379>
+  # password: <livekit-redis-password>
+
+webhook:
+  api_key: <active-livekit-api-key>
+  urls:
+    - https://api.<env>.aloqa.example/livekit/webhook
+
+turn:
+  enabled: true
+  domain: turn.<env>.aloqa.example
+  # Use 443 when no L4 load balancer rewrites the public TURN/TLS port.
+  tls_port: 5349
+  cert_file: /etc/livekit/tls/tls.crt
+  key_file: /etc/livekit/tls/tls.key
+  # Enable only when UDP/443 is intentionally allocated to TURN.
+  # udp_port: 443
+
+room:
+  auto_create: true
+  enabled_codecs:
+    - mime: audio/opus
+    - mime: video/VP8
+    - mime: video/H264
+
+keys:
+  <active-livekit-api-key>: <active-livekit-api-secret>
+  # Keep the previous key only during a planned rotation window.
+  # <previous-livekit-api-key>: <previous-livekit-api-secret>

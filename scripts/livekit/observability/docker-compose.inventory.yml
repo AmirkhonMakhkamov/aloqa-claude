@@ -1,0 +1,46 @@
+services:
+  livekit:
+    image: livekit/livekit-server:v1.7.2
+    command: --config /etc/livekit.yaml
+    expose:
+      - "6789"
+      - "7880"
+    volumes:
+      - ./.state/inventory/livekit.yaml:/etc/livekit.yaml:ro
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:6789/metrics >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=2h
+    volumes:
+      - ./.state/inventory/prometheus.inventory.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      livekit:
+        condition: service_healthy
+
+  livekit-cli:
+    image: livekit/livekit-cli:v2.0.0
+    entrypoint: ["sh", "-c", "sleep infinity"]
+    environment:
+      LIVEKIT_API_KEY: "${LK_API_KEY:-APIaloqaDev}"
+      LIVEKIT_API_SECRET: "${LK_API_SECRET:-aloqa-livekit-development-secret-32bytes-min}"
+      LIVEKIT_URL: ws://livekit:7880
+    depends_on:
+      livekit:
+        condition: service_healthy

@@ -15,14 +15,20 @@ import (
 	"aloqa/internal/pkg/cerrors"
 	"aloqa/internal/pkg/id"
 	calendarservice "aloqa/internal/service/calendar"
+	callservice "aloqa/internal/service/call"
 )
 
 type CalendarHandler struct {
-	svc *calendarservice.Service
+	svc     *calendarservice.Service
+	callSvc *callservice.Service
 }
 
-func NewCalendarHandler(svc *calendarservice.Service) *CalendarHandler {
-	return &CalendarHandler{svc: svc}
+func NewCalendarHandler(svc *calendarservice.Service, callSvc ...*callservice.Service) *CalendarHandler {
+	h := &CalendarHandler{svc: svc}
+	if len(callSvc) > 0 {
+		h.callSvc = callSvc[0]
+	}
+	return h
 }
 
 type createCalendarRequest struct {
@@ -300,7 +306,23 @@ func (h *CalendarHandler) StartCallFromEvent(w http.ResponseWriter, r *http.Requ
 		writeErr(w, err)
 		return
 	}
-	writeOK(w, callEntity)
+	resp := StartCallResponse{Call: callEntity}
+	if h.callSvc != nil && h.callSvc.LiveKitConfigured() {
+		info, tokenErr := h.callSvc.IssueLiveKitJoinInfo(r.Context(), callEntity, userID, "")
+		if tokenErr != nil {
+			writeErr(w, tokenErr)
+			return
+		}
+		resp.LivekitURL = info.URL
+		resp.AccessToken = info.AccessToken
+		expires := info.ExpiresAt
+		tokenExpires := info.TokenExpiresAt
+		refreshAfter := info.RefreshAfter
+		resp.ExpiresAt = &expires
+		resp.TokenExpiresAt = &tokenExpires
+		resp.RefreshAfter = &refreshAfter
+	}
+	writeOK(w, resp)
 }
 
 func (h *CalendarHandler) MoveOccurrence(w http.ResponseWriter, r *http.Request) {

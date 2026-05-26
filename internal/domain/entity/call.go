@@ -24,6 +24,16 @@ const (
 	CallStatusEnded   CallStatus = "ended"
 )
 
+type CallEndReason string
+
+const (
+	CallEndReasonHostEnded CallEndReason = "host_ended"
+	CallEndReasonAllLeft   CallEndReason = "all_left"
+	CallEndReasonFailed    CallEndReason = "failed"
+	CallEndReasonMissed    CallEndReason = "missed"
+	CallEndReasonCancelled CallEndReason = "cancelled"
+)
+
 type CallRole string
 
 const (
@@ -44,6 +54,15 @@ const (
 	ParticipantStatusDisconnected ParticipantStatus = "disconnected"
 )
 
+type ParticipantLeftReason string
+
+const (
+	ParticipantLeftReasonLeft     ParticipantLeftReason = "left"
+	ParticipantLeftReasonTimeout  ParticipantLeftReason = "timeout"
+	ParticipantLeftReasonDeclined ParticipantLeftReason = "declined"
+	ParticipantLeftReasonMissed   ParticipantLeftReason = "missed"
+)
+
 type CallSettings struct {
 	WaitingRoom     bool `json:"waiting_room"`
 	MuteOnJoin      bool `json:"mute_on_join"`
@@ -56,34 +75,86 @@ type CallSettings struct {
 	Watermark       bool `json:"watermark"`
 }
 
+// TopParticipant is a thin user projection used by ActiveCallSummary to
+// render avatar stacks on the Calls Home Live Now section. ColorSeed is
+// optional and reserved for the FE to derive deterministic avatar fallback
+// colors (kept nullable so the BE can omit it without breaking the schema).
+type TopParticipant struct {
+	UserID      uuid.UUID `json:"user_id"`
+	DisplayName string    `json:"display_name"`
+	AvatarURL   *string   `json:"avatar_url"`
+	ColorSeed   *int      `json:"color_seed"`
+}
+
+// ActiveCallSummary is the projection returned by GET /calls/active. It joins
+// the raw call row with its channel, host, and connected participants so the
+// FE can render a Live Now card without follow-up requests. Matches the FE
+// schema in packages/core/src/api/calls.ts (ActiveCallSummarySchema).
+type ActiveCallSummary struct {
+	ID               uuid.UUID        `json:"id"`
+	Type             CallType         `json:"type"`
+	Title            *string          `json:"title"`
+	StartedAt        time.Time        `json:"started_at"`
+	ChannelID        *uuid.UUID       `json:"channel_id"`
+	ChannelName      *string          `json:"channel_name"`
+	HostUserID       uuid.UUID        `json:"host_user_id"`
+	HostDisplayName  string           `json:"host_display_name"`
+	Recording        bool             `json:"recording"`
+	IsOpen           bool             `json:"is_open"`
+	ParticipantCount int              `json:"participant_count"`
+	TopParticipants  []TopParticipant `json:"top_participants"`
+	ObserverCount    int              `json:"observer_count"`
+}
+
 type Call struct {
-	ID              uuid.UUID    `json:"id"`
-	WorkspaceID     uuid.UUID    `json:"workspace_id"`
-	ChannelID       *uuid.UUID   `json:"channel_id,omitempty"`
-	Type            CallType     `json:"type"`
-	Status          CallStatus   `json:"status"`
-	Title           string       `json:"title,omitempty"`
-	CreatedBy       uuid.UUID    `json:"created_by"`
-	ScheduledCallID *uuid.UUID   `json:"scheduled_call_id,omitempty"`
-	Settings        CallSettings `json:"settings"`
-	StartedAt       *time.Time   `json:"started_at,omitempty"`
-	EndedAt         *time.Time   `json:"ended_at,omitempty"`
-	CreatedAt       time.Time    `json:"created_at"`
+	ID              uuid.UUID     `json:"id"`
+	WorkspaceID     uuid.UUID     `json:"workspace_id"`
+	ChannelID       *uuid.UUID    `json:"channel_id,omitempty"`
+	Type            CallType      `json:"type"`
+	Status          CallStatus    `json:"status"`
+	Title           string        `json:"title,omitempty"`
+	CreatedBy       uuid.UUID     `json:"created_by"`
+	ScheduledCallID *uuid.UUID    `json:"scheduled_call_id,omitempty"`
+	Settings        CallSettings  `json:"settings"`
+	StartedAt       *time.Time    `json:"started_at,omitempty"`
+	EndedAt         *time.Time    `json:"ended_at,omitempty"`
+	EndReason       CallEndReason `json:"end_reason,omitempty"`
+	CreatedAt       time.Time     `json:"created_at"`
 }
 
 type CallParticipant struct {
-	ID             uuid.UUID         `json:"id"`
-	CallID         uuid.UUID         `json:"call_id"`
-	UserID         uuid.UUID         `json:"user_id"`
-	BreakoutRoomID *uuid.UUID        `json:"breakout_room_id,omitempty"`
-	Role           CallRole          `json:"role"`
-	Status         ParticipantStatus `json:"status"`
-	AudioMuted     bool              `json:"audio_muted"`
-	VideoMuted     bool              `json:"video_muted"`
-	ScreenSharing  bool              `json:"screen_sharing"`
-	JoinedAt       *time.Time        `json:"joined_at,omitempty"`
-	LeftAt         *time.Time        `json:"left_at,omitempty"`
+	ID             uuid.UUID             `json:"id"`
+	CallID         uuid.UUID             `json:"call_id"`
+	UserID         uuid.UUID             `json:"user_id"`
+	BreakoutRoomID *uuid.UUID            `json:"breakout_room_id,omitempty"`
+	Role           CallRole              `json:"role"`
+	Status         ParticipantStatus     `json:"status"`
+	AudioMuted     bool                  `json:"audio_muted"`
+	VideoMuted     bool                  `json:"video_muted"`
+	ScreenSharing  bool                  `json:"screen_sharing"`
+	JoinedAt       *time.Time            `json:"joined_at,omitempty"`
+	LeftAt         *time.Time            `json:"left_at,omitempty"`
+	LeftReason     ParticipantLeftReason `json:"left_reason,omitempty"`
 }
+
+type LiveKitWebhookEvent struct {
+	EventID        string     `json:"event_id"`
+	CallID         uuid.UUID  `json:"call_id"`
+	EventType      string     `json:"event_type"`
+	Status         string     `json:"status"`
+	ClaimToken     string     `json:"claim_token"`
+	ReceivedAt     time.Time  `json:"received_at"`
+	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
+	ProcessedAt    *time.Time `json:"processed_at,omitempty"`
+}
+
+type LiveKitWebhookClaimResult string
+
+const (
+	LiveKitWebhookClaimProcess    LiveKitWebhookClaimResult = "process"
+	LiveKitWebhookClaimDuplicate  LiveKitWebhookClaimResult = "duplicate"
+	LiveKitWebhookClaimInProgress LiveKitWebhookClaimResult = "in_progress"
+)
 
 // --- Breakout Rooms ---
 

@@ -1,0 +1,30 @@
+port: 7880
+log_level: info
+
+# Dev-only metrics endpoint scraped by scripts/livekit/observability/prometheus/prometheus.yml.
+prometheus_port: 6789
+
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 50100
+  use_external_ip: false
+  use_ice_lite: true
+
+redis:
+  address: redis:6379
+
+webhook:
+  api_key: APIaloqaDev
+  urls:
+    - http://host.docker.internal:8090/livekit/webhook
+
+room:
+  auto_create: true
+  enabled_codecs:
+    - mime: audio/opus
+    - mime: video/VP8
+    - mime: video/H264
+
+keys:
+  APIaloqaDev: aloqa-livekit-development-secret-32bytes-min

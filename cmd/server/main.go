@@ -378,6 +378,12 @@ func run() error {
 	callSvc.SetMediaControlPlane(mediaOpsSvc)
 	callSvc.SetCallMessageRepo(callMessageRepo)
 	callSvc.SetTransactionManager(txManager)
+	callSvc.SetLiveKit(call.LiveKitSettings{
+		URL:       cfg.LiveKit.URL,
+		APIKey:    cfg.LiveKit.APIKey,
+		APISecret: cfg.LiveKit.APISecret,
+		TokenTTL:  cfg.LiveKit.TokenTTL,
+	})
 	calendarSvc := calendarsvc.NewService(calendarRepo, workspaceRepo, callSvc, realtimePublisher)
 	calendarSvc.SetTransactionManager(txManager)
 	authSvc.SetNewUserSeeder(demosvc.NewService(userRepo, workspaceRepo, channelRepo, calendarSvc))
@@ -443,6 +449,9 @@ func run() error {
 	reliability.Supervise(ctx, "media_relay", func(c context.Context) {
 		mediaOpsSvc.RunRelayFabric(c)
 	})
+	reliability.Supervise(ctx, "call_stale_cleanup", func(c context.Context) {
+		callSvc.RunStaleCallCleanupWorker(c, cfg.WebRTC.CallCleanupInterval, cfg.WebRTC.CallEmptyGrace, cfg.WebRTC.CallCleanupBatchSize)
+	})
 	reliability.Supervise(ctx, "recording_processor", func(c context.Context) {
 		recordingSvc.RunProcessingWorker(c, recordingProcessor, cfg.Media.RecordingProcessingInterval, 20)
 	})
@@ -479,7 +488,14 @@ func run() error {
 	savedHandler := httphandler.NewSavedHandler(savedSvc)
 	messageHandler := httphandler.NewMessageHandler(chatSvc)
 	callHandler := httphandler.NewCallHandler(callSvc)
-	calendarHandler := httphandler.NewCalendarHandler(calendarSvc)
+	livekitWebhookHandler := httphandler.NewLiveKitWebhookHandler(
+		callSvc,
+		cfg.LiveKit.APIKey,
+		cfg.LiveKit.APISecret,
+		httphandler.WithLiveKitWebhookPath(cfg.LiveKit.WebhookPath),
+		httphandler.WithPreviousLiveKitWebhookKey(cfg.LiveKit.WebhookPreviousAPIKey, cfg.LiveKit.WebhookPreviousAPISecret),
+	)
+	calendarHandler := httphandler.NewCalendarHandler(calendarSvc, callSvc)
 	breakoutHandler := httphandler.NewBreakoutHandler(callSvc)
 	fileHandler := httphandler.NewFileHandler(fileSvc, cfg.Media.MaxFileSize)
 	presenceHandler := httphandler.NewPresenceHandler(presenceSvc)
@@ -500,6 +516,7 @@ func run() error {
 		Saved:            savedHandler,
 		Messages:         messageHandler,
 		Calls:            callHandler,
+		LiveKit:          livekitWebhookHandler,
 		Calendar:         calendarHandler,
 		Breakout:         breakoutHandler,
 		Files:            fileHandler,

@@ -993,7 +993,7 @@ paths:
           description: Created call
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Call' }
+              schema: { $ref: '#/components/schemas/StartCallResponse' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
@@ -1064,7 +1064,7 @@ paths:
           description: Joined participant entry
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/CallParticipant' }
+              schema: { $ref: '#/components/schemas/JoinCallResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -1079,10 +1079,48 @@ paths:
       tags: [calls]
       security: [{ bearerAuth: [] }]
       responses:
-        '204': { description: Left }
+        '200':
+          description: Leave result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeaveCallResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/workspaces/{workspaceID}/calls/{callID}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/CallID'
+    post:
+      summary: Creator cancels a ringing call
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Cancel result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CancelCallResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/workspaces/{workspaceID}/calls/{callID}/end:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/CallID'
+    post:
+      summary: Host or co-host ends a call for everyone
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Ended }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
 
   /api/v1/workspaces/{workspaceID}/calls/{callID}/media:
     parameters:
@@ -1770,6 +1808,16 @@ components:
       description: Connection status of a participant inside the call.
       enum: [invited, waiting, joining, connected, disconnected]
 
+    CallEndReason:
+      type: string
+      description: Terminal lifecycle reason for an ended call.
+      enum: [host_ended, all_left, failed, missed, cancelled]
+
+    ParticipantLeftReason:
+      type: string
+      description: Reason a participant was marked disconnected.
+      enum: [left, timeout, declined, missed]
+
     CallSettings:
       type: object
       description: Per-call feature toggles. Mirrors aloqa-claude entity.CallSettings.
@@ -1894,6 +1942,11 @@ components:
             - $ref: '#/components/schemas/IsoDatetime'
           nullable: true
           description: When the call ended; absent/null while active.
+        end_reason:
+          allOf:
+            - $ref: '#/components/schemas/CallEndReason'
+          nullable: true
+          description: Why the call ended; absent/null until the first terminal transition wins.
         created_at:
           allOf:
             - $ref: '#/components/schemas/IsoDatetime'
@@ -1948,6 +2001,11 @@ components:
             - $ref: '#/components/schemas/IsoDatetime'
           nullable: true
           description: When this participant left; absent/null while connected.
+        left_reason:
+          allOf:
+            - $ref: '#/components/schemas/ParticipantLeftReason'
+          nullable: true
+          description: Why this participant disconnected; absent/null while connected.
 
     StartCallRequest:
       type: object
@@ -1970,6 +2028,61 @@ components:
           allOf:
             - $ref: '#/components/schemas/StartCallSettings'
           description: Optional feature toggles; omitted fields decode to backend defaults.
+
+    LiveKitConnection:
+      type: object
+      description: LiveKit connection metadata returned when LiveKit is configured.
+      properties:
+        livekit_url:
+          type: string
+          description: LiveKit websocket URL.
+        access_token:
+          type: string
+          description: LiveKit access token for the current user and call room.
+        expires_at:
+          allOf:
+            - $ref: '#/components/schemas/IsoDatetime'
+          description: Backward-compatible token expiration timestamp.
+        token_expires_at:
+          allOf:
+            - $ref: '#/components/schemas/IsoDatetime'
+          description: Token expiration timestamp.
+        refresh_after:
+          allOf:
+            - $ref: '#/components/schemas/IsoDatetime'
+          description: Earliest suggested token refresh timestamp.
+
+    StartCallResponse:
+      allOf:
+        - type: object
+          required: [call]
+          properties:
+            call: { $ref: '#/components/schemas/Call' }
+        - $ref: '#/components/schemas/LiveKitConnection'
+
+    JoinCallResponse:
+      allOf:
+        - type: object
+          required: [participant]
+          properties:
+            participant: { $ref: '#/components/schemas/CallParticipant' }
+        - $ref: '#/components/schemas/LiveKitConnection'
+
+    LeaveCallResponse:
+      type: object
+      required: [already_left]
+      properties:
+        already_left:
+          type: boolean
+          description: True when the leave request was an idempotent no-op.
+
+    CancelCallResponse:
+      type: object
+      required: [ended]
+      properties:
+        ended:
+          type: boolean
+          description: True when this request won the ringing-to-cancelled terminal transition.
 
     UpdateCallMediaRequest:
       type: object

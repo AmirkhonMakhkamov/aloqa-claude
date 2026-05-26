@@ -133,6 +133,46 @@ func TestCallTurnCredentialsHTTP(t *testing.T) {
 	}
 }
 
+func TestCallLeaveHTTPReturnsJSONBody(t *testing.T) {
+	userID := uuid.New()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	router, _ := newCallInteractionHTTPRouter(workspaceID, callID, userID, entity.CallStatusActive, true)
+
+	res := performCallInteractionRequest(router, http.MethodPost, workspaceID, callID, "/leave", "", true)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", res.Code, res.Body.String())
+	}
+
+	var body callsvc.LeaveCallResult
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.AlreadyLeft {
+		t.Fatalf("already_left = true, want false")
+	}
+}
+
+func TestCallCancelHTTPReturnsJSONBody(t *testing.T) {
+	userID := uuid.New()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	router, _ := newCallInteractionHTTPRouter(workspaceID, callID, userID, entity.CallStatusRinging, true)
+
+	res := performCallInteractionRequest(router, http.MethodPost, workspaceID, callID, "/cancel", "", true)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", res.Code, res.Body.String())
+	}
+
+	var body callsvc.CancelCallResult
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !body.Ended {
+		t.Fatalf("ended = false, want true")
+	}
+}
+
 func newCallInteractionHTTPRouter(workspaceID, callID, userID uuid.UUID, status entity.CallStatus, includeParticipant bool) (http.Handler, *httpCallRepo) {
 	return newCallInteractionHTTPRouterWithMediaConfig(workspaceID, callID, userID, status, includeParticipant, callsvc.MediaConfig{})
 }
@@ -140,7 +180,7 @@ func newCallInteractionHTTPRouter(workspaceID, callID, userID uuid.UUID, status 
 func newCallInteractionHTTPRouterWithMediaConfig(workspaceID, callID, userID uuid.UUID, status entity.CallStatus, includeParticipant bool, media callsvc.MediaConfig) (http.Handler, *httpCallRepo) {
 	calls := &httpCallRepo{
 		calls: map[uuid.UUID]*entity.Call{
-			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: status},
+			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: status, CreatedBy: userID},
 		},
 		participants: map[[2]uuid.UUID]*entity.CallParticipant{},
 	}
@@ -286,6 +326,49 @@ func (r *httpCallRepo) UpdateStatus(context.Context, uuid.UUID, entity.CallStatu
 	return nil
 }
 func (r *httpCallRepo) End(context.Context, uuid.UUID) error { return nil }
+func (r *httpCallRepo) EndWithReason(_ context.Context, id uuid.UUID, reason entity.CallEndReason) error {
+	_, err := r.EndWithReasonIfNotEnded(context.Background(), id, reason)
+	return err
+}
+func (r *httpCallRepo) EndWithReasonIfNotEnded(_ context.Context, id uuid.UUID, reason entity.CallEndReason) (bool, error) {
+	call := r.calls[id]
+	if call == nil {
+		return false, cerrors.NotFound("call not found")
+	}
+	if call.Status == entity.CallStatusEnded {
+		return false, nil
+	}
+	now := time.Now().UTC()
+	call.Status = entity.CallStatusEnded
+	call.EndedAt = &now
+	call.EndReason = reason
+	return true, nil
+}
+func (r *httpCallRepo) CancelRingingWithReason(_ context.Context, id uuid.UUID, reason entity.CallEndReason) (bool, error) {
+	call := r.calls[id]
+	if call == nil {
+		return false, cerrors.NotFound("call not found")
+	}
+	if call.Status != entity.CallStatusRinging {
+		return false, nil
+	}
+	now := time.Now().UTC()
+	call.Status = entity.CallStatusEnded
+	call.EndedAt = &now
+	call.EndReason = reason
+	return true, nil
+}
+func (r *httpCallRepo) ActivateRinging(_ context.Context, id uuid.UUID) (bool, error) {
+	call := r.calls[id]
+	if call == nil {
+		return false, cerrors.NotFound("call not found")
+	}
+	if call.Status != entity.CallStatusRinging {
+		return false, nil
+	}
+	call.Status = entity.CallStatusActive
+	return true, nil
+}
 func (r *httpCallRepo) AddParticipant(_ context.Context, p *entity.CallParticipant) error {
 	r.participants[[2]uuid.UUID{p.CallID, p.UserID}] = p
 	return nil
@@ -308,8 +391,27 @@ func (r *httpCallRepo) ListParticipants(_ context.Context, callID uuid.UUID) ([]
 	}
 	return participants, nil
 }
-func (r *httpCallRepo) UpdateParticipantStatus(context.Context, uuid.UUID, entity.ParticipantStatus) error {
-	return nil
+func (r *httpCallRepo) UpdateParticipantStatus(ctx context.Context, id uuid.UUID, status entity.ParticipantStatus) error {
+	return r.UpdateParticipantStatusWithReason(ctx, id, status, "")
+}
+func (r *httpCallRepo) UpdateParticipantStatusWithReason(_ context.Context, id uuid.UUID, status entity.ParticipantStatus, reason entity.ParticipantLeftReason) error {
+	for _, p := range r.participants {
+		if p.ID == id {
+			now := time.Now().UTC()
+			p.Status = status
+			if status == entity.ParticipantStatusDisconnected {
+				p.LeftAt = &now
+				p.LeftReason = reason
+			}
+			if status == entity.ParticipantStatusConnected {
+				p.JoinedAt = &now
+				p.LeftAt = nil
+				p.LeftReason = ""
+			}
+			return nil
+		}
+	}
+	return cerrors.NotFound("call participant not found")
 }
 func (r *httpCallRepo) UpdateParticipantRole(context.Context, uuid.UUID, entity.CallRole) error {
 	return nil

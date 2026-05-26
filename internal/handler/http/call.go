@@ -3,6 +3,7 @@ package http
 import (
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -13,6 +14,27 @@ import (
 	"aloqa/internal/pkg/id"
 	"aloqa/internal/service/call"
 )
+
+// StartCallResponse carries the created call plus the LiveKit connection info
+// the FE needs to join the SFU room.
+type StartCallResponse struct {
+	Call           *entity.Call `json:"call"`
+	LivekitURL     string       `json:"livekit_url,omitempty"`
+	AccessToken    string       `json:"access_token,omitempty"`
+	ExpiresAt      *time.Time   `json:"expires_at,omitempty"`
+	TokenExpiresAt *time.Time   `json:"token_expires_at,omitempty"`
+	RefreshAfter   *time.Time   `json:"refresh_after,omitempty"`
+}
+
+// JoinCallResponse mirrors StartCallResponse for the join endpoint.
+type JoinCallResponse struct {
+	Participant    *entity.CallParticipant `json:"participant"`
+	LivekitURL     string                  `json:"livekit_url,omitempty"`
+	AccessToken    string                  `json:"access_token,omitempty"`
+	ExpiresAt      *time.Time              `json:"expires_at,omitempty"`
+	TokenExpiresAt *time.Time              `json:"token_expires_at,omitempty"`
+	RefreshAfter   *time.Time              `json:"refresh_after,omitempty"`
+}
 
 type CallHandler struct {
 	svc *call.Service
@@ -55,7 +77,23 @@ func (h *CallHandler) Start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeCreated(w, c)
+	resp := StartCallResponse{Call: c}
+	if h.svc.LiveKitConfigured() {
+		info, tokenErr := h.svc.IssueLiveKitJoinInfo(r.Context(), c, userID, "")
+		if tokenErr != nil {
+			writeErr(w, tokenErr)
+			return
+		}
+		resp.LivekitURL = info.URL
+		resp.AccessToken = info.AccessToken
+		expires := info.ExpiresAt
+		tokenExpires := info.TokenExpiresAt
+		refreshAfter := info.RefreshAfter
+		resp.ExpiresAt = &expires
+		resp.TokenExpiresAt = &tokenExpires
+		resp.RefreshAfter = &refreshAfter
+	}
+	writeCreated(w, resp)
 }
 
 func (h *CallHandler) Get(w http.ResponseWriter, r *http.Request) {
@@ -87,6 +125,23 @@ func (h *CallHandler) ListActive(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeOK(w, calls)
+}
+
+// ListActiveSummaries returns the enriched Live Now projection used by the
+// Calls Home page (GET /calls/active). Response shape matches the FE Zod
+// schema ActiveCallSummarySchema and is wrapped as {"calls": [...]} per
+// the same envelope as /calls/recents.
+func (h *CallHandler) ListActiveSummaries(w http.ResponseWriter, r *http.Request) {
+	wsID := middleware.WorkspaceIDFromContext(r.Context())
+	userID := middleware.UserIDFromContext(r.Context())
+
+	summaries, err := h.svc.ListActiveSummaries(r.Context(), wsID, userID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, map[string]any{"calls": summaries})
 }
 
 func (h *CallHandler) Recents(w http.ResponseWriter, r *http.Request) {
@@ -126,7 +181,29 @@ func (h *CallHandler) Join(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeOK(w, participant)
+	resp := JoinCallResponse{Participant: participant}
+	if h.svc.LiveKitConfigured() && participant.Status == entity.ParticipantStatusConnected {
+		c, callErr := h.svc.GetCall(r.Context(), workspaceID, callID, userID)
+		if callErr != nil {
+			writeErr(w, callErr)
+			return
+		} else if c != nil {
+			info, tokenErr := h.svc.IssueLiveKitJoinInfo(r.Context(), c, userID, "")
+			if tokenErr != nil {
+				writeErr(w, tokenErr)
+				return
+			}
+			resp.LivekitURL = info.URL
+			resp.AccessToken = info.AccessToken
+			expires := info.ExpiresAt
+			tokenExpires := info.TokenExpiresAt
+			refreshAfter := info.RefreshAfter
+			resp.ExpiresAt = &expires
+			resp.TokenExpiresAt = &tokenExpires
+			resp.RefreshAfter = &refreshAfter
+		}
+	}
+	writeOK(w, resp)
 }
 
 func (h *CallHandler) Leave(w http.ResponseWriter, r *http.Request) {
@@ -139,12 +216,13 @@ func (h *CallHandler) Leave(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
 
-	if err := h.svc.LeaveCall(r.Context(), workspaceID, callID, userID); err != nil {
+	result, err := h.svc.LeaveCall(r.Context(), workspaceID, callID, userID)
+	if err != nil {
 		writeErr(w, err)
 		return
 	}
 
-	writeNoContent(w)
+	writeOK(w, result)
 }
 
 func (h *CallHandler) End(w http.ResponseWriter, r *http.Request) {
@@ -163,6 +241,25 @@ func (h *CallHandler) End(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeNoContent(w)
+}
+
+func (h *CallHandler) Cancel(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	result, err := h.svc.CancelCall(r.Context(), workspaceID, callID, userID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, result)
 }
 
 func (h *CallHandler) Participants(w http.ResponseWriter, r *http.Request) {

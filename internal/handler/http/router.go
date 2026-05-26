@@ -19,6 +19,7 @@ type RouterDeps struct {
 	Saved            *SavedHandler
 	Messages         *MessageHandler
 	Calls            *CallHandler
+	LiveKit          *LiveKitWebhookHandler
 	Calendar         *CalendarHandler
 	Breakout         *BreakoutHandler
 	Files            *FileHandler
@@ -109,6 +110,13 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 		r.Use(authLimiter)
 		r.Post("/api/v1/invites/{token}/redeem", deps.Guests.RedeemInvite)
 	})
+
+	// LiveKit webhook (public). LiveKit Server posts signed events here;
+	// signature verification happens inside the handler via the SDK helper,
+	// so no global auth middleware applies.
+	if deps.LiveKit != nil {
+		r.Post(deps.LiveKit.WebhookPath(), deps.LiveKit.Webhook)
+	}
 
 	// Authenticated routes.
 	r.Group(func(r chi.Router) {
@@ -310,12 +318,14 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 	r.Route("/calls", func(r chi.Router) {
 		r.Post("/", deps.Calls.Start)
 		r.Get("/", deps.Calls.ListActive)
+		r.Get("/active", deps.Calls.ListActiveSummaries)
 		r.Get("/recents", deps.Calls.Recents)
 
 		r.Route("/{callID}", func(r chi.Router) {
 			r.Get("/", deps.Calls.Get)
 			r.Post("/join", deps.Calls.Join)
 			r.Post("/leave", deps.Calls.Leave)
+			r.Post("/cancel", deps.Calls.Cancel)
 			r.Post("/end", deps.Calls.End)
 			r.Post("/hand", deps.Calls.RaiseHand)
 			r.Delete("/hand", deps.Calls.LowerHand)

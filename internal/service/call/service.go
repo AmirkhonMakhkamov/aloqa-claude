@@ -586,7 +586,7 @@ func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid
 	}
 
 	if call.Status == entity.CallStatusEnded {
-		return nil, cerrors.Forbidden("call has already ended")
+		return nil, cerrors.CallEnded("call has already ended")
 	}
 
 	// Check capacity if max participants is set.

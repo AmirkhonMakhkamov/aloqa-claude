@@ -54,6 +54,9 @@ func TestStartCallFromEventIsIdempotent(t *testing.T) {
 	if calls.starts != 1 {
 		t.Fatalf("starts = %d, want 1", calls.starts)
 	}
+	if calls.ensureCalls != 1 {
+		t.Fatalf("EnsureLiveKitRoomRequired calls = %d, want 1 for existing linked call", calls.ensureCalls)
+	}
 }
 
 func TestStartCallFromEventRollsBackWhenLinkFails(t *testing.T) {
@@ -79,6 +82,78 @@ func TestStartCallFromEventRollsBackWhenLinkFails(t *testing.T) {
 	}
 	if got := txManager.calendars.events[eventID].CallID; got != nil {
 		t.Fatalf("event call_id after rollback = %s, want nil", *got)
+	}
+}
+
+func TestStartCallFromEventRollsBackWhenLiveKitPreparationFails(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	organizerID := uuid.New()
+	eventID := uuid.New()
+	txManager := newCalendarCallTxManager(&entity.CalendarEvent{
+		ID:          eventID,
+		WorkspaceID: workspaceID,
+		OrganizerID: organizerID,
+		Title:       "Planning",
+	})
+	calls := &fakeCallService{
+		calls:     map[uuid.UUID]*entity.Call{},
+		ensureErr: cerrors.Unavailable("livekit unavailable"),
+	}
+	svc := NewService(txManager.calendars.fakeCalendarRepo, fakeMembers{members: map[[2]uuid.UUID]bool{{workspaceID, organizerID}: true}}, calls, noopPublisher{})
+	svc.SetTransactionManager(txManager)
+
+	if _, err := svc.StartCallFromEvent(ctx, workspaceID, eventID, organizerID); !hasCode(err, cerrors.CodeUnavailable) {
+		t.Fatalf("StartCallFromEvent error = %v, want UNAVAILABLE", err)
+	}
+	if len(txManager.calls.calls) != 0 {
+		t.Fatalf("calls persisted after LiveKit failure = %d, want 0", len(txManager.calls.calls))
+	}
+	if got := txManager.calendars.events[eventID].CallID; got != nil {
+		t.Fatalf("event call_id after LiveKit failure = %s, want nil", *got)
+	}
+	if calls.deleteCalls != 0 {
+		t.Fatalf("DeleteLiveKitRoom calls = %d, want 0 before room creation", calls.deleteCalls)
+	}
+}
+
+func TestStartCallFromEventEnsuresExistingLinkedLiveKitRoom(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	organizerID := uuid.New()
+	eventID := uuid.New()
+	callID := uuid.New()
+	txManager := newCalendarCallTxManager(&entity.CalendarEvent{
+		ID:          eventID,
+		WorkspaceID: workspaceID,
+		OrganizerID: organizerID,
+		Title:       "Planning",
+		CallID:      &callID,
+	})
+	txManager.calls.calls[callID] = &entity.Call{
+		ID:          callID,
+		WorkspaceID: workspaceID,
+		Type:        entity.CallTypeMeeting,
+		Status:      entity.CallStatusRinging,
+		Title:       "Planning",
+		CreatedBy:   organizerID,
+	}
+	calls := &fakeCallService{calls: map[uuid.UUID]*entity.Call{}}
+	svc := NewService(txManager.calendars.fakeCalendarRepo, fakeMembers{members: map[[2]uuid.UUID]bool{{workspaceID, organizerID}: true}}, calls, noopPublisher{})
+	svc.SetTransactionManager(txManager)
+
+	callEntity, err := svc.StartCallFromEvent(ctx, workspaceID, eventID, organizerID)
+	if err != nil {
+		t.Fatalf("StartCallFromEvent error = %v", err)
+	}
+	if callEntity.ID != callID {
+		t.Fatalf("call ID = %s, want existing %s", callEntity.ID, callID)
+	}
+	if calls.ensureCalls != 1 {
+		t.Fatalf("EnsureLiveKitRoomRequired calls = %d, want 1", calls.ensureCalls)
+	}
+	if len(txManager.calls.calls) != 1 {
+		t.Fatalf("calls persisted = %d, want existing only", len(txManager.calls.calls))
 	}
 }
 
@@ -1282,6 +1357,11 @@ func TestMoveEventOccurrence_RealtimePublishedCorrectly(t *testing.T) {
 	}
 }
 
+func hasCode(err error, code cerrors.Code) bool {
+	appErr, ok := cerrors.AsAppError(err)
+	return ok && appErr.Code == code
+}
+
 type fakeCalendarRepo struct {
 	mu                  sync.Mutex
 	calendars           []entity.UserCalendar
@@ -1714,8 +1794,11 @@ func (m fakeMembers) UpdateMemberRole(context.Context, uuid.UUID, uuid.UUID, ent
 func (m fakeMembers) RemoveMember(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 
 type fakeCallService struct {
-	starts int
-	calls  map[uuid.UUID]*entity.Call
+	starts      int
+	deleteCalls int
+	ensureCalls int
+	ensureErr   error
+	calls       map[uuid.UUID]*entity.Call
 }
 
 func (s *fakeCallService) StartCall(_ context.Context, workspaceID, userID uuid.UUID, callType entity.CallType, title string, channelID *uuid.UUID, settings entity.CallSettings) (*entity.Call, error) {
@@ -1741,6 +1824,16 @@ func (s *fakeCallService) GetCall(_ context.Context, _ uuid.UUID, callID, _ uuid
 		return nil, cerrors.NotFound("call not found")
 	}
 	return call, nil
+}
+
+func (s *fakeCallService) EnsureLiveKitRoomRequired(context.Context, *entity.Call) error {
+	s.ensureCalls++
+	return s.ensureErr
+}
+
+func (s *fakeCallService) DeleteLiveKitRoom(context.Context, uuid.UUID) error {
+	s.deleteCalls++
+	return nil
 }
 
 type calendarCallTxManager struct {

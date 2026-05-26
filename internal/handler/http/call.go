@@ -1,7 +1,6 @@
 package http
 
 import (
-	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -82,18 +81,17 @@ func (h *CallHandler) Start(w http.ResponseWriter, r *http.Request) {
 	if h.svc.LiveKitConfigured() {
 		info, tokenErr := h.svc.IssueLiveKitJoinInfo(r.Context(), c, userID, "")
 		if tokenErr != nil {
-			// Non-fatal: caller already has the call row; FE surfaces the error and can retry join.
-			slog.WarnContext(r.Context(), "failed to issue livekit join info on start", "call_id", c.ID, "user_id", userID, "error", tokenErr)
-		} else {
-			resp.LivekitURL = info.URL
-			resp.AccessToken = info.AccessToken
-			expires := info.ExpiresAt
-			tokenExpires := info.TokenExpiresAt
-			refreshAfter := info.RefreshAfter
-			resp.ExpiresAt = &expires
-			resp.TokenExpiresAt = &tokenExpires
-			resp.RefreshAfter = &refreshAfter
+			writeErr(w, tokenErr)
+			return
 		}
+		resp.LivekitURL = info.URL
+		resp.AccessToken = info.AccessToken
+		expires := info.ExpiresAt
+		tokenExpires := info.TokenExpiresAt
+		refreshAfter := info.RefreshAfter
+		resp.ExpiresAt = &expires
+		resp.TokenExpiresAt = &tokenExpires
+		resp.RefreshAfter = &refreshAfter
 	}
 	writeCreated(w, resp)
 }
@@ -187,21 +185,22 @@ func (h *CallHandler) Join(w http.ResponseWriter, r *http.Request) {
 	if h.svc.LiveKitConfigured() && participant.Status == entity.ParticipantStatusConnected {
 		c, callErr := h.svc.GetCall(r.Context(), workspaceID, callID, userID)
 		if callErr != nil {
-			slog.WarnContext(r.Context(), "failed to load call after join", "call_id", callID, "user_id", userID, "error", callErr)
+			writeErr(w, callErr)
+			return
 		} else if c != nil {
 			info, tokenErr := h.svc.IssueLiveKitJoinInfo(r.Context(), c, userID, "")
 			if tokenErr != nil {
-				slog.WarnContext(r.Context(), "failed to issue livekit join info on join", "call_id", callID, "user_id", userID, "error", tokenErr)
-			} else {
-				resp.LivekitURL = info.URL
-				resp.AccessToken = info.AccessToken
-				expires := info.ExpiresAt
-				tokenExpires := info.TokenExpiresAt
-				refreshAfter := info.RefreshAfter
-				resp.ExpiresAt = &expires
-				resp.TokenExpiresAt = &tokenExpires
-				resp.RefreshAfter = &refreshAfter
+				writeErr(w, tokenErr)
+				return
 			}
+			resp.LivekitURL = info.URL
+			resp.AccessToken = info.AccessToken
+			expires := info.ExpiresAt
+			tokenExpires := info.TokenExpiresAt
+			refreshAfter := info.RefreshAfter
+			resp.ExpiresAt = &expires
+			resp.TokenExpiresAt = &tokenExpires
+			resp.RefreshAfter = &refreshAfter
 		}
 	}
 	writeOK(w, resp)
@@ -217,12 +216,13 @@ func (h *CallHandler) Leave(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
 
-	if err := h.svc.LeaveCall(r.Context(), workspaceID, callID, userID); err != nil {
+	result, err := h.svc.LeaveCall(r.Context(), workspaceID, callID, userID)
+	if err != nil {
 		writeErr(w, err)
 		return
 	}
 
-	writeNoContent(w)
+	writeOK(w, result)
 }
 
 func (h *CallHandler) End(w http.ResponseWriter, r *http.Request) {
@@ -241,6 +241,25 @@ func (h *CallHandler) End(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeNoContent(w)
+}
+
+func (h *CallHandler) Cancel(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	result, err := h.svc.CancelCall(r.Context(), workspaceID, callID, userID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, result)
 }
 
 func (h *CallHandler) Participants(w http.ResponseWriter, r *http.Request) {

@@ -26,6 +26,8 @@ type EventPublisher interface {
 type CallService interface {
 	StartCall(ctx context.Context, workspaceID, userID uuid.UUID, callType entity.CallType, title string, channelID *uuid.UUID, settings entity.CallSettings) (*entity.Call, error)
 	GetCall(ctx context.Context, workspaceID, callID, userID uuid.UUID) (*entity.Call, error)
+	EnsureLiveKitRoomRequired(ctx context.Context, call *entity.Call) error
+	DeleteLiveKitRoom(ctx context.Context, callID uuid.UUID) error
 }
 
 type Service struct {
@@ -709,6 +711,9 @@ func (s *Service) StartCallFromEvent(ctx context.Context, workspaceID, eventID, 
 			return nil, err
 		}
 		if callEntity.Status != entity.CallStatusEnded {
+			if err := s.calls.EnsureLiveKitRoomRequired(ctx, callEntity); err != nil {
+				return nil, err
+			}
 			return callEntity, nil
 		}
 	}
@@ -740,6 +745,7 @@ func (s *Service) StartCallFromEvent(ctx context.Context, workspaceID, eventID, 
 
 func (s *Service) startCallFromEventTx(ctx context.Context, workspaceID, eventID, initiatorID uuid.UUID) (*entity.Call, error) {
 	var callEntity *entity.Call
+	var preparedLiveKitRoomID *uuid.UUID
 	err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
 		if scope.Calendars() == nil || scope.Calls() == nil {
 			return cerrors.Unavailable("calendar call transaction scope is not configured")
@@ -761,6 +767,11 @@ func (s *Service) startCallFromEventTx(ctx context.Context, workspaceID, eventID
 					return err
 				}
 			} else if existing.Status != entity.CallStatusEnded {
+				if s.calls != nil {
+					if err := s.calls.EnsureLiveKitRoomRequired(ctx, existing); err != nil {
+						return err
+					}
+				}
 				callEntity = existing
 				return nil
 			}
@@ -797,6 +808,12 @@ func (s *Service) startCallFromEventTx(ctx context.Context, workspaceID, eventID
 			Status:   entity.ParticipantStatusConnected,
 			JoinedAt: &now,
 		}
+		if s.calls != nil {
+			if err := s.calls.EnsureLiveKitRoomRequired(ctx, callEntity); err != nil {
+				return err
+			}
+			preparedLiveKitRoomID = &callEntity.ID
+		}
 		if err := scope.Calls().Create(ctx, callEntity); err != nil {
 			return err
 		}
@@ -813,6 +830,11 @@ func (s *Service) startCallFromEventTx(ctx context.Context, workspaceID, eventID
 		return s.enqueueTx(ctx, scope, event.TypeCalendarEventUpdated, calendarSubject(workspaceID), workspaceID, channelIDOrNil(eventEntity.ChannelID), initiatorID, event.CalendarEventPayload{Event: *eventEntity})
 	})
 	if err != nil {
+		if preparedLiveKitRoomID != nil && s.calls != nil {
+			if cleanupErr := s.calls.DeleteLiveKitRoom(ctx, *preparedLiveKitRoomID); cleanupErr != nil {
+				slog.WarnContext(ctx, "failed to clean up livekit room after scheduled call rollback", "call_id", *preparedLiveKitRoomID, "error", cleanupErr)
+			}
+		}
 		return nil, err
 	}
 	return callEntity, nil

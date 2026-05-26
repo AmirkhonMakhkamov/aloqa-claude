@@ -141,6 +141,19 @@ func (s *Service) EnsureLiveKitRoom(ctx context.Context, call *entity.Call) erro
 	})
 }
 
+func (s *Service) EnsureLiveKitRoomRequired(ctx context.Context, call *entity.Call) error {
+	if call == nil {
+		return cerrors.InvalidInput("call is required")
+	}
+	if !s.livekit.IsConfigured() {
+		return nil
+	}
+	if s.livekitRooms == nil {
+		return cerrors.Unavailable("livekit room service is not configured")
+	}
+	return s.EnsureLiveKitRoom(ctx, call)
+}
+
 func (s *Service) DeleteLiveKitRoom(ctx context.Context, callID uuid.UUID) error {
 	if !s.livekit.IsConfigured() || s.livekitRooms == nil {
 		return nil
@@ -260,15 +273,21 @@ func (s *Service) handleLiveKitRoomFinished(ctx context.Context, callID uuid.UUI
 		return nil
 	}
 
-	if err := s.calls.End(ctx, callID); err != nil {
+	ended, err := endCallWithReasonIfNotEnded(ctx, s.calls, callID, entity.CallEndReasonAllLeft)
+	if err != nil {
 		return cerrors.Internal("failed to mark call ended", err)
 	}
-	now := time.Now()
-	call.Status = entity.CallStatusEnded
-	call.EndedAt = &now
+	if !ended {
+		return nil
+	}
+	markCallEnded(call, entity.CallEndReasonAllLeft)
 
 	s.publishCallEvent(ctx, event.TypeCallEnded, call, call.CreatedBy)
+	s.closeAllBreakoutSFURooms(ctx, callID)
 	s.deleteLiveKitRoomBestEffort(ctx, callID)
+	if s.sfu != nil {
+		s.sfu.CloseRoom(callID.String())
+	}
 	slog.InfoContext(ctx, "livekit room_finished bridged", "call_id", callID)
 	return nil
 }
@@ -279,6 +298,17 @@ func (s *Service) handleLiveKitParticipantJoined(ctx context.Context, callID uui
 	}
 	userID, err := uuid.Parse(p.GetIdentity())
 	if err != nil {
+		return nil
+	}
+
+	call, err := s.calls.GetByID(ctx, callID)
+	if err != nil {
+		if isNotFound(err) {
+			return nil
+		}
+		return cerrors.Internal("failed to load call for livekit participant_joined", err)
+	}
+	if call.Status == entity.CallStatusEnded {
 		return nil
 	}
 
@@ -296,18 +326,14 @@ func (s *Service) handleLiveKitParticipantJoined(ctx context.Context, callID uui
 		return nil
 	}
 
-	call, err := s.calls.GetByID(ctx, callID)
-	if err != nil {
-		if isNotFound(err) {
-			return nil
-		}
-		return cerrors.Internal("failed to load call for livekit participant_joined", err)
-	}
-
 	// Transition ringing → active when a non-caller joins (or any first join in a multi-party call).
 	if call.Status == entity.CallStatusRinging && userID != call.CreatedBy {
-		if err := s.calls.UpdateStatus(ctx, callID, entity.CallStatusActive); err != nil {
+		activated, err := activateRingingCall(ctx, s.calls, callID)
+		if err != nil {
 			return cerrors.Internal("failed to mark call active", err)
+		}
+		if !activated {
+			return nil
 		}
 		call.Status = entity.CallStatusActive
 	}
@@ -326,23 +352,6 @@ func (s *Service) handleLiveKitParticipantLeft(ctx context.Context, callID uuid.
 		return nil
 	}
 
-	participant, err := s.calls.GetParticipant(ctx, callID, userID)
-	if err != nil {
-		if isNotFound(err) {
-			return nil
-		}
-		return cerrors.Internal("failed to load participant for livekit participant_left", err)
-	}
-
-	if participant.Status != entity.ParticipantStatusDisconnected {
-		if err := s.calls.UpdateParticipantStatus(ctx, participant.ID, entity.ParticipantStatusDisconnected); err != nil {
-			return cerrors.Internal("failed to mark participant disconnected", err)
-		}
-		now := time.Now()
-		participant.Status = entity.ParticipantStatusDisconnected
-		participant.LeftAt = &now
-	}
-
 	call, err := s.calls.GetByID(ctx, callID)
 	if err != nil {
 		if isNotFound(err) {
@@ -350,20 +359,46 @@ func (s *Service) handleLiveKitParticipantLeft(ctx context.Context, callID uuid.
 		}
 		return cerrors.Internal("failed to load call for livekit participant_left", err)
 	}
+	if call.Status == entity.CallStatusEnded {
+		return nil
+	}
+
+	participant, err := s.calls.GetParticipant(ctx, callID, userID)
+	if err != nil {
+		if isNotFound(err) {
+			return nil
+		}
+		return cerrors.Internal("failed to load participant for livekit participant_left", err)
+	}
+	if participant.Status == entity.ParticipantStatusDisconnected {
+		return nil
+	}
+
+	disconnected, err := disconnectParticipantIfConnected(ctx, s.calls, participant.ID, entity.ParticipantLeftReasonLeft)
+	if err != nil {
+		return cerrors.Internal("failed to mark participant disconnected", err)
+	}
+	if !disconnected {
+		return nil
+	}
+	markParticipantDisconnected(participant, entity.ParticipantLeftReasonLeft)
 
 	s.publishParticipantEvent(ctx, event.TypeCallParticipantLeft, call, participant)
 	participants, err := s.calls.ListParticipants(ctx, callID)
 	if err != nil {
 		return cerrors.Internal("failed to list participants for livekit participant_left", err)
 	}
-	if shouldEndCallAfterLiveKitLeft(call, participants) {
-		if err := s.calls.End(ctx, callID); err != nil {
+	if shouldAutoEndAfterLeave(call, participants) {
+		ended, err := endCallWithReasonIfNotEnded(ctx, s.calls, callID, entity.CallEndReasonAllLeft)
+		if err != nil {
 			return cerrors.Internal("failed to auto-end call for livekit participant_left", err)
 		}
-		now := time.Now()
-		call.Status = entity.CallStatusEnded
-		call.EndedAt = &now
+		if !ended {
+			return nil
+		}
+		markCallEnded(call, entity.CallEndReasonAllLeft)
 		s.publishCallEvent(ctx, event.TypeCallEnded, call, userID)
+		s.closeAllBreakoutSFURooms(ctx, callID)
 		s.deleteLiveKitRoomBestEffort(ctx, callID)
 		if s.sfu != nil {
 			s.sfu.CloseRoom(callID.String())
@@ -411,22 +446,6 @@ func (s *Service) handleLiveKitTrackChanged(ctx context.Context, callID uuid.UUI
 	s.publishParticipantEvent(ctx, event.TypeCallParticipantUpdated, call, participant)
 	slog.InfoContext(ctx, "livekit screen-share track bridged", "call_id", callID, "user_id", userID, "screen_sharing", screenSharing)
 	return nil
-}
-
-func shouldEndCallAfterLiveKitLeft(call *entity.Call, participants []entity.CallParticipant) bool {
-	if call == nil || call.Status == entity.CallStatusEnded {
-		return false
-	}
-	activeCount := 0
-	for _, participant := range participants {
-		if participant.Status == entity.ParticipantStatusConnected || participant.Status == entity.ParticipantStatusJoining {
-			activeCount++
-		}
-	}
-	if call.Type == entity.CallTypeOneToOne {
-		return activeCount < 2
-	}
-	return activeCount == 0
 }
 
 func isNotFound(err error) bool {

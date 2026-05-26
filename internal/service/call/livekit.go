@@ -273,8 +273,12 @@ func (s *Service) handleLiveKitRoomFinished(ctx context.Context, callID uuid.UUI
 		return nil
 	}
 
-	if err := endCallWithReason(ctx, s.calls, callID, entity.CallEndReasonAllLeft); err != nil {
+	ended, err := endCallWithReasonIfNotEnded(ctx, s.calls, callID, entity.CallEndReasonAllLeft)
+	if err != nil {
 		return cerrors.Internal("failed to mark call ended", err)
+	}
+	if !ended {
+		return nil
 	}
 	markCallEnded(call, entity.CallEndReasonAllLeft)
 
@@ -297,6 +301,17 @@ func (s *Service) handleLiveKitParticipantJoined(ctx context.Context, callID uui
 		return nil
 	}
 
+	call, err := s.calls.GetByID(ctx, callID)
+	if err != nil {
+		if isNotFound(err) {
+			return nil
+		}
+		return cerrors.Internal("failed to load call for livekit participant_joined", err)
+	}
+	if call.Status == entity.CallStatusEnded {
+		return nil
+	}
+
 	participant, err := s.calls.GetParticipant(ctx, callID, userID)
 	if err != nil {
 		if isNotFound(err) {
@@ -311,18 +326,14 @@ func (s *Service) handleLiveKitParticipantJoined(ctx context.Context, callID uui
 		return nil
 	}
 
-	call, err := s.calls.GetByID(ctx, callID)
-	if err != nil {
-		if isNotFound(err) {
-			return nil
-		}
-		return cerrors.Internal("failed to load call for livekit participant_joined", err)
-	}
-
 	// Transition ringing → active when a non-caller joins (or any first join in a multi-party call).
 	if call.Status == entity.CallStatusRinging && userID != call.CreatedBy {
-		if err := s.calls.UpdateStatus(ctx, callID, entity.CallStatusActive); err != nil {
+		activated, err := activateRingingCall(ctx, s.calls, callID)
+		if err != nil {
 			return cerrors.Internal("failed to mark call active", err)
+		}
+		if !activated {
+			return nil
 		}
 		call.Status = entity.CallStatusActive
 	}
@@ -341,21 +352,6 @@ func (s *Service) handleLiveKitParticipantLeft(ctx context.Context, callID uuid.
 		return nil
 	}
 
-	participant, err := s.calls.GetParticipant(ctx, callID, userID)
-	if err != nil {
-		if isNotFound(err) {
-			return nil
-		}
-		return cerrors.Internal("failed to load participant for livekit participant_left", err)
-	}
-
-	if participant.Status != entity.ParticipantStatusDisconnected {
-		if err := updateParticipantStatusWithReason(ctx, s.calls, participant.ID, entity.ParticipantStatusDisconnected, entity.ParticipantLeftReasonLeft); err != nil {
-			return cerrors.Internal("failed to mark participant disconnected", err)
-		}
-		markParticipantDisconnected(participant, entity.ParticipantLeftReasonLeft)
-	}
-
 	call, err := s.calls.GetByID(ctx, callID)
 	if err != nil {
 		if isNotFound(err) {
@@ -363,6 +359,29 @@ func (s *Service) handleLiveKitParticipantLeft(ctx context.Context, callID uuid.
 		}
 		return cerrors.Internal("failed to load call for livekit participant_left", err)
 	}
+	if call.Status == entity.CallStatusEnded {
+		return nil
+	}
+
+	participant, err := s.calls.GetParticipant(ctx, callID, userID)
+	if err != nil {
+		if isNotFound(err) {
+			return nil
+		}
+		return cerrors.Internal("failed to load participant for livekit participant_left", err)
+	}
+	if participant.Status == entity.ParticipantStatusDisconnected {
+		return nil
+	}
+
+	disconnected, err := disconnectParticipantIfConnected(ctx, s.calls, participant.ID, entity.ParticipantLeftReasonLeft)
+	if err != nil {
+		return cerrors.Internal("failed to mark participant disconnected", err)
+	}
+	if !disconnected {
+		return nil
+	}
+	markParticipantDisconnected(participant, entity.ParticipantLeftReasonLeft)
 
 	s.publishParticipantEvent(ctx, event.TypeCallParticipantLeft, call, participant)
 	participants, err := s.calls.ListParticipants(ctx, callID)
@@ -370,8 +389,12 @@ func (s *Service) handleLiveKitParticipantLeft(ctx context.Context, callID uuid.
 		return cerrors.Internal("failed to list participants for livekit participant_left", err)
 	}
 	if shouldAutoEndAfterLeave(call, participants) {
-		if err := endCallWithReason(ctx, s.calls, callID, entity.CallEndReasonAllLeft); err != nil {
+		ended, err := endCallWithReasonIfNotEnded(ctx, s.calls, callID, entity.CallEndReasonAllLeft)
+		if err != nil {
 			return cerrors.Internal("failed to auto-end call for livekit participant_left", err)
+		}
+		if !ended {
+			return nil
 		}
 		markCallEnded(call, entity.CallEndReasonAllLeft)
 		s.publishCallEvent(ctx, event.TypeCallEnded, call, userID)

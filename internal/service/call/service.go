@@ -57,6 +57,22 @@ type callLifecycleReasonRepository interface {
 	UpdateParticipantStatusWithReason(ctx context.Context, id uuid.UUID, status entity.ParticipantStatus, leftReason entity.ParticipantLeftReason) error
 }
 
+type callEndTransitionRepository interface {
+	EndWithReasonIfNotEnded(ctx context.Context, id uuid.UUID, reason entity.CallEndReason) (bool, error)
+}
+
+type callCancelTransitionRepository interface {
+	CancelRingingWithReason(ctx context.Context, id uuid.UUID, reason entity.CallEndReason) (bool, error)
+}
+
+type callActivationRepository interface {
+	ActivateRinging(ctx context.Context, id uuid.UUID) (bool, error)
+}
+
+type callParticipantDisconnectRepository interface {
+	DisconnectParticipantIfConnectedWithReason(ctx context.Context, id uuid.UUID, reason entity.ParticipantLeftReason) (bool, error)
+}
+
 type LeaveCallResult struct {
 	AlreadyLeft bool `json:"already_left"`
 }
@@ -347,6 +363,36 @@ func endCallWithReason(ctx context.Context, repo repository.CallRepository, call
 	return repo.End(ctx, callID)
 }
 
+func endCallWithReasonIfNotEnded(ctx context.Context, repo repository.CallRepository, callID uuid.UUID, reason entity.CallEndReason) (bool, error) {
+	if transitionRepo, ok := repo.(callEndTransitionRepository); ok {
+		return transitionRepo.EndWithReasonIfNotEnded(ctx, callID, reason)
+	}
+	if err := endCallWithReason(ctx, repo, callID, reason); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func cancelRingingWithReason(ctx context.Context, repo repository.CallRepository, callID uuid.UUID, reason entity.CallEndReason) (bool, error) {
+	if transitionRepo, ok := repo.(callCancelTransitionRepository); ok {
+		return transitionRepo.CancelRingingWithReason(ctx, callID, reason)
+	}
+	if err := endCallWithReason(ctx, repo, callID, reason); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func activateRingingCall(ctx context.Context, repo repository.CallRepository, callID uuid.UUID) (bool, error) {
+	if activationRepo, ok := repo.(callActivationRepository); ok {
+		return activationRepo.ActivateRinging(ctx, callID)
+	}
+	if err := repo.UpdateStatus(ctx, callID, entity.CallStatusActive); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func updateParticipantStatusWithReason(
 	ctx context.Context,
 	repo repository.CallRepository,
@@ -358,6 +404,21 @@ func updateParticipantStatusWithReason(
 		return reasonRepo.UpdateParticipantStatusWithReason(ctx, participantID, status, reason)
 	}
 	return repo.UpdateParticipantStatus(ctx, participantID, status)
+}
+
+func disconnectParticipantIfConnected(
+	ctx context.Context,
+	repo repository.CallRepository,
+	participantID uuid.UUID,
+	reason entity.ParticipantLeftReason,
+) (bool, error) {
+	if disconnectRepo, ok := repo.(callParticipantDisconnectRepository); ok {
+		return disconnectRepo.DisconnectParticipantIfConnectedWithReason(ctx, participantID, reason)
+	}
+	if err := updateParticipantStatusWithReason(ctx, repo, participantID, entity.ParticipantStatusDisconnected, reason); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func markCallEnded(call *entity.Call, reason entity.CallEndReason) {
@@ -395,6 +456,13 @@ func mediaRoomPreparationError(err error) error {
 		return appErr
 	}
 	return cerrors.Internal("failed to prepare call media room", err)
+}
+
+func serviceError(message string, err error) error {
+	if appErr, ok := cerrors.AsAppError(err); ok {
+		return appErr
+	}
+	return cerrors.Internal(message, err)
 }
 
 // StartCall creates a new call and adds the creator as the host participant.
@@ -626,15 +694,19 @@ func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid
 				return s.enqueueParticipantEventTx(ctx, scope, event.TypeWaitingRoomJoined, call, participant)
 			}
 			if call.Status == entity.CallStatusRinging {
-				if err := scope.Calls().UpdateStatus(ctx, callID, entity.CallStatusActive); err != nil {
+				activated, err := activateRingingCall(ctx, scope.Calls(), callID)
+				if err != nil {
 					return err
+				}
+				if !activated {
+					return cerrors.Conflict("call is no longer ringing")
 				}
 				call.Status = entity.CallStatusActive
 			}
 			return s.enqueueParticipantEventTx(ctx, scope, event.TypeCallParticipantJoined, call, participant)
 		}); err != nil {
 			slog.ErrorContext(ctx, "failed to join call transaction", "call_id", callID, "user_id", userID, "error", err)
-			return nil, cerrors.Internal("failed to add participant", err)
+			return nil, serviceError("failed to add participant", err)
 		}
 	} else {
 		if err := s.calls.AddParticipant(ctx, participant); err != nil {
@@ -650,9 +722,18 @@ func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid
 
 		// Transition call from ringing to active if needed.
 		if call.Status == entity.CallStatusRinging {
-			if err := s.calls.UpdateStatus(ctx, callID, entity.CallStatusActive); err != nil {
+			activated, err := activateRingingCall(ctx, s.calls, callID)
+			if err != nil {
 				slog.ErrorContext(ctx, "failed to update call status to active", "call_id", callID, "error", err)
+				return nil, serviceError("failed to activate call", err)
 			}
+			if !activated {
+				if removeErr := s.calls.RemoveParticipant(ctx, callID, userID); removeErr != nil {
+					slog.WarnContext(ctx, "failed to remove participant after lost join race", "call_id", callID, "user_id", userID, "error", removeErr)
+				}
+				return nil, cerrors.Conflict("call is no longer ringing")
+			}
+			call.Status = entity.CallStatusActive
 		}
 
 		s.publishParticipantEvent(ctx, event.TypeCallParticipantJoined, call, participant)
@@ -701,10 +782,15 @@ func (s *Service) AdmitParticipant(ctx context.Context, workspaceID, callID, use
 
 	// Transition call from ringing to active if needed.
 	if call.Status == entity.CallStatusRinging {
-		if err := s.calls.UpdateStatus(ctx, callID, entity.CallStatusActive); err != nil {
+		activated, err := activateRingingCall(ctx, s.calls, callID)
+		if err != nil {
 			slog.ErrorContext(ctx, "failed to update call status to active after admission", "call_id", callID, "error", err)
-			return cerrors.Internal("failed to activate call", err)
+			return serviceError("failed to activate call", err)
 		}
+		if !activated {
+			return cerrors.Conflict("call is no longer ringing")
+		}
+		call.Status = entity.CallStatusActive
 	}
 
 	slog.InfoContext(ctx, "participant admitted from waiting room", "call_id", callID, "target_user_id", targetUserID)
@@ -740,10 +826,15 @@ func (s *Service) AdmitAll(ctx context.Context, workspaceID, callID, userID uuid
 	}
 
 	if call.Status == entity.CallStatusRinging {
-		if err := s.calls.UpdateStatus(ctx, callID, entity.CallStatusActive); err != nil {
+		activated, err := activateRingingCall(ctx, s.calls, callID)
+		if err != nil {
 			slog.ErrorContext(ctx, "failed to update call status to active after admitting all", "call_id", callID, "error", err)
-			return cerrors.Internal("failed to activate call", err)
+			return serviceError("failed to activate call", err)
 		}
+		if !activated {
+			return cerrors.Conflict("call is no longer ringing")
+		}
+		call.Status = entity.CallStatusActive
 	}
 
 	slog.InfoContext(ctx, "all waiting participants admitted", "call_id", callID)
@@ -816,6 +907,10 @@ func (s *Service) LeaveCall(ctx context.Context, workspaceID, callID, userID uui
 	if err != nil {
 		return nil, err
 	}
+	if call.Status == entity.CallStatusEnded {
+		s.removeLiveKitParticipantBestEffort(ctx, callID, userID)
+		return &LeaveCallResult{AlreadyLeft: true}, nil
+	}
 
 	participant, err := s.calls.GetParticipant(ctx, callID, userID)
 	if err != nil {
@@ -833,13 +928,19 @@ func (s *Service) LeaveCall(ctx context.Context, workspaceID, callID, userID uui
 	}
 
 	autoEnded := false
+	alreadyLeft := false
 	if s.tx != nil {
 		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
 			if scope.Calls() == nil {
 				return cerrors.Unavailable("call transaction scope is not configured")
 			}
-			if err := updateParticipantStatusWithReason(ctx, scope.Calls(), participant.ID, entity.ParticipantStatusDisconnected, entity.ParticipantLeftReasonLeft); err != nil {
+			disconnected, err := disconnectParticipantIfConnected(ctx, scope.Calls(), participant.ID, entity.ParticipantLeftReasonLeft)
+			if err != nil {
 				return err
+			}
+			if !disconnected {
+				alreadyLeft = true
+				return nil
 			}
 			markParticipantDisconnected(participant, entity.ParticipantLeftReasonLeft)
 			if err := s.enqueueParticipantEventTx(ctx, scope, event.TypeCallParticipantLeft, call, participant); err != nil {
@@ -850,8 +951,12 @@ func (s *Service) LeaveCall(ctx context.Context, workspaceID, callID, userID uui
 				return err
 			}
 			if shouldAutoEndAfterLeave(call, participants) {
-				if err := endCallWithReason(ctx, scope.Calls(), callID, entity.CallEndReasonAllLeft); err != nil {
+				ended, err := endCallWithReasonIfNotEnded(ctx, scope.Calls(), callID, entity.CallEndReasonAllLeft)
+				if err != nil {
 					return err
+				}
+				if !ended {
+					return nil
 				}
 				markCallEnded(call, entity.CallEndReasonAllLeft)
 				if err := s.enqueueCallEventTx(ctx, scope, event.TypeCallEnded, call, userID); err != nil {
@@ -862,35 +967,45 @@ func (s *Service) LeaveCall(ctx context.Context, workspaceID, callID, userID uui
 			return nil
 		}); err != nil {
 			slog.ErrorContext(ctx, "failed to leave call transaction", "call_id", callID, "user_id", userID, "error", err)
-			return nil, cerrors.Internal("failed to update participant status", err)
+			return nil, serviceError("failed to update participant status", err)
 		}
 	} else {
-		if err := updateParticipantStatusWithReason(ctx, s.calls, participant.ID, entity.ParticipantStatusDisconnected, entity.ParticipantLeftReasonLeft); err != nil {
+		disconnected, err := disconnectParticipantIfConnected(ctx, s.calls, participant.ID, entity.ParticipantLeftReasonLeft)
+		if err != nil {
 			slog.ErrorContext(ctx, "failed to update participant status on leave", "participant_id", participant.ID, "error", err)
 			return nil, cerrors.Internal("failed to update participant status", err)
 		}
+		if !disconnected {
+			alreadyLeft = true
+		} else {
+			markParticipantDisconnected(participant, entity.ParticipantLeftReasonLeft)
+			s.publishParticipantEvent(ctx, event.TypeCallParticipantLeft, call, participant)
 
-		markParticipantDisconnected(participant, entity.ParticipantLeftReasonLeft)
-		s.publishParticipantEvent(ctx, event.TypeCallParticipantLeft, call, participant)
+			participants, err := s.calls.ListParticipants(ctx, callID)
+			if err != nil {
+				slog.ErrorContext(ctx, "failed to list participants after leave", "call_id", callID, "error", err)
+				return &LeaveCallResult{AlreadyLeft: false}, nil // Non-fatal: the leave itself succeeded.
+			}
 
-		participants, err := s.calls.ListParticipants(ctx, callID)
-		if err != nil {
-			slog.ErrorContext(ctx, "failed to list participants after leave", "call_id", callID, "error", err)
-			return &LeaveCallResult{AlreadyLeft: false}, nil // Non-fatal: the leave itself succeeded.
-		}
-
-		if shouldAutoEndAfterLeave(call, participants) {
-			if err := endCallWithReason(ctx, s.calls, callID, entity.CallEndReasonAllLeft); err != nil {
-				slog.ErrorContext(ctx, "failed to auto-end call after last participant left", "call_id", callID, "error", err)
-			} else {
-				autoEnded = true
-				markCallEnded(call, entity.CallEndReasonAllLeft)
-				s.publishCallEvent(ctx, event.TypeCallEnded, call, userID)
+			if shouldAutoEndAfterLeave(call, participants) {
+				ended, err := endCallWithReasonIfNotEnded(ctx, s.calls, callID, entity.CallEndReasonAllLeft)
+				if err != nil {
+					slog.ErrorContext(ctx, "failed to auto-end call after last participant left", "call_id", callID, "error", err)
+				} else {
+					if ended {
+						autoEnded = true
+						markCallEnded(call, entity.CallEndReasonAllLeft)
+						s.publishCallEvent(ctx, event.TypeCallEnded, call, userID)
+					}
+				}
 			}
 		}
 	}
 
 	s.removeLiveKitParticipantBestEffort(ctx, callID, userID)
+	if alreadyLeft {
+		return &LeaveCallResult{AlreadyLeft: true}, nil
+	}
 	if autoEnded {
 		s.closeAllBreakoutSFURooms(ctx, callID)
 		s.deleteLiveKitRoomBestEffort(ctx, callID)
@@ -934,19 +1049,27 @@ func (s *Service) EndCall(ctx context.Context, workspaceID, callID, userID uuid.
 			if scope.Calls() == nil {
 				return cerrors.Unavailable("call transaction scope is not configured")
 			}
-			if err := endCallWithReason(ctx, scope.Calls(), callID, entity.CallEndReasonHostEnded); err != nil {
+			ended, err := endCallWithReasonIfNotEnded(ctx, scope.Calls(), callID, entity.CallEndReasonHostEnded)
+			if err != nil {
 				return err
+			}
+			if !ended {
+				return cerrors.Conflict("call has already ended")
 			}
 			markCallEnded(call, entity.CallEndReasonHostEnded)
 			return s.enqueueCallEventTx(ctx, scope, event.TypeCallEnded, call, userID)
 		}); err != nil {
 			slog.ErrorContext(ctx, "failed to end call transaction", "call_id", callID, "error", err)
-			return cerrors.Internal("failed to end call", err)
+			return serviceError("failed to end call", err)
 		}
 	} else {
-		if err := endCallWithReason(ctx, s.calls, callID, entity.CallEndReasonHostEnded); err != nil {
+		ended, err := endCallWithReasonIfNotEnded(ctx, s.calls, callID, entity.CallEndReasonHostEnded)
+		if err != nil {
 			slog.ErrorContext(ctx, "failed to end call", "call_id", callID, "error", err)
-			return cerrors.Internal("failed to end call", err)
+			return serviceError("failed to end call", err)
+		}
+		if !ended {
+			return cerrors.Conflict("call has already ended")
 		}
 		markCallEnded(call, entity.CallEndReasonHostEnded)
 		s.publishCallEvent(ctx, event.TypeCallEnded, call, userID)
@@ -984,27 +1107,56 @@ func (s *Service) CancelCall(ctx context.Context, workspaceID, callID, userID uu
 		return nil, cerrors.Forbidden("only call creator can cancel a ringing call")
 	}
 
+	cancelled := false
 	if s.tx != nil {
 		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
 			if scope.Calls() == nil {
 				return cerrors.Unavailable("call transaction scope is not configured")
 			}
-			if err := endCallWithReason(ctx, scope.Calls(), callID, entity.CallEndReasonCancelled); err != nil {
+			ended, err := cancelRingingWithReason(ctx, scope.Calls(), callID, entity.CallEndReasonCancelled)
+			if err != nil {
 				return err
 			}
+			if !ended {
+				current, err := scope.Calls().GetByID(ctx, callID)
+				if err != nil {
+					return err
+				}
+				if current.Status == entity.CallStatusEnded {
+					return nil
+				}
+				return cerrors.Conflict("only ringing calls can be cancelled")
+			}
+			cancelled = true
 			markCallEnded(call, entity.CallEndReasonCancelled)
 			return s.enqueueCallEventTx(ctx, scope, event.TypeCallEnded, call, userID)
 		}); err != nil {
 			slog.ErrorContext(ctx, "failed to cancel call transaction", "call_id", callID, "error", err)
-			return nil, cerrors.Internal("failed to cancel call", err)
+			return nil, serviceError("failed to cancel call", err)
 		}
 	} else {
-		if err := endCallWithReason(ctx, s.calls, callID, entity.CallEndReasonCancelled); err != nil {
+		ended, err := cancelRingingWithReason(ctx, s.calls, callID, entity.CallEndReasonCancelled)
+		if err != nil {
 			slog.ErrorContext(ctx, "failed to cancel call", "call_id", callID, "error", err)
-			return nil, cerrors.Internal("failed to cancel call", err)
+			return nil, serviceError("failed to cancel call", err)
 		}
+		if !ended {
+			current, getErr := s.calls.GetByID(ctx, callID)
+			if getErr != nil {
+				return nil, serviceError("failed to load call", getErr)
+			}
+			if current.Status == entity.CallStatusEnded {
+				return &CancelCallResult{Ended: false}, nil
+			}
+			return nil, cerrors.Conflict("only ringing calls can be cancelled")
+		}
+		cancelled = true
 		markCallEnded(call, entity.CallEndReasonCancelled)
 		s.publishCallEvent(ctx, event.TypeCallEnded, call, userID)
+	}
+
+	if !cancelled {
+		return &CancelCallResult{Ended: false}, nil
 	}
 
 	s.closeAllBreakoutSFURooms(ctx, callID)

@@ -308,10 +308,6 @@ func (h *CalendarHandler) StartCallFromEvent(w http.ResponseWriter, r *http.Requ
 	}
 	resp := StartCallResponse{Call: callEntity}
 	if h.callSvc != nil && h.callSvc.LiveKitConfigured() {
-		if roomErr := h.callSvc.EnsureLiveKitRoomRequired(r.Context(), callEntity); roomErr != nil {
-			writeErr(w, roomErr)
-			return
-		}
 		info, tokenErr := h.callSvc.IssueLiveKitJoinInfo(r.Context(), callEntity, userID, "")
 		if tokenErr != nil {
 			writeErr(w, tokenErr)

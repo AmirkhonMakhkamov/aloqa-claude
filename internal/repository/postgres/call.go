@@ -373,27 +373,97 @@ func (r *CallRepo) UpdateStatus(ctx context.Context, id uuid.UUID, status entity
 	return nil
 }
 
+func (r *CallRepo) ActivateRinging(ctx context.Context, id uuid.UUID) (bool, error) {
+	query := `
+		UPDATE calls
+		SET status = 'active'
+		WHERE id = $1 AND status = 'ringing'`
+
+	tag, err := r.db.Exec(ctx, query, id)
+	if err != nil {
+		return false, fmt.Errorf("postgres: activate ringing call: %w", err)
+	}
+	if tag.RowsAffected() > 0 {
+		return true, nil
+	}
+	if err := r.ensureCallExists(ctx, id); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
 func (r *CallRepo) End(ctx context.Context, id uuid.UUID) error {
 	return r.EndWithReason(ctx, id, "")
 }
 
 func (r *CallRepo) EndWithReason(ctx context.Context, id uuid.UUID, reason entity.CallEndReason) error {
+	_, err := r.EndWithReasonIfNotEnded(ctx, id, reason)
+	return err
+}
+
+func (r *CallRepo) EndWithReasonIfNotEnded(ctx context.Context, id uuid.UUID, reason entity.CallEndReason) (bool, error) {
 	now := time.Now().UTC()
 	query := `
 		UPDATE calls
 		SET status = 'ended',
 		    ended_at = COALESCE(ended_at, $2),
-		    end_reason = COALESCE($3, end_reason)
-		WHERE id = $1`
+		    end_reason = COALESCE(end_reason, $3)
+		WHERE id = $1 AND status <> 'ended'`
 
 	tag, err := r.db.Exec(ctx, query, id, now, nullableCallEndReason(reason))
 	if err != nil {
-		return fmt.Errorf("postgres: end call: %w", err)
+		return false, fmt.Errorf("postgres: end call: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
+	if tag.RowsAffected() > 0 {
+		return true, nil
+	}
+	if err := r.ensureCallExists(ctx, id); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func (r *CallRepo) CancelRingingWithReason(ctx context.Context, id uuid.UUID, reason entity.CallEndReason) (bool, error) {
+	now := time.Now().UTC()
+	query := `
+		UPDATE calls
+		SET status = 'ended',
+		    ended_at = COALESCE(ended_at, $2),
+		    end_reason = COALESCE(end_reason, $3)
+		WHERE id = $1 AND status = 'ringing'`
+
+	tag, err := r.db.Exec(ctx, query, id, now, nullableCallEndReason(reason))
+	if err != nil {
+		return false, fmt.Errorf("postgres: cancel ringing call: %w", err)
+	}
+	if tag.RowsAffected() > 0 {
+		return true, nil
+	}
+	if err := r.ensureCallExists(ctx, id); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func (r *CallRepo) ensureCallExists(ctx context.Context, id uuid.UUID) error {
+	var exists bool
+	if err := r.db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM calls WHERE id = $1)`, id).Scan(&exists); err != nil {
+		return fmt.Errorf("postgres: check call exists: %w", err)
+	}
+	if !exists {
 		return cerrors.NotFound("call not found")
 	}
+	return nil
+}
 
+func (r *CallRepo) ensureCallParticipantExists(ctx context.Context, id uuid.UUID) error {
+	var exists bool
+	if err := r.db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM call_participants WHERE id = $1)`, id).Scan(&exists); err != nil {
+		return fmt.Errorf("postgres: check call participant exists: %w", err)
+	}
+	if !exists {
+		return cerrors.NotFound("call participant not found")
+	}
 	return nil
 }
 
@@ -564,6 +634,28 @@ func (r *CallRepo) UpdateParticipantStatusWithReason(ctx context.Context, id uui
 	}
 
 	return nil
+}
+
+func (r *CallRepo) DisconnectParticipantIfConnectedWithReason(ctx context.Context, id uuid.UUID, leftReason entity.ParticipantLeftReason) (bool, error) {
+	now := time.Now().UTC()
+	query := `
+		UPDATE call_participants
+		SET status = 'disconnected',
+		    left_at = COALESCE(left_at, $2),
+		    left_reason = COALESCE(left_reason, $3)
+		WHERE id = $1 AND status <> 'disconnected'`
+
+	tag, err := r.db.Exec(ctx, query, id, now, nullableParticipantLeftReason(leftReason))
+	if err != nil {
+		return false, fmt.Errorf("postgres: disconnect participant if connected: %w", err)
+	}
+	if tag.RowsAffected() > 0 {
+		return true, nil
+	}
+	if err := r.ensureCallParticipantExists(ctx, id); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 func (r *CallRepo) UpdateParticipantRole(ctx context.Context, id uuid.UUID, role entity.CallRole) error {

@@ -3,6 +3,7 @@ package observability
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -438,6 +439,24 @@ func (s *Service) Metrics(ctx context.Context) (string, error) {
 	writeGauge("search_queue_failed", dashboard.SearchQueue.Failed)
 	writeGauge("search_queue_dead", dashboard.SearchQueue.Dead)
 	writeGauge("search_queue_oldest_pending_age_ms", dashboard.SearchQueue.OldestPendingAgeMs)
+
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+	writeGauge("runtime_goroutines", runtime.NumGoroutine())
+	writeGauge("runtime_gomaxprocs", runtime.GOMAXPROCS(0))
+	writeGauge("runtime_heap_alloc_bytes", mem.HeapAlloc)
+	writeGauge("runtime_heap_inuse_bytes", mem.HeapInuse)
+	writeGauge("runtime_stack_inuse_bytes", mem.StackInuse)
+	writeGauge("runtime_sys_bytes", mem.Sys)
+	writeGauge("runtime_next_gc_bytes", mem.NextGC)
+	writeGauge("runtime_alloc_bytes_total", mem.TotalAlloc)
+	writeGauge("runtime_gc_cycles_total", mem.NumGC)
+	writeGauge("runtime_gc_pause_total_seconds", fmt.Sprintf("%.9f", float64(mem.PauseTotalNs)/float64(time.Second)))
+	var lastGCPause uint64
+	if mem.NumGC > 0 {
+		lastGCPause = mem.PauseNs[(mem.NumGC+255)%256]
+	}
+	writeGauge("runtime_gc_pause_last_seconds", fmt.Sprintf("%.9f", float64(lastGCPause)/float64(time.Second)))
 
 	writeGauge("db_pool_utilization_pct", fmt.Sprintf("%.2f", dashboard.Storage.Postgres.AcquiredConnsPct))
 	writeGauge("db_pool_saturated", boolToInt(dashboard.Storage.Postgres.Saturated))

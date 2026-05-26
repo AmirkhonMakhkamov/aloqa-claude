@@ -73,6 +73,9 @@ func (s *Service) CleanupStaleOpenCalls(ctx context.Context, grace time.Duration
 	if !ok {
 		return 0, nil
 	}
+	if !s.livekit.IsConfigured() {
+		return 0, nil
+	}
 
 	calls, err := repo.ListStaleOpen(ctx, time.Now().UTC().Add(-grace), limit)
 	if err != nil {
@@ -252,28 +255,17 @@ func disconnectStaleParticipants(
 }
 
 func (s *Service) hasActiveMediaParticipants(ctx context.Context, callID uuid.UUID) (bool, error) {
-	if s.livekit.IsConfigured() {
-		if s.livekitRooms == nil {
-			return true, cerrors.Unavailable("livekit room service is not configured")
-		}
-		participants, err := s.livekitRooms.ListParticipants(ctx, callID)
-		if err != nil {
-			return true, err
-		}
-		if len(participants) > 0 {
-			return true, nil
-		}
+	if !s.livekit.IsConfigured() {
+		return true, nil
 	}
-
-	if s.sfu == nil {
-		return false, nil
+	if s.livekitRooms == nil {
+		return true, cerrors.Unavailable("livekit room service is not configured")
 	}
-	room, ok := s.sfu.GetRoom(callID.String())
-	if !ok {
-		return false, nil
+	participants, err := s.livekitRooms.ListParticipants(ctx, callID)
+	if err != nil {
+		return true, err
 	}
-	presenters, viewers := room.PeerCount()
-	return presenters+viewers > 0, nil
+	return len(participants) > 0, nil
 }
 
 func (s *Service) cleanupEndedMediaRooms(ctx context.Context, callID uuid.UUID) {

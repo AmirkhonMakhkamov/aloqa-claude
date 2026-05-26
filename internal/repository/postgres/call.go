@@ -259,8 +259,8 @@ func (r *CallRepo) ListActiveByWorkspace(ctx context.Context, workspaceID uuid.U
 }
 
 // ListStaleOpen returns non-ended calls old enough to reconcile against the
-// media plane. The service performs the LiveKit/SFU presence check before
-// applying any terminal transition.
+// LiveKit media plane. The service performs the presence check before applying
+// any terminal transition.
 func (r *CallRepo) ListStaleOpen(ctx context.Context, before time.Time, limit int) ([]entity.Call, error) {
 	if limit <= 0 {
 		limit = defaultStaleOpenCallLimit
@@ -533,7 +533,8 @@ func (r *CallRepo) UpdateStatus(ctx context.Context, id uuid.UUID, status entity
 func (r *CallRepo) ActivateRinging(ctx context.Context, id uuid.UUID) (bool, error) {
 	query := `
 		UPDATE calls
-		SET status = 'active'
+		SET status = 'active',
+		    started_at = now()
 		WHERE id = $1 AND status = 'ringing'`
 
 	tag, err := r.db.Exec(ctx, query, id)

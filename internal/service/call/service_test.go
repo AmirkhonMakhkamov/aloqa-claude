@@ -893,6 +893,15 @@ func TestJoinCallRequiresLiveKitRoomBeforeParticipantInsert(t *testing.T) {
 	}
 }
 
+func configureCleanupLiveKit(svc *Service, roomClient *fakeLiveKitRoomClient) *fakeLiveKitRoomClient {
+	if roomClient == nil {
+		roomClient = &fakeLiveKitRoomClient{}
+	}
+	svc.SetLiveKit(LiveKitSettings{URL: "wss://livekit.test", APIKey: "key", APISecret: "secret", TokenTTL: time.Hour})
+	svc.SetLiveKitRoomClient(roomClient)
+	return roomClient
+}
+
 func TestCleanupStaleOpenCallsEndsRingingAsMissed(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -933,6 +942,7 @@ func TestCleanupStaleOpenCallsEndsRingingAsMissed(t *testing.T) {
 		},
 	}
 	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+	configureCleanupLiveKit(svc, nil)
 
 	ended, err := svc.CleanupStaleOpenCalls(ctx, 5*time.Minute, 100)
 	if err != nil {
@@ -963,6 +973,54 @@ func TestCleanupStaleOpenCallsEndsRingingAsMissed(t *testing.T) {
 	}
 	if len(pub.captures) != 1 {
 		t.Fatalf("published events after retry = %d, want still one call.ended event", len(pub.captures))
+	}
+}
+
+func TestCleanupStaleOpenCallsSkipsWhenLiveKitDisabled(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	userID := uuid.New()
+	startedAt := time.Now().Add(-10 * time.Minute)
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {
+				ID:          callID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeMeeting,
+				Status:      entity.CallStatusActive,
+				CreatedBy:   userID,
+				StartedAt:   &startedAt,
+				CreatedAt:   startedAt,
+			},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, userID}: {
+				ID:       uuid.New(),
+				CallID:   callID,
+				UserID:   userID,
+				Role:     entity.CallRoleHost,
+				Status:   entity.ParticipantStatusConnected,
+				JoinedAt: &startedAt,
+			},
+		},
+	}
+	pub := &capturingPublisher{}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+
+	ended, err := svc.CleanupStaleOpenCalls(ctx, 5*time.Minute, 100)
+	if err != nil {
+		t.Fatalf("CleanupStaleOpenCalls returned error: %v", err)
+	}
+	if ended != 0 {
+		t.Fatalf("ended = %d, want 0", ended)
+	}
+	if calls.calls[callID].Status != entity.CallStatusActive {
+		t.Fatalf("call status = %q, want active", calls.calls[callID].Status)
+	}
+	if len(pub.captures) != 0 {
+		t.Fatalf("published events = %d, want none", len(pub.captures))
 	}
 }
 
@@ -1009,6 +1067,7 @@ func TestCleanupStaleOpenCallsEndsActiveAsAllLeftAndTimeoutsParticipants(t *test
 		},
 	}
 	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+	configureCleanupLiveKit(svc, nil)
 
 	ended, err := svc.CleanupStaleOpenCalls(ctx, 5*time.Minute, 100)
 	if err != nil {
@@ -1028,6 +1087,62 @@ func TestCleanupStaleOpenCallsEndsActiveAsAllLeftAndTimeoutsParticipants(t *test
 	leftParticipant := calls.participants[[2]uuid.UUID{callID, leftUserID}]
 	if leftParticipant.LeftReason != entity.ParticipantLeftReasonLeft || leftParticipant.LeftAt == nil || !leftParticipant.LeftAt.Equal(leftAt) {
 		t.Fatalf("left participant was overwritten: %+v", leftParticipant)
+	}
+}
+
+func TestCleanupStaleOpenCallsKeepsRecentlyActivatedOldRingingCall(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	userID := uuid.New()
+	startedAt := time.Now().Add(-10 * time.Minute)
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {
+				ID:          callID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeOneToOne,
+				Status:      entity.CallStatusRinging,
+				CreatedBy:   userID,
+				StartedAt:   &startedAt,
+				CreatedAt:   startedAt,
+			},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, userID}: {
+				ID:       uuid.New(),
+				CallID:   callID,
+				UserID:   userID,
+				Role:     entity.CallRoleHost,
+				Status:   entity.ParticipantStatusConnected,
+				JoinedAt: &startedAt,
+			},
+		},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+	configureCleanupLiveKit(svc, nil)
+
+	didActivate, err := activateRingingCall(ctx, calls, callID)
+	if err != nil {
+		t.Fatalf("activateRingingCall returned error: %v", err)
+	}
+	if !didActivate {
+		t.Fatalf("activateRingingCall didActivate = false, want true")
+	}
+	if calls.calls[callID].StartedAt == nil || !calls.calls[callID].StartedAt.After(startedAt) {
+		t.Fatalf("activated call StartedAt = %v, want after %v", calls.calls[callID].StartedAt, startedAt)
+	}
+
+	ended, err := svc.CleanupStaleOpenCalls(ctx, 5*time.Minute, 100)
+	if err != nil {
+		t.Fatalf("CleanupStaleOpenCalls returned error: %v", err)
+	}
+	if ended != 0 {
+		t.Fatalf("ended = %d, want 0", ended)
+	}
+	if calls.calls[callID].Status != entity.CallStatusActive {
+		t.Fatalf("call status = %q, want active", calls.calls[callID].Status)
 	}
 }
 
@@ -1069,8 +1184,7 @@ func TestCleanupStaleOpenCallsKeepsCallWithLiveKitParticipants(t *testing.T) {
 		},
 	}
 	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
-	svc.SetLiveKit(LiveKitSettings{URL: "wss://livekit.test", APIKey: "key", APISecret: "secret", TokenTTL: time.Hour})
-	svc.SetLiveKitRoomClient(roomClient)
+	configureCleanupLiveKit(svc, roomClient)
 
 	ended, err := svc.CleanupStaleOpenCalls(ctx, 5*time.Minute, 100)
 	if err != nil {
@@ -1110,8 +1224,7 @@ func TestCleanupStaleOpenCallsKeepsCallOnLiveKitInspectionError(t *testing.T) {
 	}
 	roomClient := &fakeLiveKitRoomClient{listParticipantsErr: errors.New("livekit temporarily unavailable")}
 	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
-	svc.SetLiveKit(LiveKitSettings{URL: "wss://livekit.test", APIKey: "key", APISecret: "secret", TokenTTL: time.Hour})
-	svc.SetLiveKitRoomClient(roomClient)
+	configureCleanupLiveKit(svc, roomClient)
 
 	ended, err := svc.CleanupStaleOpenCalls(ctx, 5*time.Minute, 100)
 	if err != nil {
@@ -1820,7 +1933,9 @@ func (r *fakeCallRepo) ActivateRinging(_ context.Context, id uuid.UUID) (bool, e
 	if call.Status != entity.CallStatusRinging {
 		return false, nil
 	}
+	now := time.Now().UTC()
 	call.Status = entity.CallStatusActive
+	call.StartedAt = &now
 	return true, nil
 }
 func (r *fakeCallRepo) End(ctx context.Context, id uuid.UUID) error {

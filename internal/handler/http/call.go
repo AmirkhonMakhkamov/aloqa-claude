@@ -19,18 +19,22 @@ import (
 // StartCallResponse carries the created call plus the LiveKit connection info
 // the FE needs to join the SFU room.
 type StartCallResponse struct {
-	Call        *entity.Call `json:"call"`
-	LivekitURL  string       `json:"livekit_url,omitempty"`
-	AccessToken string       `json:"access_token,omitempty"`
-	ExpiresAt   *time.Time   `json:"expires_at,omitempty"`
+	Call           *entity.Call `json:"call"`
+	LivekitURL     string       `json:"livekit_url,omitempty"`
+	AccessToken    string       `json:"access_token,omitempty"`
+	ExpiresAt      *time.Time   `json:"expires_at,omitempty"`
+	TokenExpiresAt *time.Time   `json:"token_expires_at,omitempty"`
+	RefreshAfter   *time.Time   `json:"refresh_after,omitempty"`
 }
 
 // JoinCallResponse mirrors StartCallResponse for the join endpoint.
 type JoinCallResponse struct {
-	Participant *entity.CallParticipant `json:"participant"`
-	LivekitURL  string                  `json:"livekit_url,omitempty"`
-	AccessToken string                  `json:"access_token,omitempty"`
-	ExpiresAt   *time.Time              `json:"expires_at,omitempty"`
+	Participant    *entity.CallParticipant `json:"participant"`
+	LivekitURL     string                  `json:"livekit_url,omitempty"`
+	AccessToken    string                  `json:"access_token,omitempty"`
+	ExpiresAt      *time.Time              `json:"expires_at,omitempty"`
+	TokenExpiresAt *time.Time              `json:"token_expires_at,omitempty"`
+	RefreshAfter   *time.Time              `json:"refresh_after,omitempty"`
 }
 
 type CallHandler struct {
@@ -84,7 +88,11 @@ func (h *CallHandler) Start(w http.ResponseWriter, r *http.Request) {
 			resp.LivekitURL = info.URL
 			resp.AccessToken = info.AccessToken
 			expires := info.ExpiresAt
+			tokenExpires := info.TokenExpiresAt
+			refreshAfter := info.RefreshAfter
 			resp.ExpiresAt = &expires
+			resp.TokenExpiresAt = &tokenExpires
+			resp.RefreshAfter = &refreshAfter
 		}
 	}
 	writeCreated(w, resp)
@@ -188,7 +196,11 @@ func (h *CallHandler) Join(w http.ResponseWriter, r *http.Request) {
 				resp.LivekitURL = info.URL
 				resp.AccessToken = info.AccessToken
 				expires := info.ExpiresAt
+				tokenExpires := info.TokenExpiresAt
+				refreshAfter := info.RefreshAfter
 				resp.ExpiresAt = &expires
+				resp.TokenExpiresAt = &tokenExpires
+				resp.RefreshAfter = &refreshAfter
 			}
 		}
 	}

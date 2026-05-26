@@ -63,6 +63,7 @@ type Service struct {
 	sfu           *sfu.SFU
 	media         MediaConfig
 	livekit       LiveKitSettings
+	livekitRooms  LiveKitRoomClient
 	livekitDedupe *livekitWebhookDedupe
 	guests        *guestaccess.Checker
 	collab        CollaborationAccessAuthorizer
@@ -411,6 +412,8 @@ func (s *Service) StartCall(
 		s.publishCallEvent(ctx, event.TypeCallStarted, call, userID)
 	}
 
+	s.ensureLiveKitRoomBestEffort(ctx, call)
+
 	placement, placementErr := s.ensureMediaPlacement(ctx, call)
 	if placementErr != nil {
 		slog.ErrorContext(ctx, "failed to ensure media placement", "call_id", call.ID, "error", placementErr)
@@ -494,6 +497,7 @@ func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid
 		if s.tx == nil {
 			s.publishParticipantEvent(ctx, event.TypeCallParticipantJoined, call, existing)
 		}
+		s.ensureLiveKitRoomBestEffort(ctx, call)
 		slog.InfoContext(ctx, "participant rejoined call", "call_id", callID, "user_id", userID)
 		return existing, nil
 	}
@@ -568,10 +572,12 @@ func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid
 	}
 
 	if initialStatus == entity.ParticipantStatusWaiting {
+		s.ensureLiveKitRoomBestEffort(ctx, call)
 		slog.InfoContext(ctx, "participant placed in waiting room", "call_id", callID, "user_id", userID)
 		return participant, nil
 	}
 
+	s.ensureLiveKitRoomBestEffort(ctx, call)
 	slog.InfoContext(ctx, "participant joined call", "call_id", callID, "user_id", userID)
 	return participant, nil
 }
@@ -689,6 +695,7 @@ func (s *Service) RejectParticipant(ctx context.Context, workspaceID, callID, us
 
 	participant.Status = entity.ParticipantStatusDisconnected
 	s.publishParticipantEvent(ctx, event.TypeWaitingRoomRejected, call, participant)
+	s.removeLiveKitParticipantBestEffort(ctx, callID, targetUserID)
 
 	slog.InfoContext(ctx, "participant rejected from waiting room", "call_id", callID, "target_user_id", targetUserID)
 	return nil
@@ -810,8 +817,10 @@ func (s *Service) LeaveCall(ctx context.Context, workspaceID, callID, userID uui
 		}
 	}
 
+	s.removeLiveKitParticipantBestEffort(ctx, callID, userID)
 	if autoEnded {
 		s.closeAllBreakoutSFURooms(ctx, callID)
+		s.deleteLiveKitRoomBestEffort(ctx, callID)
 		s.sfu.CloseRoom(callID.String())
 		slog.InfoContext(ctx, "call auto-ended (last participant left)", "call_id", callID)
 	}
@@ -870,6 +879,8 @@ func (s *Service) EndCall(ctx context.Context, workspaceID, callID, userID uuid.
 
 	// Close all breakout rooms and their SFU rooms.
 	s.closeAllBreakoutSFURooms(ctx, callID)
+
+	s.deleteLiveKitRoomBestEffort(ctx, callID)
 
 	// Close the main SFU room, disconnecting all media peers.
 	s.sfu.CloseRoom(callID.String())

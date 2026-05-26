@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -15,14 +16,20 @@ import (
 	"aloqa/internal/pkg/cerrors"
 	"aloqa/internal/pkg/id"
 	calendarservice "aloqa/internal/service/calendar"
+	callservice "aloqa/internal/service/call"
 )
 
 type CalendarHandler struct {
-	svc *calendarservice.Service
+	svc     *calendarservice.Service
+	callSvc *callservice.Service
 }
 
-func NewCalendarHandler(svc *calendarservice.Service) *CalendarHandler {
-	return &CalendarHandler{svc: svc}
+func NewCalendarHandler(svc *calendarservice.Service, callSvc ...*callservice.Service) *CalendarHandler {
+	h := &CalendarHandler{svc: svc}
+	if len(callSvc) > 0 {
+		h.callSvc = callSvc[0]
+	}
+	return h
 }
 
 type createCalendarRequest struct {
@@ -300,7 +307,26 @@ func (h *CalendarHandler) StartCallFromEvent(w http.ResponseWriter, r *http.Requ
 		writeErr(w, err)
 		return
 	}
-	writeOK(w, callEntity)
+	resp := StartCallResponse{Call: callEntity}
+	if h.callSvc != nil && h.callSvc.LiveKitConfigured() {
+		if roomErr := h.callSvc.EnsureLiveKitRoom(r.Context(), callEntity); roomErr != nil {
+			slog.WarnContext(r.Context(), "failed to ensure livekit room on scheduled start", "call_id", callEntity.ID, "error", roomErr)
+		}
+		info, tokenErr := h.callSvc.IssueLiveKitJoinInfo(callEntity, userID, "")
+		if tokenErr != nil {
+			slog.WarnContext(r.Context(), "failed to issue livekit join info on scheduled start", "call_id", callEntity.ID, "user_id", userID, "error", tokenErr)
+		} else {
+			resp.LivekitURL = info.URL
+			resp.AccessToken = info.AccessToken
+			expires := info.ExpiresAt
+			tokenExpires := info.TokenExpiresAt
+			refreshAfter := info.RefreshAfter
+			resp.ExpiresAt = &expires
+			resp.TokenExpiresAt = &tokenExpires
+			resp.RefreshAfter = &refreshAfter
+		}
+	}
+	writeOK(w, resp)
 }
 
 func (h *CalendarHandler) MoveOccurrence(w http.ResponseWriter, r *http.Request) {

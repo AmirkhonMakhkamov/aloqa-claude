@@ -486,7 +486,7 @@ func run() error {
 	})
 	callHandler := httphandler.NewCallHandler(callSvc)
 	livekitWebhookHandler := httphandler.NewLiveKitWebhookHandler(callSvc, cfg.LiveKit.APIKey, cfg.LiveKit.APISecret)
-	calendarHandler := httphandler.NewCalendarHandler(calendarSvc)
+	calendarHandler := httphandler.NewCalendarHandler(calendarSvc, callSvc)
 	breakoutHandler := httphandler.NewBreakoutHandler(callSvc)
 	fileHandler := httphandler.NewFileHandler(fileSvc, cfg.Media.MaxFileSize)
 	presenceHandler := httphandler.NewPresenceHandler(presenceSvc)

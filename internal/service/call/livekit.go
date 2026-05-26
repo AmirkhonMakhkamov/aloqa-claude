@@ -27,9 +27,11 @@ type LiveKitSettings struct {
 // LiveKitJoinInfo is appended to the StartCall / JoinCall response so the FE
 // can connect to the LiveKit room without a second round-trip.
 type LiveKitJoinInfo struct {
-	URL         string    `json:"livekit_url"`
-	AccessToken string    `json:"access_token"`
-	ExpiresAt   time.Time `json:"expires_at"`
+	URL            string    `json:"livekit_url"`
+	AccessToken    string    `json:"access_token"`
+	ExpiresAt      time.Time `json:"expires_at"`
+	TokenExpiresAt time.Time `json:"token_expires_at"`
+	RefreshAfter   time.Time `json:"refresh_after"`
 }
 
 // IsConfigured reports whether the SFU integration is wired up.
@@ -43,6 +45,15 @@ func (s *Service) SetLiveKit(settings LiveKitSettings) {
 		settings.TokenTTL = 6 * time.Hour
 	}
 	s.livekit = settings
+	if settings.IsConfigured() {
+		s.livekitRooms = newLiveKitRoomServiceClient(settings)
+	} else {
+		s.livekitRooms = nil
+	}
+}
+
+func (s *Service) SetLiveKitRoomClient(client LiveKitRoomClient) {
+	s.livekitRooms = client
 }
 
 // IssueLiveKitJoinInfo signs an access token granting the user permission to
@@ -82,16 +93,71 @@ func (s *Service) IssueLiveKitJoinInfo(call *entity.Call, userID uuid.UUID, disp
 		return nil, cerrors.Internal("failed to sign livekit access token", err)
 	}
 
+	expiresAt := time.Now().Add(s.livekit.TokenTTL).UTC()
 	return &LiveKitJoinInfo{
-		URL:         s.livekit.URL,
-		AccessToken: token,
-		ExpiresAt:   time.Now().Add(s.livekit.TokenTTL).UTC(),
+		URL:            s.livekit.URL,
+		AccessToken:    token,
+		ExpiresAt:      expiresAt,
+		TokenExpiresAt: expiresAt,
+		RefreshAfter:   expiresAt.Add(-(s.livekit.TokenTTL / 2)),
 	}, nil
 }
 
 // LiveKitConfigured exposes the livekit configuration state to handlers.
 func (s *Service) LiveKitConfigured() bool {
 	return s.livekit.IsConfigured()
+}
+
+func (s *Service) EnsureLiveKitRoom(ctx context.Context, call *entity.Call) error {
+	if call == nil || !s.livekit.IsConfigured() || s.livekitRooms == nil {
+		return nil
+	}
+
+	maxParticipants := uint32(0)
+	if cap := s.effectiveParticipantCap(call); cap > 0 {
+		maxParticipants = uint32(cap)
+	}
+
+	return s.livekitRooms.EnsureRoom(ctx, LiveKitEnsureRoomArgs{
+		CallID:          call.ID,
+		WorkspaceID:     call.WorkspaceID,
+		CallType:        call.Type,
+		MaxParticipants: maxParticipants,
+		EmptyTimeout:    defaultLiveKitEmptyTimeout,
+		Metadata:        liveKitRoomMetadata(call),
+	})
+}
+
+func (s *Service) DeleteLiveKitRoom(ctx context.Context, callID uuid.UUID) error {
+	if !s.livekit.IsConfigured() || s.livekitRooms == nil {
+		return nil
+	}
+	return s.livekitRooms.DeleteRoom(ctx, callID)
+}
+
+func (s *Service) RemoveLiveKitParticipant(ctx context.Context, callID, userID uuid.UUID) error {
+	if !s.livekit.IsConfigured() || s.livekitRooms == nil {
+		return nil
+	}
+	return s.livekitRooms.RemoveParticipant(ctx, callID, userID)
+}
+
+func (s *Service) ensureLiveKitRoomBestEffort(ctx context.Context, call *entity.Call) {
+	if err := s.EnsureLiveKitRoom(ctx, call); err != nil {
+		slog.WarnContext(ctx, "failed to ensure livekit room", "call_id", call.ID, "error", err)
+	}
+}
+
+func (s *Service) deleteLiveKitRoomBestEffort(ctx context.Context, callID uuid.UUID) {
+	if err := s.DeleteLiveKitRoom(ctx, callID); err != nil {
+		slog.WarnContext(ctx, "failed to delete livekit room", "call_id", callID, "error", err)
+	}
+}
+
+func (s *Service) removeLiveKitParticipantBestEffort(ctx context.Context, callID, userID uuid.UUID) {
+	if err := s.RemoveLiveKitParticipant(ctx, callID, userID); err != nil {
+		slog.WarnContext(ctx, "failed to remove livekit participant", "call_id", callID, "user_id", userID, "error", err)
+	}
 }
 
 // livekitWebhookDedupe tracks recently-processed webhook event ids so
@@ -162,8 +228,12 @@ func (s *Service) HandleLiveKitWebhook(ctx context.Context, ev *livekitpb.Webhoo
 		return s.handleLiveKitParticipantJoined(ctx, callID, ev.GetParticipant())
 	case "participant_left":
 		return s.handleLiveKitParticipantLeft(ctx, callID, ev.GetParticipant())
+	case "track_published":
+		return s.handleLiveKitTrackChanged(ctx, callID, ev.GetParticipant(), ev.GetTrack(), true)
+	case "track_unpublished":
+		return s.handleLiveKitTrackChanged(ctx, callID, ev.GetParticipant(), ev.GetTrack(), false)
 	default:
-		// room_started / track_published / track_unpublished / recording_started — not used in this slice
+		// room_started / recording_started — not used in this slice
 		return nil
 	}
 }
@@ -188,6 +258,7 @@ func (s *Service) handleLiveKitRoomFinished(ctx context.Context, callID uuid.UUI
 	call.EndedAt = &now
 
 	s.publishCallEvent(ctx, event.TypeCallEnded, call, call.CreatedBy)
+	s.deleteLiveKitRoomBestEffort(ctx, callID)
 	slog.InfoContext(ctx, "livekit room_finished bridged", "call_id", callID)
 	return nil
 }
@@ -272,8 +343,81 @@ func (s *Service) handleLiveKitParticipantLeft(ctx context.Context, callID uuid.
 	}
 
 	s.publishParticipantEvent(ctx, event.TypeCallParticipantLeft, call, participant)
+	participants, err := s.calls.ListParticipants(ctx, callID)
+	if err != nil {
+		return cerrors.Internal("failed to list participants for livekit participant_left", err)
+	}
+	if shouldEndCallAfterLiveKitLeft(call, participants) {
+		if err := s.calls.End(ctx, callID); err != nil {
+			return cerrors.Internal("failed to auto-end call for livekit participant_left", err)
+		}
+		now := time.Now()
+		call.Status = entity.CallStatusEnded
+		call.EndedAt = &now
+		s.publishCallEvent(ctx, event.TypeCallEnded, call, userID)
+		s.deleteLiveKitRoomBestEffort(ctx, callID)
+		if s.sfu != nil {
+			s.sfu.CloseRoom(callID.String())
+		}
+	}
 	slog.InfoContext(ctx, "livekit participant_left bridged", "call_id", callID, "user_id", userID, "reason", p.GetDisconnectReason().String())
 	return nil
+}
+
+func (s *Service) handleLiveKitTrackChanged(ctx context.Context, callID uuid.UUID, p *livekitpb.ParticipantInfo, track *livekitpb.TrackInfo, screenSharing bool) error {
+	if p == nil || track == nil {
+		return nil
+	}
+	if track.GetSource() != livekitpb.TrackSource_SCREEN_SHARE {
+		return nil
+	}
+
+	userID, err := uuid.Parse(p.GetIdentity())
+	if err != nil {
+		return nil
+	}
+	participant, err := s.calls.GetParticipant(ctx, callID, userID)
+	if err != nil {
+		if isNotFound(err) {
+			return nil
+		}
+		return cerrors.Internal("failed to load participant for livekit track event", err)
+	}
+	if participant.ScreenSharing == screenSharing {
+		return nil
+	}
+
+	if err := s.calls.UpdateParticipantMedia(ctx, participant.ID, participant.AudioMuted, participant.VideoMuted, screenSharing); err != nil {
+		return cerrors.Internal("failed to update participant screen share from livekit", err)
+	}
+	participant.ScreenSharing = screenSharing
+
+	call, err := s.calls.GetByID(ctx, callID)
+	if err != nil {
+		if isNotFound(err) {
+			return nil
+		}
+		return cerrors.Internal("failed to load call for livekit track event", err)
+	}
+	s.publishParticipantEvent(ctx, event.TypeCallParticipantUpdated, call, participant)
+	slog.InfoContext(ctx, "livekit screen-share track bridged", "call_id", callID, "user_id", userID, "screen_sharing", screenSharing)
+	return nil
+}
+
+func shouldEndCallAfterLiveKitLeft(call *entity.Call, participants []entity.CallParticipant) bool {
+	if call == nil || call.Status == entity.CallStatusEnded {
+		return false
+	}
+	activeCount := 0
+	for _, participant := range participants {
+		if participant.Status == entity.ParticipantStatusConnected || participant.Status == entity.ParticipantStatusJoining {
+			activeCount++
+		}
+	}
+	if call.Type == entity.CallTypeOneToOne {
+		return activeCount < 2
+	}
+	return activeCount == 0
 }
 
 func isNotFound(err error) bool {

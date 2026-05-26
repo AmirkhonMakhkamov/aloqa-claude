@@ -23,6 +23,7 @@ const (
 	CodeRateLimited        Code = "RATE_LIMITED"
 	CodeUnavailable        Code = "UNAVAILABLE"
 	CodeUnprocessable      Code = "UNPROCESSABLE"
+	CodeCallEnded          Code = "CALL_ENDED"
 )
 
 // AppError is the standard application error type.
@@ -62,6 +63,8 @@ func (e *AppError) HTTPStatus() int {
 		return http.StatusUnprocessableEntity
 	case CodeUnavailable:
 		return http.StatusServiceUnavailable
+	case CodeCallEnded:
+		return http.StatusGone
 	default:
 		return http.StatusInternalServerError
 	}
@@ -113,6 +116,14 @@ func Unavailable(msg string) *AppError {
 
 func Unprocessable(msg string) *AppError {
 	return &AppError{Code: CodeUnprocessable, Message: msg}
+}
+
+// CallEnded returns a typed AppError with HTTP 410 Gone status. Used by the call
+// service when a JoinCall attempt targets a call that's already in CallStatusEnded,
+// so the FE deep-link classifier can render an ended-call UX instead of a generic
+// 403 retry spinner.
+func CallEnded(msg string) *AppError {
+	return &AppError{Code: CodeCallEnded, Message: msg}
 }
 
 // AsAppError extracts an *AppError from an error chain.

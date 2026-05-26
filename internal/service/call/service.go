@@ -625,7 +625,6 @@ func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid
 	}
 	if existing != nil {
 		if existing.Status == entity.ParticipantStatusWaiting {
-			s.ensureLiveKitRoomBestEffort(ctx, call)
 			slog.InfoContext(ctx, "participant remains in waiting room", "call_id", callID, "user_id", userID)
 			return existing, nil
 		}

@@ -19,6 +19,8 @@ Primary references:
 ## Production Shape
 
 - Public signaling URL: `wss://livekit.<env>.aloqa.example`.
+- Public media endpoint: `media.<env>.aloqa.example` or the LiveKit node public
+  IPs when no media L4 load balancer is used.
 - Public API URL for webhook callbacks:
   `https://api.<env>.aloqa.example/livekit/webhook`.
 - TLS terminates at a trusted certificate chain. Do not use self-signed
@@ -40,6 +42,9 @@ Use these example files as templates:
 
 1. Create DNS records:
    - `livekit.<env>.aloqa.example` -> signaling HTTPS/WebSocket load balancer.
+   - `media.<env>.aloqa.example` -> media L4 load balancer for LiveKit
+     `7881/TCP` and `50000-60000/UDP`, or document the per-node public IPs
+     that LiveKit advertises when no media L4 load balancer is used.
    - `turn.<env>.aloqa.example` -> TURN L4 load balancer or LiveKit node public
      IP if no L4 balancer is used.
    - `api.<env>.aloqa.example` -> aloqa backend HTTPS load balancer.
@@ -80,6 +85,7 @@ Open only the ports required by the selected topology.
 | ICE UDP media range           | 50000-60000 | UDP      | Public L4 to LiveKit nodes      |
 | TURN/TLS                      | 5349 or 443 | TCP      | Public L4 to TURN/LiveKit TURN  |
 | TURN/UDP                      | 3478 or 443 | UDP      | Public L4 to TURN/LiveKit TURN  |
+| TURN relay range              | 61000-62000 | UDP      | TURN nodes to LiveKit SFU       |
 | LiveKit Prometheus            | 6789        | TCP      | Private monitoring network only |
 | LiveKit Redis                 | 6379        | TCP      | Private network only            |
 
@@ -95,21 +101,30 @@ Production defaults:
 - Prefer host networking or a CNI/L4 setup that preserves UDP reachability.
 - Validate both direct UDP and TURN-relayed calls. TURN must not be treated as a
   rare fallback; enterprise networks will rely on it.
+- Pin `turn.relay_range_start: 61000` and `turn.relay_range_end: 62000`, or an
+  environment-approved equivalent, and mirror that range in TURN/SFU
+  firewall rules. LiveKit otherwise uses arbitrary available ports for TURN
+  relay traffic.
 - Keep TURN capacity separate from application CPU capacity when possible. Alert
   on TURN relay ratio, relay egress, auth failures, and allocation failures.
 
 Validation commands:
 
 ```bash
+LIVEKIT_MEDIA_TARGET=media.<env>.aloqa.example
+TURN_TARGET=turn.<env>.aloqa.example
+
 nc -vz livekit.<env>.aloqa.example 443
-nc -vz livekit.<env>.aloqa.example 7881
-nc -vz turn.<env>.aloqa.example 5349
-nc -vzu livekit.<env>.aloqa.example 50000
-nc -vzu turn.<env>.aloqa.example 3478
+nc -vz "${LIVEKIT_MEDIA_TARGET}" 7881
+nc -vz "${TURN_TARGET}" 5349
+nc -vzu "${LIVEKIT_MEDIA_TARGET}" 50000
+nc -vzu "${TURN_TARGET}" 3478
+nc -vzu "${TURN_TARGET}" 61000
 ```
 
-UDP `nc` checks only prove that packets can be sent. Browser WebRTC validation is
-the real connectivity gate.
+Set `LIVEKIT_MEDIA_TARGET` to a specific LiveKit node public IP when the
+deployment does not expose a media L4 hostname. UDP `nc` checks only prove that
+packets can be sent. Browser WebRTC validation is the real connectivity gate.
 
 ## Webhook Signature Endpoint
 
@@ -277,7 +292,7 @@ ALOQA_POSTGRES_TEST_DSN='postgres://aloqa:aloqa@127.0.0.1:5432/aloqa_test?sslmod
 
    ```bash
    curl -Iv https://livekit.<env>.aloqa.example
-   curl -Iv https://api.<env>.aloqa.example/livekit/webhook
+   curl -Iv https://api.<env>.aloqa.example
    ```
 
 3. Confirm unsigned webhook rejection:

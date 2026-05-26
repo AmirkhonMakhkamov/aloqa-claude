@@ -28,6 +28,9 @@ turn:
   domain: turn.<env>.aloqa.example
   # Use 443 when no L4 load balancer rewrites the public TURN/TLS port.
   tls_port: 5349
+  # Keep this range pinned and mirrored in firewall/security-group rules.
+  relay_range_start: 61000
+  relay_range_end: 62000
   cert_file: /etc/livekit/tls/tls.crt
   key_file: /etc/livekit/tls/tls.key
   # Enable only when UDP/443 is intentionally allocated to TURN.

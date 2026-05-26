@@ -57,8 +57,10 @@ func (s *Service) SetLiveKitRoomClient(client LiveKitRoomClient) {
 }
 
 // IssueLiveKitJoinInfo signs an access token granting the user permission to
-// join the LiveKit room dedicated to the given call.
-func (s *Service) IssueLiveKitJoinInfo(call *entity.Call, userID uuid.UUID, displayName string) (*LiveKitJoinInfo, error) {
+// join the LiveKit room dedicated to the given call. The grant is derived from
+// the persisted participant row so waiting-room users cannot bypass admission
+// and viewer roles cannot publish media.
+func (s *Service) IssueLiveKitJoinInfo(ctx context.Context, call *entity.Call, userID uuid.UUID, displayName string) (*LiveKitJoinInfo, error) {
 	if call == nil {
 		return nil, cerrors.InvalidInput("call is required")
 	}
@@ -66,7 +68,18 @@ func (s *Service) IssueLiveKitJoinInfo(call *entity.Call, userID uuid.UUID, disp
 		return nil, cerrors.Unavailable("livekit is not configured")
 	}
 
-	canPublish := true
+	participant, err := s.calls.GetParticipant(ctx, call.ID, userID)
+	if err != nil {
+		if isNotFound(err) {
+			return nil, cerrors.Forbidden("user is not a participant in this call")
+		}
+		return nil, cerrors.Internal("failed to load call participant for livekit token", err)
+	}
+	if participant.Status != entity.ParticipantStatusConnected {
+		return nil, cerrors.Forbidden("participant is not connected")
+	}
+
+	canPublish := participant.Role != entity.CallRoleViewer
 	canSubscribe := true
 	canPublishData := true
 	grant := &auth.VideoGrant{
@@ -203,9 +216,6 @@ func (s *Service) HandleLiveKitWebhook(ctx context.Context, ev *livekitpb.Webhoo
 	if ev == nil {
 		return cerrors.InvalidInput("livekit webhook event is nil")
 	}
-	if s.livekitDedupe == nil {
-		s.livekitDedupe = newLiveKitWebhookDedupe(10 * time.Minute)
-	}
 	if !s.livekitDedupe.markFresh(ev.GetId()) {
 		return nil
 	}
@@ -281,10 +291,9 @@ func (s *Service) handleLiveKitParticipantJoined(ctx context.Context, callID uui
 	}
 
 	if participant.Status != entity.ParticipantStatusConnected {
-		if err := s.calls.UpdateParticipantStatus(ctx, participant.ID, entity.ParticipantStatusConnected); err != nil {
-			return cerrors.Internal("failed to mark participant connected", err)
-		}
-		participant.Status = entity.ParticipantStatusConnected
+		s.removeLiveKitParticipantBestEffort(ctx, callID, userID)
+		slog.WarnContext(ctx, "ignored livekit participant_joined for non-connected participant", "call_id", callID, "user_id", userID, "status", participant.Status)
+		return nil
 	}
 
 	call, err := s.calls.GetByID(ctx, callID)

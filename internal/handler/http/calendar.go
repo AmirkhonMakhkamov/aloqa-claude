@@ -312,7 +312,7 @@ func (h *CalendarHandler) StartCallFromEvent(w http.ResponseWriter, r *http.Requ
 		if roomErr := h.callSvc.EnsureLiveKitRoom(r.Context(), callEntity); roomErr != nil {
 			slog.WarnContext(r.Context(), "failed to ensure livekit room on scheduled start", "call_id", callEntity.ID, "error", roomErr)
 		}
-		info, tokenErr := h.callSvc.IssueLiveKitJoinInfo(callEntity, userID, "")
+		info, tokenErr := h.callSvc.IssueLiveKitJoinInfo(r.Context(), callEntity, userID, "")
 		if tokenErr != nil {
 			slog.WarnContext(r.Context(), "failed to issue livekit join info on scheduled start", "call_id", callEntity.ID, "user_id", userID, "error", tokenErr)
 		} else {

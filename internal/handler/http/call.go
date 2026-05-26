@@ -80,7 +80,7 @@ func (h *CallHandler) Start(w http.ResponseWriter, r *http.Request) {
 
 	resp := StartCallResponse{Call: c}
 	if h.svc.LiveKitConfigured() {
-		info, tokenErr := h.svc.IssueLiveKitJoinInfo(c, userID, "")
+		info, tokenErr := h.svc.IssueLiveKitJoinInfo(r.Context(), c, userID, "")
 		if tokenErr != nil {
 			// Non-fatal: caller already has the call row; FE surfaces the error and can retry join.
 			slog.WarnContext(r.Context(), "failed to issue livekit join info on start", "call_id", c.ID, "user_id", userID, "error", tokenErr)
@@ -184,12 +184,12 @@ func (h *CallHandler) Join(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := JoinCallResponse{Participant: participant}
-	if h.svc.LiveKitConfigured() {
+	if h.svc.LiveKitConfigured() && participant.Status == entity.ParticipantStatusConnected {
 		c, callErr := h.svc.GetCall(r.Context(), workspaceID, callID, userID)
 		if callErr != nil {
 			slog.WarnContext(r.Context(), "failed to load call after join", "call_id", callID, "user_id", userID, "error", callErr)
 		} else if c != nil {
-			info, tokenErr := h.svc.IssueLiveKitJoinInfo(c, userID, "")
+			info, tokenErr := h.svc.IssueLiveKitJoinInfo(r.Context(), c, userID, "")
 			if tokenErr != nil {
 				slog.WarnContext(r.Context(), "failed to issue livekit join info on join", "call_id", callID, "user_id", userID, "error", tokenErr)
 			} else {

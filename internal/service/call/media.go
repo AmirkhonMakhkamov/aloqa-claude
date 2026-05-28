@@ -6,13 +6,10 @@ import (
 	"crypto/sha1"
 	"encoding/base64"
 	"fmt"
-	"log/slog"
 	"strings"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
-	"github.com/pion/webrtc/v4"
 
 	"aloqa/internal/domain/entity"
 	"aloqa/internal/domain/event"
@@ -20,51 +17,11 @@ import (
 	"aloqa/internal/pkg/cerrors"
 )
 
-const (
-	mediaRolePresenter = "presenter"
-	mediaRoleViewer    = "viewer"
-)
-
-type MediaJoinToken struct {
-	Token               string                          `json:"token"`
-	Role                string                          `json:"role"`
-	ExpiresAt           time.Time                       `json:"expires_at"`
-	NodeID              string                          `json:"node_id,omitempty"`
-	Region              string                          `json:"region,omitempty"`
-	ControlURL          string                          `json:"control_url,omitempty"`
-	MediaURL            string                          `json:"media_url,omitempty"`
-	RoutingMode         entity.MediaRoutingMode         `json:"routing_mode,omitempty"`
-	FanoutStrategy      entity.MediaFanoutStrategy      `json:"fanout_strategy,omitempty"`
-	OverflowPolicy      entity.MediaOverflowPolicy      `json:"overflow_policy,omitempty"`
-	ScreenSharePriority entity.MediaScreenSharePriority `json:"screen_share_priority,omitempty"`
-	TURNStrategy        string                          `json:"turn_strategy,omitempty"`
-}
-
 type TurnCredentials struct {
 	URLs       []string `json:"urls"`
 	Username   string   `json:"username"`
 	Credential string   `json:"credential"`
 	TTL        int      `json:"ttl"`
-}
-
-type MediaOfferInput struct {
-	CallID uuid.UUID `json:"-"`
-	Token  string    `json:"token"`
-	SDP    string    `json:"sdp"`
-	Type   string    `json:"type"`
-}
-
-type MediaAnswer struct {
-	SDP  string `json:"sdp"`
-	Type string `json:"type"`
-}
-
-type MediaICECandidateInput struct {
-	CallID        uuid.UUID `json:"-"`
-	Token         string    `json:"token"`
-	Candidate     string    `json:"candidate"`
-	SDPMid        string    `json:"sdp_mid,omitempty"`
-	SDPMLineIndex *int      `json:"sdp_mline_index,omitempty"`
 }
 
 type MediaQualityReportInput struct {
@@ -85,15 +42,6 @@ type MediaQualityReportInput struct {
 	DeviceClass          string  `json:"device_class,omitempty"`
 	LowPowerMode         bool    `json:"low_power_mode,omitempty"`
 	ScreenShare          bool    `json:"screen_share,omitempty"`
-}
-
-type mediaTokenClaims struct {
-	jwt.RegisteredClaims
-	WorkspaceID string `json:"workspace_id"`
-	CallID      string `json:"call_id"`
-	Role        string `json:"role"`
-	NodeID      string `json:"node_id,omitempty"`
-	Region      string `json:"region,omitempty"`
 }
 
 // computeHmacCredential is the coturn `--use-auth-secret` scheme: HMAC-SHA1 of
@@ -194,254 +142,6 @@ func (s *Service) IssueTurnCredentials(ctx context.Context, workspaceID, callID,
 	}, nil
 }
 
-// IssueMediaJoinToken returns a short-lived token scoped to one call/user/role.
-func (s *Service) IssueMediaJoinToken(ctx context.Context, workspaceID, callID, userID uuid.UUID) (*MediaJoinToken, error) {
-	if len(s.media.TokenSecret) == 0 {
-		return nil, cerrors.Unavailable("media token signing is not configured")
-	}
-	call, err := s.requireCallAccess(ctx, workspaceID, callID, userID)
-	if err != nil {
-		return nil, err
-	}
-
-	participant, err := s.calls.GetParticipant(ctx, callID, userID)
-	if err != nil {
-		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
-			return nil, cerrors.Forbidden("join the call before joining media")
-		}
-		return nil, cerrors.Internal("failed to get participant", err)
-	}
-	if participant.Status != entity.ParticipantStatusConnected {
-		return nil, cerrors.Forbidden("participant is not connected")
-	}
-
-	role := mediaRolePresenter
-	if participant.Role == entity.CallRoleViewer {
-		role = mediaRoleViewer
-	}
-	placement, err := s.ensureMediaPlacement(ctx, call)
-	if err != nil {
-		return nil, err
-	}
-	if s.control != nil {
-		if resolved, resolveErr := s.control.ResolveParticipantPlacement(ctx, call, participant, s.control.LocalNodeID()); resolveErr != nil {
-			return nil, resolveErr
-		} else if resolved != nil {
-			placement = resolved
-		}
-	}
-
-	ttl := s.media.TokenTTL
-	if ttl <= 0 {
-		ttl = 5 * time.Minute
-	}
-	now := time.Now().UTC()
-	expiresAt := now.Add(ttl)
-	claims := mediaTokenClaims{
-		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   userID.String(),
-			IssuedAt:  jwt.NewNumericDate(now),
-			ExpiresAt: jwt.NewNumericDate(expiresAt),
-			ID:        uuid.NewString(),
-		},
-		WorkspaceID: workspaceID.String(),
-		CallID:      callID.String(),
-		Role:        role,
-	}
-	if placement != nil {
-		claims.NodeID = placement.NodeID
-		claims.Region = placement.Region
-	}
-
-	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(s.media.TokenSecret)
-	if err != nil {
-		return nil, cerrors.Internal("failed to sign media token", err)
-	}
-
-	result := &MediaJoinToken{Token: token, Role: role, ExpiresAt: expiresAt}
-	if placement != nil {
-		result.NodeID = placement.NodeID
-		result.Region = placement.Region
-		result.ControlURL = placement.ControlURL
-		result.MediaURL = placement.MediaURL
-		result.RoutingMode = placement.RoutingMode
-		result.FanoutStrategy = placement.FanoutStrategy
-		result.OverflowPolicy = placement.OverflowPolicy
-		result.ScreenSharePriority = placement.ScreenSharePriority
-		result.TURNStrategy = placement.TURNStrategy
-	}
-	return result, nil
-}
-
-// HandleMediaOffer creates a role-scoped SFU peer and returns the server answer.
-func (s *Service) HandleMediaOffer(ctx context.Context, input MediaOfferInput) (*MediaAnswer, error) {
-	if input.SDP == "" {
-		return nil, cerrors.InvalidInput("sdp is required")
-	}
-	token, err := s.validateMediaToken(input.Token)
-	if err != nil {
-		return nil, err
-	}
-	if input.CallID != uuid.Nil && input.CallID != token.callID {
-		return nil, cerrors.Forbidden("media token is not valid for this call")
-	}
-	if s.sfu == nil {
-		return nil, cerrors.Unavailable("media server is not available")
-	}
-	call, err := s.requireCallAccess(ctx, token.workspaceID, token.callID, token.userID)
-	if err != nil {
-		return nil, err
-	}
-	if call.Status == entity.CallStatusEnded {
-		return nil, cerrors.Forbidden("call has already ended")
-	}
-	if err := s.ensureLocalMediaPlacement(ctx, call, token.nodeID); err != nil {
-		return nil, err
-	}
-
-	pc, err := s.sfu.NewPeerConnection()
-	if err != nil {
-		return nil, cerrors.Internal("failed to create peer connection", err)
-	}
-	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
-		if candidate == nil {
-			return
-		}
-		s.publishICECandidate(context.Background(), call.WorkspaceID, call.ID, token.userID, candidate)
-	})
-
-	room, err := s.ensureMediaRoom(ctx, call)
-	if err != nil {
-		if closeErr := pc.Close(); closeErr != nil {
-			slog.WarnContext(ctx, "failed to close peer connection after media room error", "call_id", call.ID, "user_id", token.userID, "error", closeErr)
-		}
-		return nil, err
-	}
-	room.RemovePeer(token.userID.String())
-
-	if token.role == mediaRoleViewer {
-		if _, err := room.AddViewer(token.userID.String(), pc); err != nil {
-			if closeErr := pc.Close(); closeErr != nil {
-				slog.WarnContext(ctx, "failed to close viewer peer connection after room add error", "call_id", call.ID, "user_id", token.userID, "error", closeErr)
-			}
-			return nil, cerrors.Conflict(fmt.Sprintf("failed to add viewer peer: %s", err.Error()))
-		}
-	} else {
-		if _, err := room.AddPresenter(token.userID.String(), pc); err != nil {
-			if closeErr := pc.Close(); closeErr != nil {
-				slog.WarnContext(ctx, "failed to close presenter peer connection after room add error", "call_id", call.ID, "user_id", token.userID, "error", closeErr)
-			}
-			return nil, cerrors.Conflict(fmt.Sprintf("failed to add presenter peer: %s", err.Error()))
-		}
-	}
-
-	offer := webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: input.SDP}
-	if err := pc.SetRemoteDescription(offer); err != nil {
-		room.RemovePeer(token.userID.String())
-		return nil, cerrors.InvalidInput("invalid remote offer")
-	}
-
-	answer, err := pc.CreateAnswer(nil)
-	if err != nil {
-		room.RemovePeer(token.userID.String())
-		return nil, cerrors.Internal("failed to create answer", err)
-	}
-	if err := pc.SetLocalDescription(answer); err != nil {
-		room.RemovePeer(token.userID.String())
-		return nil, cerrors.Internal("failed to set local description", err)
-	}
-
-	return &MediaAnswer{SDP: answer.SDP, Type: answer.Type.String()}, nil
-}
-
-// AddMediaICECandidate adds a trickled remote ICE candidate to the user's SFU peer.
-func (s *Service) AddMediaICECandidate(ctx context.Context, input MediaICECandidateInput) error {
-	token, err := s.validateMediaToken(input.Token)
-	if err != nil {
-		return err
-	}
-	if input.CallID != uuid.Nil && input.CallID != token.callID {
-		return cerrors.Forbidden("media token is not valid for this call")
-	}
-	if s.sfu == nil {
-		return cerrors.Unavailable("media server is not available")
-	}
-	call, err := s.requireCallAccess(ctx, token.workspaceID, token.callID, token.userID)
-	if err != nil {
-		return err
-	}
-	if err := s.ensureLocalMediaPlacement(ctx, call, token.nodeID); err != nil {
-		return err
-	}
-	if input.Candidate == "" {
-		return cerrors.InvalidInput("candidate is required")
-	}
-	room, ok := s.sfu.GetRoom(token.callID.String())
-	if !ok {
-		return cerrors.NotFound("media room not found")
-	}
-	peer, _, ok := room.Peer(token.userID.String())
-	if !ok {
-		return cerrors.NotFound("media peer not found")
-	}
-
-	init := webrtc.ICECandidateInit{
-		Candidate:     input.Candidate,
-		SDPMid:        &input.SDPMid,
-		SDPMLineIndex: intPtrToUint16Ptr(input.SDPMLineIndex),
-	}
-	if input.SDPMid == "" {
-		init.SDPMid = nil
-	}
-	if err := peer.PC.AddICECandidate(init); err != nil {
-		return cerrors.InvalidInput("invalid ICE candidate")
-	}
-	return nil
-}
-
-// RestartMediaICE creates an ICE restart answer for an existing media peer.
-func (s *Service) RestartMediaICE(ctx context.Context, input MediaOfferInput) (*MediaAnswer, error) {
-	token, err := s.validateMediaToken(input.Token)
-	if err != nil {
-		return nil, err
-	}
-	if input.CallID != uuid.Nil && input.CallID != token.callID {
-		return nil, cerrors.Forbidden("media token is not valid for this call")
-	}
-	if s.sfu == nil {
-		return nil, cerrors.Unavailable("media server is not available")
-	}
-	call, err := s.requireCallAccess(ctx, token.workspaceID, token.callID, token.userID)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.ensureLocalMediaPlacement(ctx, call, token.nodeID); err != nil {
-		return nil, err
-	}
-	room, ok := s.sfu.GetRoom(token.callID.String())
-	if !ok {
-		return nil, cerrors.NotFound("media room not found")
-	}
-	peer, _, ok := room.Peer(token.userID.String())
-	if !ok {
-		return nil, cerrors.NotFound("media peer not found")
-	}
-	if input.SDP != "" {
-		offer := webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: input.SDP}
-		if err := peer.PC.SetRemoteDescription(offer); err != nil {
-			return nil, cerrors.InvalidInput("invalid restart offer")
-		}
-	}
-	answer, err := peer.PC.CreateAnswer(nil)
-	if err != nil {
-		return nil, cerrors.Internal("failed to create ICE restart answer", err)
-	}
-	if err := peer.PC.SetLocalDescription(answer); err != nil {
-		return nil, cerrors.Internal("failed to set ICE restart answer", err)
-	}
-	return &MediaAnswer{SDP: answer.SDP, Type: answer.Type.String()}, nil
-}
-
 func (s *Service) ReportNetworkQuality(ctx context.Context, workspaceID, callID, userID uuid.UUID, input MediaQualityReportInput) (*sfu.AdaptiveDecision, error) {
 	if err := validateQualityReport(input); err != nil {
 		return nil, err
@@ -519,24 +219,6 @@ func (s *Service) ReportNetworkQuality(ctx context.Context, workspaceID, callID,
 	return &decision, nil
 }
 
-func (s *Service) ensureMediaRoom(ctx context.Context, call *entity.Call) (*sfu.Room, error) {
-	if s.sfu == nil {
-		return nil, cerrors.Unavailable("media server is not available")
-	}
-	if err := s.ensureLocalMediaPlacement(ctx, call, ""); err != nil {
-		return nil, err
-	}
-	if room, ok := s.sfu.GetRoom(call.ID.String()); ok {
-		return room, nil
-	}
-	room, err := s.sfu.CreateRoom(call.ID.String(), s.roomOptions(call))
-	if err != nil {
-		slog.ErrorContext(ctx, "failed to create media room", "call_id", call.ID, "error", err)
-		return nil, cerrors.Internal("failed to create media room", err)
-	}
-	return room, nil
-}
-
 func (s *Service) roomOptions(call *entity.Call) sfu.RoomOptions {
 	policy := s.callPolicy(call)
 	maxPresenters := policy.MaxPresenters
@@ -588,57 +270,6 @@ func validateQualityReport(input MediaQualityReportInput) error {
 	return nil
 }
 
-type validatedMediaToken struct {
-	workspaceID uuid.UUID
-	callID      uuid.UUID
-	userID      uuid.UUID
-	role        string
-	nodeID      string
-}
-
-func (s *Service) validateMediaToken(tokenString string) (*validatedMediaToken, error) {
-	if tokenString == "" {
-		return nil, cerrors.Unauthorized("media token is required")
-	}
-	if len(s.media.TokenSecret) == 0 {
-		return nil, cerrors.Unavailable("media token signing is not configured")
-	}
-	claims := &mediaTokenClaims{}
-	token, err := jwt.ParseWithClaims(tokenString, claims, func(t *jwt.Token) (any, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
-		}
-		return s.media.TokenSecret, nil
-	})
-	if err != nil || token == nil || !token.Valid {
-		return nil, cerrors.Unauthorized("invalid media token")
-	}
-
-	workspaceID, err := uuid.Parse(claims.WorkspaceID)
-	if err != nil {
-		return nil, cerrors.Unauthorized("invalid media token")
-	}
-	callID, err := uuid.Parse(claims.CallID)
-	if err != nil {
-		return nil, cerrors.Unauthorized("invalid media token")
-	}
-	userID, err := uuid.Parse(claims.Subject)
-	if err != nil {
-		return nil, cerrors.Unauthorized("invalid media token")
-	}
-	if claims.Role != mediaRolePresenter && claims.Role != mediaRoleViewer {
-		return nil, cerrors.Unauthorized("invalid media token")
-	}
-
-	return &validatedMediaToken{
-		workspaceID: workspaceID,
-		callID:      callID,
-		userID:      userID,
-		role:        claims.Role,
-		nodeID:      claims.NodeID,
-	}, nil
-}
-
 func (s *Service) ensureMediaPlacement(ctx context.Context, call *entity.Call) (*entity.MediaRoomPlacement, error) {
 	if call == nil || s.control == nil {
 		return nil, nil
@@ -646,58 +277,11 @@ func (s *Service) ensureMediaPlacement(ctx context.Context, call *entity.Call) (
 	return s.control.EnsurePlacement(ctx, call, s.roomOptions(call))
 }
 
-func (s *Service) ensureLocalMediaPlacement(ctx context.Context, call *entity.Call, tokenNodeID string) error {
-	if s.control == nil || call == nil {
-		return nil
-	}
-	if tokenNodeID != "" && !s.control.IsLocalNode(tokenNodeID) {
-		return cerrors.Unavailable("media session is assigned to a different media edge")
-	}
-	allowed, err := s.control.CanServeNode(ctx, call, s.control.LocalNodeID())
-	if err != nil {
-		return err
-	}
-	if !allowed {
-		placement, placementErr := s.ensureMediaPlacement(ctx, call)
-		if placementErr != nil {
-			return placementErr
-		}
-		if placement != nil {
-			return cerrors.Unavailable(fmt.Sprintf("media session is assigned to %s", placement.ControlURL))
-		}
-		return cerrors.Unavailable("media session is assigned to a different media edge")
-	}
-	return nil
-}
-
 func (s *Service) shouldServePlacementLocally(placement *entity.MediaRoomPlacement) bool {
 	if placement == nil || s.control == nil {
 		return true
 	}
 	return s.control.IsLocalNode(placement.NodeID)
-}
-
-func (s *Service) publishICECandidate(ctx context.Context, workspaceID, callID, userID uuid.UUID, candidate *webrtc.ICECandidate) {
-	candidateJSON := candidate.ToJSON()
-	var lineIndex *int
-	if candidateJSON.SDPMLineIndex != nil {
-		n := int(*candidateJSON.SDPMLineIndex)
-		lineIndex = &n
-	}
-	mid := ""
-	if candidateJSON.SDPMid != nil {
-		mid = *candidateJSON.SDPMid
-	}
-	payload := event.SignalPayload{
-		CallID:        callID,
-		FromUser:      uuid.Nil,
-		ToUser:        userID,
-		Candidate:     candidateJSON.Candidate,
-		SDPMid:        mid,
-		SDPMLineIndex: lineIndex,
-	}
-	subject := fmt.Sprintf("aloqa.signal.%s", userID)
-	s.doPublish(ctx, event.TypeSignalCandidate, subject, workspaceID, uuid.Nil, uuid.Nil, payload)
 }
 
 func (s *Service) publishQualityDecision(ctx context.Context, call *entity.Call, userID uuid.UUID, decision sfu.AdaptiveDecision, source string) {
@@ -721,17 +305,6 @@ func (s *Service) publishQualityDecision(ctx context.Context, call *entity.Call,
 		LipSyncWindowMs:     decision.LipSyncWindowMs,
 		Reasons:             decision.Reasons,
 	})
-}
-
-func intPtrToUint16Ptr(v *int) *uint16 {
-	if v == nil {
-		return nil
-	}
-	if *v < 0 || *v > 65535 {
-		return nil
-	}
-	n := uint16(*v)
-	return &n
 }
 
 func applyRuntimeQualityPolicy(decision sfu.AdaptiveDecision, policy *entity.MediaQualityPolicy) sfu.AdaptiveDecision {

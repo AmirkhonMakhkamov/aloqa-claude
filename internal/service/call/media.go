@@ -2,6 +2,9 @@ package call
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha1"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -93,11 +96,37 @@ type mediaTokenClaims struct {
 	Region      string `json:"region,omitempty"`
 }
 
-// IssueTurnCredentials returns TURN servers and credentials scoped to an active call participant.
-func (s *Service) IssueTurnCredentials(ctx context.Context, workspaceID, callID, userID uuid.UUID) (*TurnCredentials, error) {
-	if len(s.media.TURNURLs) == 0 || s.media.TURNUsername == "" || s.media.TURNCredential == "" {
-		return nil, cerrors.Unavailable("turn service is not configured")
+// computeHmacCredential is the coturn `--use-auth-secret` scheme: HMAC-SHA1 of
+// the timestamp:userID username, encoded as base64. Coturn validates the credential
+// server-side using the same shared secret.
+func computeHmacCredential(secret, username string) string {
+	h := hmac.New(sha1.New, []byte(secret))
+	h.Write([]byte(username))
+	return base64.StdEncoding.EncodeToString(h.Sum(nil))
+}
+
+// generateTurnHmacUsername builds a TTL-bound coturn username carrying the
+// userID scope for operational log attribution.
+func generateTurnHmacUsername(ttl time.Duration, userID uuid.UUID) string {
+	expiry := time.Now().Add(ttl).Unix()
+	return fmt.Sprintf("%d:%s", expiry, userID.String())
+}
+
+// stunFallbackURLs returns the operator-configured STUN servers when set,
+// otherwise the public google STUN endpoint. Lets LAN / air-gapped deploys
+// (WEBRTC_STUN_SERVERS) avoid an external Google dependency they explicitly
+// overrode for SFU ICE.
+func stunFallbackURLs(configured []string) []string {
+	if len(configured) > 0 {
+		return append([]string(nil), configured...)
 	}
+	return []string{"stun:stun.l.google.com:19302"}
+}
+
+// IssueTurnCredentials returns TURN servers and credentials scoped to an active call participant.
+// When TURN is not configured (no TURNURLs), falls back to a public STUN response so FE clients
+// can still complete direct/LAN paths. Access check runs FIRST so non-participants cannot probe.
+func (s *Service) IssueTurnCredentials(ctx context.Context, workspaceID, callID, userID uuid.UUID) (*TurnCredentials, error) {
 	if _, err := s.requireCallAccess(ctx, workspaceID, callID, userID); err != nil {
 		return nil, err
 	}
@@ -110,6 +139,43 @@ func (s *Service) IssueTurnCredentials(ctx context.Context, workspaceID, callID,
 	}
 	if participant.Status != entity.ParticipantStatusConnected {
 		return nil, cerrors.Forbidden("participant is not connected")
+	}
+
+	// TURN HMAC branch — when a shared secret is configured, issue short-lived
+	// per-participant creds against coturn's --use-auth-secret mode.
+	if s.media.TURNSecret != "" && len(s.media.TURNURLs) > 0 {
+		ttl := s.media.TURNCredentialsTTL
+		if ttl <= 0 || ttl > 10*time.Minute {
+			ttl = 10 * time.Minute
+		}
+		username := generateTurnHmacUsername(ttl, userID)
+		return &TurnCredentials{
+			URLs:       append([]string(nil), s.media.TURNURLs...),
+			Username:   username,
+			Credential: computeHmacCredential(s.media.TURNSecret, username),
+			TTL:        int(ttl.Seconds()),
+		}, nil
+	}
+
+	// STUN-only fallback when TURN is not configured. BE includes the STUN
+	// URL(s) as urls[0..] so FE doesn't need a second hardcoded fallback in this
+	// branch. Honors WEBRTC_STUN_SERVERS so LAN deploys don't get a Google
+	// dependency. Username/Credential are EMPTY STRINGS (not null) — the FE Zod
+	// schema requires non-optional strings; omitting would surface as a parse error.
+	if len(s.media.TURNURLs) == 0 {
+		return &TurnCredentials{
+			URLs:       stunFallbackURLs(s.media.STUNServers),
+			Username:   "",
+			Credential: "",
+			TTL:        300,
+		}, nil
+	}
+
+	// Partial-misconfig: URLs set but neither static creds nor HMAC secret.
+	// Surface 500 (permanent misconfig) rather than silently returning TURN URLs
+	// with empty creds — browsers would reject the config without a clear error.
+	if s.media.TURNSecret == "" && (s.media.TURNUsername == "" || s.media.TURNCredential == "") {
+		return nil, cerrors.Internal("turn service partially configured: URLs set but credentials missing — set TURN_USERNAME+TURN_CREDENTIAL or TURN_SECRET", nil)
 	}
 
 	ttl := s.media.TURNCredentialsTTL

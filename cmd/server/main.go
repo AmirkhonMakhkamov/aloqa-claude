@@ -358,6 +358,8 @@ func run() error {
 		TURNURLs:                 turnURLsFromConfig(cfg.WebRTC.TURNServer),
 		TURNUsername:             cfg.WebRTC.TURNUsername,
 		TURNCredential:           cfg.WebRTC.TURNPassword,
+		TURNSecret:               cfg.WebRTC.TURNSecret,
+		STUNServers:              cfg.WebRTC.STUNServers,
 		TURNCredentialsTTL:       cfg.WebRTC.MediaTokenTTL,
 		MaxPresentersPerCall:     cfg.WebRTC.MaxPresentersPerCall,
 		MaxViewersPerCall:        cfg.WebRTC.MaxViewersPerCall,

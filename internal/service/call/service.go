@@ -110,6 +110,8 @@ type MediaConfig struct {
 	TURNURLs                 []string
 	TURNUsername             string
 	TURNCredential           string
+	TURNSecret               string
+	STUNServers              []string
 	TURNCredentialsTTL       time.Duration
 	MaxPresentersPerCall     int
 	MaxViewersPerCall        int
@@ -586,7 +588,7 @@ func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid
 	}
 
 	if call.Status == entity.CallStatusEnded {
-		return nil, cerrors.Forbidden("call has already ended")
+		return nil, cerrors.CallEnded("call has already ended")
 	}
 
 	// Check capacity if max participants is set.
@@ -624,7 +626,6 @@ func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid
 	}
 	if existing != nil {
 		if existing.Status == entity.ParticipantStatusWaiting {
-			s.ensureLiveKitRoomBestEffort(ctx, call)
 			slog.InfoContext(ctx, "participant remains in waiting room", "call_id", callID, "user_id", userID)
 			return existing, nil
 		}

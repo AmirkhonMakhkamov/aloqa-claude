@@ -83,6 +83,7 @@ type WebRTCConfig struct {
 	TURNServer                      string   // e.g. "turn:turn.example.com:3478"
 	TURNUsername                    string
 	TURNPassword                    string
+	TURNSecret                      string // coturn --use-auth-secret shared secret (HMAC short-lived creds)
 	NodeID                          string
 	Region                          string
 	ControlURL                      string
@@ -342,6 +343,7 @@ func Load() (*Config, error) {
 			TURNServer:                      env("WEBRTC_TURN_SERVER", ""),
 			TURNUsername:                    env("WEBRTC_TURN_USERNAME", ""),
 			TURNPassword:                    env("WEBRTC_TURN_PASSWORD", ""),
+			TURNSecret:                      env("WEBRTC_TURN_SECRET", ""),
 			NodeID:                          env("WEBRTC_NODE_ID", ""),
 			Region:                          env("WEBRTC_REGION", "global"),
 			ControlURL:                      env("WEBRTC_CONTROL_URL", ""),

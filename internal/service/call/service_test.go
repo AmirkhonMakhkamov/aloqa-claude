@@ -520,6 +520,43 @@ func TestJoinCallKeepsExistingWaitingParticipantWaiting(t *testing.T) {
 	}
 }
 
+func TestJoinCall_OnEndedCall_ReturnsCallEndedNot403(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	userID := uuid.New()
+
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {
+				ID:          callID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeMeeting,
+				Status:      entity.CallStatusEnded,
+			},
+		},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	_, err := svc.JoinCall(ctx, workspaceID, callID, userID)
+	if err == nil {
+		t.Fatal("JoinCall on ended call returned nil error, want CALL_ENDED")
+	}
+	appErr, ok := cerrors.AsAppError(err)
+	if !ok {
+		t.Fatalf("JoinCall on ended call err = %T (%v), want *cerrors.AppError", err, err)
+	}
+	if appErr.Code != cerrors.CodeCallEnded {
+		t.Fatalf("JoinCall on ended call code = %q, want %q", appErr.Code, cerrors.CodeCallEnded)
+	}
+	if appErr.HTTPStatus() != 410 {
+		t.Fatalf("JoinCall on ended call HTTP status = %d, want 410 Gone", appErr.HTTPStatus())
+	}
+}
+
 func TestLiveKitParticipantJoinedDoesNotAdmitWaitingParticipant(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()

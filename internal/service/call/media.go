@@ -112,6 +112,17 @@ func generateTurnHmacUsername(ttl time.Duration, userID uuid.UUID) string {
 	return fmt.Sprintf("%d:%s", expiry, userID.String())
 }
 
+// stunFallbackURLs returns the operator-configured STUN servers when set,
+// otherwise the public google STUN endpoint. Lets LAN / air-gapped deploys
+// (WEBRTC_STUN_SERVERS) avoid an external Google dependency they explicitly
+// overrode for SFU ICE.
+func stunFallbackURLs(configured []string) []string {
+	if len(configured) > 0 {
+		return append([]string(nil), configured...)
+	}
+	return []string{"stun:stun.l.google.com:19302"}
+}
+
 // IssueTurnCredentials returns TURN servers and credentials scoped to an active call participant.
 // When TURN is not configured (no TURNURLs), falls back to a public STUN response so FE clients
 // can still complete direct/LAN paths. Access check runs FIRST so non-participants cannot probe.
@@ -146,13 +157,14 @@ func (s *Service) IssueTurnCredentials(ctx context.Context, workspaceID, callID,
 		}, nil
 	}
 
-	// STUN-only fallback when TURN is not configured. BE includes the google STUN
-	// URL as urls[0] so FE doesn't need a second hardcoded fallback in this branch.
-	// Username/Credential are EMPTY STRINGS (not null) — the FE Zod schema requires
-	// non-optional strings; omitting would surface as a parse error.
+	// STUN-only fallback when TURN is not configured. BE includes the STUN
+	// URL(s) as urls[0..] so FE doesn't need a second hardcoded fallback in this
+	// branch. Honors WEBRTC_STUN_SERVERS so LAN deploys don't get a Google
+	// dependency. Username/Credential are EMPTY STRINGS (not null) — the FE Zod
+	// schema requires non-optional strings; omitting would surface as a parse error.
 	if len(s.media.TURNURLs) == 0 {
 		return &TurnCredentials{
-			URLs:       []string{"stun:stun.l.google.com:19302"},
+			URLs:       stunFallbackURLs(s.media.STUNServers),
 			Username:   "",
 			Credential: "",
 			TTL:        300,

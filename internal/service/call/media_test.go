@@ -87,6 +87,25 @@ func TestIssueTurnCredentials_StunOnly_WhenNoTurnConfigured(t *testing.T) {
 	}
 }
 
+func TestIssueTurnCredentials_StunOnly_HonorsConfiguredStunServers(t *testing.T) {
+	svc, fx := newTestServiceWithConnectedParticipant(t)
+	svc.media.TURNURLs = nil
+	svc.media.TURNUsername = ""
+	svc.media.TURNCredential = ""
+	svc.media.TURNSecret = ""
+	svc.media.STUNServers = []string{"stun:stun.lan.internal:3478"}
+
+	creds, err := svc.IssueTurnCredentials(context.Background(), fx.workspaceID, fx.callID, fx.userID)
+	if err != nil {
+		t.Fatalf("IssueTurnCredentials err = %v, want nil", err)
+	}
+	// LAN / air-gapped deploys override WEBRTC_STUN_SERVERS; the STUN-only
+	// fallback must surface those rather than hardcoding Google.
+	if len(creds.URLs) != 1 || creds.URLs[0] != "stun:stun.lan.internal:3478" {
+		t.Fatalf("URLs = %+v, want [stun:stun.lan.internal:3478]", creds.URLs)
+	}
+}
+
 func TestIssueTurnCredentials_StunOnly_JsonMarshalingPreservesEmptyStrings(t *testing.T) {
 	t.Parallel()
 	creds := &TurnCredentials{

@@ -56,6 +56,13 @@ func mapTwirpErrorToAppError(err error, defaultMsg string) error {
 	if !errors.As(err, &twerr) {
 		return cerrors.Internal(defaultMsg, err)
 	}
+	// The detailed twirp text is kept on the wrapped cause (AppError.Err is
+	// `json:"-"` — logged, never serialized to clients). Transient (503) and
+	// bad-input (400) responses surface the detail in the client-facing Message
+	// where it is actionable; auth / internal failures (500) return only the
+	// generic defaultMsg so LiveKit admin-key and internal error details don't
+	// leak to callers.
+	detail := fmt.Errorf("%s (twirp:%s): %w", twerr.Msg(), twerr.Code(), err)
 	msg := fmt.Sprintf("%s: %s (twirp:%s)", defaultMsg, twerr.Msg(), twerr.Code())
 	switch twerr.Code() {
 	case twirp.Unavailable, twirp.DeadlineExceeded:
@@ -63,9 +70,9 @@ func mapTwirpErrorToAppError(err error, defaultMsg string) error {
 	case twirp.InvalidArgument:
 		return cerrors.InvalidInput(msg)
 	case twirp.Unauthenticated, twirp.PermissionDenied, twirp.Internal:
-		return cerrors.Internal(msg, err)
+		return cerrors.Internal(defaultMsg, detail)
 	default:
-		return cerrors.Internal(msg, err)
+		return cerrors.Internal(defaultMsg, detail)
 	}
 }
 

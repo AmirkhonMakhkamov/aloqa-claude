@@ -38,7 +38,12 @@ turn:
   # udp_port: 443
 
 room:
-  auto_create: true
+  # MUST stay false in production. aloqa-claude pre-creates every room via
+  # EnsureLiveKitRoomRequired on call start/join, so auto_create=true only
+  # enables the zombie-rejoin pattern: a stale FE deep-link to a deleted
+  # call.id would silently recreate the room instead of getting a NotFound.
+  # Matches the live inline config in deploy/docker-compose.livekit.yml.
+  auto_create: false
   enabled_codecs:
     - mime: audio/opus
     - mime: video/VP8

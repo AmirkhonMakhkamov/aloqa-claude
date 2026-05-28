@@ -175,7 +175,7 @@ func (s *Service) IssueTurnCredentials(ctx context.Context, workspaceID, callID,
 	// Surface 500 (permanent misconfig) rather than silently returning TURN URLs
 	// with empty creds — browsers would reject the config without a clear error.
 	if s.media.TURNSecret == "" && (s.media.TURNUsername == "" || s.media.TURNCredential == "") {
-		return nil, cerrors.Internal("turn service partially configured: URLs set but credentials missing — set TURN_USERNAME+TURN_CREDENTIAL or TURN_SECRET", nil)
+		return nil, cerrors.Internal("turn service partially configured: WEBRTC_TURN_SERVER set but credentials missing — set WEBRTC_TURN_USERNAME+WEBRTC_TURN_PASSWORD or WEBRTC_TURN_SECRET", nil)
 	}
 
 	ttl := s.media.TURNCredentialsTTL

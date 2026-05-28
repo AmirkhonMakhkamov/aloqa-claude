@@ -32,7 +32,7 @@ type LiveKitConfig struct {
 	URL                      string        // wss://livekit.example.com (FE-facing signaling URL)
 	APIKey                   string        // shared with the LiveKit server keys map
 	APISecret                string        // 32-byte hex secret
-	TokenTTL                 time.Duration // access-token validity (default 6h)
+	TokenTTL                 time.Duration // initial join-token validity (default 30m; LiveKit refreshes connected clients)
 	WebhookPath              string        // public path that LiveKit posts to (default /livekit/webhook)
 	WebhookPreviousAPIKey    string        // previous webhook signing key accepted during rotation
 	WebhookPreviousAPISecret string        // previous webhook signing secret accepted during rotation

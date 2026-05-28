@@ -89,42 +89,6 @@ func TestViewerCannotPublishMedia(t *testing.T) {
 // out of production binaries.
 func boolPtr(b bool) *bool { return &b }
 
-func TestMediaJoinTokenIsCallScopedAndRoleAware(t *testing.T) {
-	ctx := context.Background()
-	workspaceID := uuid.New()
-	userID := uuid.New()
-	callID := uuid.New()
-	otherCallID := uuid.New()
-
-	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
-		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
-	}}
-	calls := &fakeCallRepo{
-		calls: map[uuid.UUID]*entity.Call{
-			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeWebinar, Status: entity.CallStatusActive},
-		},
-		participants: map[[2]uuid.UUID]*entity.CallParticipant{
-			{callID, userID}: {ID: uuid.New(), CallID: callID, UserID: userID, Role: entity.CallRoleViewer, Status: entity.ParticipantStatusConnected},
-		},
-	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
-
-	token, err := svc.IssueMediaJoinToken(ctx, workspaceID, callID, userID)
-	if err != nil {
-		t.Fatalf("IssueMediaJoinToken returned error: %v", err)
-	}
-	if token.Role != mediaRoleViewer {
-		t.Fatalf("media role = %q, want %q", token.Role, mediaRoleViewer)
-	}
-	if err := svc.AddMediaICECandidate(ctx, MediaICECandidateInput{
-		CallID:    otherCallID,
-		Token:     token.Token,
-		Candidate: "candidate:0 1 UDP 2122252543 127.0.0.1 12345 typ host",
-	}); !hasCode(err, cerrors.CodeForbidden) {
-		t.Fatalf("AddMediaICECandidate with wrong route call error = %v, want FORBIDDEN", err)
-	}
-}
-
 func TestForwardSignalRequiresBothParticipants(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -350,81 +314,6 @@ func TestValidateQualityReportRejectsInvalidMetrics(t *testing.T) {
 				t.Fatalf("validateQualityReport error = %v, want INVALID_INPUT", err)
 			}
 		})
-	}
-}
-
-func TestMediaJoinTokenIncludesPlacementAndRejectsWrongEdge(t *testing.T) {
-	ctx := context.Background()
-	workspaceID := uuid.New()
-	userID := uuid.New()
-	callID := uuid.New()
-
-	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
-		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
-	}}
-	calls := &fakeCallRepo{
-		calls: map[uuid.UUID]*entity.Call{
-			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeWebinar, Status: entity.CallStatusActive},
-		},
-		participants: map[[2]uuid.UUID]*entity.CallParticipant{
-			{callID, userID}: {ID: uuid.New(), CallID: callID, UserID: userID, Role: entity.CallRoleViewer, Status: entity.ParticipantStatusConnected},
-		},
-	}
-	sfuServer, err := sfu.NewSFU(sfu.Config{})
-	if err != nil {
-		t.Fatalf("NewSFU returned error: %v", err)
-	}
-	defer sfuServer.Close()
-
-	placement := &entity.MediaRoomPlacement{
-		CallID:              callID,
-		WorkspaceID:         workspaceID,
-		NodeID:              "edge-b",
-		Region:              "eu-central",
-		ControlURL:          "https://edge-b.example.com",
-		MediaURL:            "wss://edge-b.example.com/media",
-		RoutingMode:         entity.MediaRoutingRegionalEdge,
-		FanoutStrategy:      entity.MediaFanoutWebinarEdges,
-		OverflowPolicy:      entity.MediaOverflowWebinarEdge,
-		ScreenSharePriority: entity.MediaScreenShareProtected,
-		TURNStrategy:        "regional_turn_pool",
-		Sticky:              true,
-		MaxParticipants:     10000,
-		MaxPresenters:       50,
-		MaxViewers:          10000,
-	}
-
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, sfuServer, mediaTestConfig(), nil, nil)
-	svc.SetMediaControlPlane(&fakeMediaControlPlane{
-		localNodeID: "edge-a",
-		policy: entity.MediaCallPolicy{
-			MaxParticipants:     10000,
-			MaxPresenters:       50,
-			MaxViewers:          10000,
-			RoutingMode:         entity.MediaRoutingRegionalEdge,
-			FanoutStrategy:      entity.MediaFanoutWebinarEdges,
-			OverflowPolicy:      entity.MediaOverflowWebinarEdge,
-			ScreenSharePriority: entity.MediaScreenShareProtected,
-			TURNStrategy:        "regional_turn_pool",
-			Sticky:              true,
-		},
-		placement: placement,
-	})
-
-	token, err := svc.IssueMediaJoinToken(ctx, workspaceID, callID, userID)
-	if err != nil {
-		t.Fatalf("IssueMediaJoinToken returned error: %v", err)
-	}
-	if token.NodeID != placement.NodeID || token.ControlURL != placement.ControlURL {
-		t.Fatalf("token routing = %+v, want placement %+v", token, placement)
-	}
-	if _, err := svc.HandleMediaOffer(ctx, MediaOfferInput{
-		CallID: callID,
-		Token:  token.Token,
-		SDP:    "v=0",
-		Type:   "offer",
-	}); !hasCode(err, cerrors.CodeUnavailable) {
-		t.Fatalf("HandleMediaOffer wrong-edge error = %v, want UNAVAILABLE", err)
 	}
 }
 

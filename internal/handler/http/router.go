@@ -341,10 +341,9 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 				r.Delete("/{messageID}", deps.Calls.DeleteCallMessage)
 			})
 			r.Route("/media-session", func(r chi.Router) {
-				r.Post("/token", deps.Calls.MediaToken)
-				r.Post("/offer", deps.Calls.MediaOffer)
-				r.Post("/ice-candidate", deps.Calls.MediaICECandidate)
-				r.Post("/ice-restart", deps.Calls.MediaICERestart)
+				// Custom-SFU client signaling (token/offer/ice-candidate/
+				// ice-restart) was removed with the LiveKit migration — LiveKit
+				// owns client signaling now. Only the QoS report remains.
 				r.Post("/quality-report", deps.Calls.ReportNetworkQuality)
 			})
 

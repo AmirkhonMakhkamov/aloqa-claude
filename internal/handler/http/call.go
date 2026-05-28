@@ -503,23 +503,6 @@ func (h *CallHandler) UpdateParticipantRole(w http.ResponseWriter, r *http.Reque
 	writeNoContent(w)
 }
 
-func (h *CallHandler) MediaToken(w http.ResponseWriter, r *http.Request) {
-	callID, err := id.Parse(chi.URLParam(r, "callID"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
-	userID := middleware.UserIDFromContext(r.Context())
-
-	token, err := h.svc.IssueMediaJoinToken(r.Context(), workspaceID, callID, userID)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeOK(w, token)
-}
-
 func (h *CallHandler) TurnCredentials(w http.ResponseWriter, r *http.Request) {
 	callID, err := id.Parse(chi.URLParam(r, "callID"))
 	if err != nil {
@@ -535,66 +518,4 @@ func (h *CallHandler) TurnCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeOK(w, credentials)
-}
-
-func (h *CallHandler) MediaOffer(w http.ResponseWriter, r *http.Request) {
-	callID, err := id.Parse(chi.URLParam(r, "callID"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	var req call.MediaOfferInput
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, err)
-		return
-	}
-	req.CallID = callID
-
-	answer, err := h.svc.HandleMediaOffer(r.Context(), req)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeOK(w, answer)
-}
-
-func (h *CallHandler) MediaICECandidate(w http.ResponseWriter, r *http.Request) {
-	callID, err := id.Parse(chi.URLParam(r, "callID"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	var req call.MediaICECandidateInput
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, err)
-		return
-	}
-	req.CallID = callID
-
-	if err := h.svc.AddMediaICECandidate(r.Context(), req); err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeNoContent(w)
-}
-
-func (h *CallHandler) MediaICERestart(w http.ResponseWriter, r *http.Request) {
-	callID, err := id.Parse(chi.URLParam(r, "callID"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	var req call.MediaOfferInput
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, err)
-		return
-	}
-	req.CallID = callID
-
-	answer, err := h.svc.RestartMediaICE(r.Context(), req)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeOK(w, answer)
 }

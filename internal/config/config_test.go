@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadReadsDotEnvFromWorkingDirectory(t *testing.T) {
@@ -237,6 +238,28 @@ func TestLoadNormalizesLiveKitWebhookPathAndPreviousKey(t *testing.T) {
 	}
 	if cfg.LiveKit.WebhookPreviousAPISecret != "previous-secret" {
 		t.Fatalf("LiveKit.WebhookPreviousAPISecret = %q, want previous-secret", cfg.LiveKit.WebhookPreviousAPISecret)
+	}
+}
+
+func TestLoadDefaultsLiveKitTokenTTLToThirtyMinutes(t *testing.T) {
+	preserveEnv(t, "DB_USER", "DB_PASSWORD", "DB_NAME", "JWT_SECRET", "LIVEKIT_TOKEN_TTL")
+
+	dir := t.TempDir()
+	secret := strings.Repeat("s", 64)
+	writeDotEnv(t, dir, strings.Join([]string{
+		"DB_USER=aloqa",
+		"DB_PASSWORD=aloqa",
+		"DB_NAME=aloqa",
+		"JWT_SECRET=" + secret,
+	}, "\n"))
+	t.Chdir(dir)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.LiveKit.TokenTTL != 30*time.Minute {
+		t.Fatalf("LiveKit.TokenTTL default = %v, want 30m", cfg.LiveKit.TokenTTL)
 	}
 }
 

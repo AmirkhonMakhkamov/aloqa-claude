@@ -43,7 +43,9 @@ func (s LiveKitSettings) IsConfigured() bool {
 // SetLiveKit installs the LiveKit settings on the call service.
 func (s *Service) SetLiveKit(settings LiveKitSettings) {
 	if settings.TokenTTL <= 0 {
-		settings.TokenTTL = 6 * time.Hour
+		// Short initial TTL; LiveKit refreshes connected clients' tokens
+		// server-side, so long calls are unaffected (see config.go).
+		settings.TokenTTL = 30 * time.Minute
 	}
 	s.livekit = settings
 	if settings.IsConfigured() {

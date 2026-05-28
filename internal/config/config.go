@@ -32,7 +32,7 @@ type LiveKitConfig struct {
 	URL                      string        // wss://livekit.example.com (FE-facing signaling URL)
 	APIKey                   string        // shared with the LiveKit server keys map
 	APISecret                string        // 32-byte hex secret
-	TokenTTL                 time.Duration // access-token validity (default 6h)
+	TokenTTL                 time.Duration // initial join-token validity (default 30m; LiveKit refreshes connected clients)
 	WebhookPath              string        // public path that LiveKit posts to (default /livekit/webhook)
 	WebhookPreviousAPIKey    string        // previous webhook signing key accepted during rotation
 	WebhookPreviousAPISecret string        // previous webhook signing secret accepted during rotation
@@ -394,7 +394,12 @@ func Load() (*Config, error) {
 			URL:                      env("LIVEKIT_URL", ""),
 			APIKey:                   env("LIVEKIT_API_KEY", ""),
 			APISecret:                env("LIVEKIT_API_SECRET", ""),
-			TokenTTL:                 envDuration("LIVEKIT_TOKEN_TTL", 6*time.Hour),
+			// Initial join-token lifetime. Kept short because LiveKit's server
+			// proactively refreshes a connected participant's token (rolling
+			// ~10m), so the call survives well past this; a cold rejoin
+			// re-fetches via /join. A short TTL bounds how long an unused or
+			// removed participant's token can be replayed to re-enter the room.
+			TokenTTL:                 envDuration("LIVEKIT_TOKEN_TTL", 30*time.Minute),
 			WebhookPath:              env("LIVEKIT_WEBHOOK_PATH", DefaultLiveKitWebhookPath),
 			WebhookPreviousAPIKey:    env("LIVEKIT_WEBHOOK_PREVIOUS_API_KEY", ""),
 			WebhookPreviousAPISecret: env("LIVEKIT_WEBHOOK_PREVIOUS_API_SECRET", ""),

@@ -847,6 +847,44 @@ func (r *MessageRepo) ListReactions(ctx context.Context, messageID uuid.UUID) ([
 	return reactions, nil
 }
 
+func (r *MessageRepo) ListReactionsByMessageIDs(ctx context.Context, messageIDs []uuid.UUID) (map[uuid.UUID][]entity.Reaction, error) {
+	reactionsByMessageID := make(map[uuid.UUID][]entity.Reaction, len(messageIDs))
+	if len(messageIDs) == 0 {
+		return reactionsByMessageID, nil
+	}
+
+	query := `
+		SELECT id, message_id, user_id, emoji, created_at
+		FROM reactions
+		WHERE message_id = ANY($1)
+		ORDER BY message_id, created_at`
+
+	rows, err := r.db.Query(ctx, query, messageIDs)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list reactions by message ids: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var reaction entity.Reaction
+		if err := rows.Scan(
+			&reaction.ID,
+			&reaction.MessageID,
+			&reaction.UserID,
+			&reaction.Emoji,
+			&reaction.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("postgres: list reactions by message ids scan: %w", err)
+		}
+		reactionsByMessageID[reaction.MessageID] = append(reactionsByMessageID[reaction.MessageID], reaction)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list reactions by message ids rows: %w", err)
+	}
+
+	return reactionsByMessageID, nil
+}
+
 // --- Attachment methods ---
 
 func (r *MessageRepo) CreateAttachment(ctx context.Context, a *entity.Attachment) error {

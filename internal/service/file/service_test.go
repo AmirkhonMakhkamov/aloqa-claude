@@ -466,6 +466,9 @@ func (r *fakeMessageRepo) RemoveReactionByID(context.Context, uuid.UUID) error {
 func (r *fakeMessageRepo) ListReactions(context.Context, uuid.UUID) ([]entity.Reaction, error) {
 	return nil, nil
 }
+func (r *fakeMessageRepo) ListReactionsByMessageIDs(context.Context, []uuid.UUID) (map[uuid.UUID][]entity.Reaction, error) {
+	return nil, nil
+}
 func (r *fakeMessageRepo) CreateAttachment(_ context.Context, a *entity.Attachment) error {
 	if r.attachmentsByKey == nil {
 		r.attachmentsByKey = map[string]*entity.Attachment{}

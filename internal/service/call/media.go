@@ -95,9 +95,8 @@ type mediaTokenClaims struct {
 
 // IssueTurnCredentials returns TURN servers and credentials scoped to an active call participant.
 func (s *Service) IssueTurnCredentials(ctx context.Context, workspaceID, callID, userID uuid.UUID) (*TurnCredentials, error) {
-	if len(s.media.TURNURLs) == 0 || s.media.TURNUsername == "" || s.media.TURNCredential == "" {
-		return nil, cerrors.Unavailable("turn service is not configured")
-	}
+	// Access checks run FIRST so non-participants still get 403, regardless of
+	// whether TURN is configured.
 	if _, err := s.requireCallAccess(ctx, workspaceID, callID, userID); err != nil {
 		return nil, err
 	}
@@ -110,6 +109,19 @@ func (s *Service) IssueTurnCredentials(ctx context.Context, workspaceID, callID,
 	}
 	if participant.Status != entity.ParticipantStatusConnected {
 		return nil, cerrors.Forbidden("participant is not connected")
+	}
+
+	// When TURN is not configured, return a 200 with STUN-only servers instead
+	// of a 503. Clients fall back to STUN regardless, so the 503 was just error
+	// noise; a STUN-only 200 is the honest contract for a STUN-only deployment
+	// (ALK-639). No credentials/TTL are needed for STUN.
+	if len(s.media.TURNURLs) == 0 || s.media.TURNUsername == "" || s.media.TURNCredential == "" {
+		return &TurnCredentials{
+			URLs:       append([]string(nil), s.media.STUNURLs...),
+			Username:   "",
+			Credential: "",
+			TTL:        0,
+		}, nil
 	}
 
 	ttl := s.media.TURNCredentialsTTL

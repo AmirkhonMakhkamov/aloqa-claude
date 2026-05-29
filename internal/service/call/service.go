@@ -107,6 +107,7 @@ type Service struct {
 type MediaConfig struct {
 	TokenSecret              []byte
 	TokenTTL                 time.Duration
+	STUNURLs                 []string
 	TURNURLs                 []string
 	TURNUsername             string
 	TURNCredential           string

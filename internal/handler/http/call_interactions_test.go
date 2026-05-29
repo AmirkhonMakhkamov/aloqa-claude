@@ -133,6 +133,49 @@ func TestCallTurnCredentialsHTTP(t *testing.T) {
 	}
 }
 
+func TestCallTurnCredentialsHTTPStunOnlyWhenTurnUnconfigured(t *testing.T) {
+	userID := uuid.New()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	// TURN intentionally unconfigured; a connected participant should get a 200
+	// with STUN-only servers instead of a 503 (ALK-639).
+	router, _ := newCallInteractionHTTPRouterWithMediaConfig(workspaceID, callID, userID, entity.CallStatusActive, true, callsvc.MediaConfig{
+		STUNURLs: []string{"stun:stun.l.google.com:19302"},
+	})
+
+	res := performCallInteractionRequest(router, http.MethodPost, workspaceID, callID, "/turn-credentials", "", true)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (STUN-only fallback), body=%s", res.Code, res.Body.String())
+	}
+
+	var body callsvc.TurnCredentials
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body.URLs) != 1 || body.URLs[0] != "stun:stun.l.google.com:19302" {
+		t.Fatalf("urls = %+v, want STUN-only", body.URLs)
+	}
+	if body.Username != "" || body.Credential != "" || body.TTL != 0 {
+		t.Fatalf("expected no credentials/ttl for STUN-only, got %+v", body)
+	}
+}
+
+func TestCallTurnCredentialsHTTPForbidsNonParticipantEvenWhenTurnUnconfigured(t *testing.T) {
+	userID := uuid.New()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	// Access checks must run BEFORE the TURN-config branch: a non-participant
+	// gets 403, not a STUN-only 200 (ALK-639 reorder regression guard).
+	router, _ := newCallInteractionHTTPRouterWithMediaConfig(workspaceID, callID, userID, entity.CallStatusActive, false, callsvc.MediaConfig{
+		STUNURLs: []string{"stun:stun.l.google.com:19302"},
+	})
+
+	res := performCallInteractionRequest(router, http.MethodPost, workspaceID, callID, "/turn-credentials", "", true)
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for non-participant, body=%s", res.Code, res.Body.String())
+	}
+}
+
 func TestCallLeaveHTTPReturnsJSONBody(t *testing.T) {
 	userID := uuid.New()
 	workspaceID := uuid.New()

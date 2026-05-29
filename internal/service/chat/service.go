@@ -1413,7 +1413,13 @@ func (s *Service) EditMessage(ctx context.Context, messageID, userID uuid.UUID, 
 					return err
 				}
 			}
-			return s.enqueueEventTx(ctx, scope, event.TypeMessageUpdated, fmt.Sprintf("aloqa.chat.%s", msg.ChannelID), workspaceID, msg.ChannelID, userID, event.NewMessagePayload(msg, ch))
+			if err := s.enqueueEventTx(ctx, scope, event.TypeMessageUpdated, fmt.Sprintf("aloqa.chat.%s", msg.ChannelID), workspaceID, msg.ChannelID, userID, event.NewMessagePayload(msg, ch)); err != nil {
+				return err
+			}
+			// Also publish to the workspace subject so clients viewing OTHER
+			// channels receive the edit (they only join the active channel room).
+			// Mirrors MessageCreated; FE apply handlers are idempotent (ALK-654).
+			return s.enqueueEventTx(ctx, scope, event.TypeMessageUpdated, fmt.Sprintf("aloqa.ws.%s", workspaceID), workspaceID, msg.ChannelID, userID, event.NewMessagePayload(msg, ch))
 		}); err != nil {
 			slog.ErrorContext(ctx, "failed to update message transaction", "message_id", messageID, "error", err)
 			return nil, cerrors.Internal("failed to update message", err)
@@ -1431,6 +1437,7 @@ func (s *Service) EditMessage(ctx context.Context, messageID, userID uuid.UUID, 
 			return s.search.IndexMessage(ctx, workspaceID, msg.ChannelID, msg.ID, msg.Content, msg.CreatedAt)
 		})
 		s.publishEvent(ctx, event.TypeMessageUpdated, workspaceID, msg.ChannelID, userID, event.NewMessagePayload(msg, ch))
+		s.publishToWorkspace(ctx, event.TypeMessageUpdated, workspaceID, msg.ChannelID, userID, event.NewMessagePayload(msg, ch))
 	}
 
 	slog.InfoContext(ctx, "message edited", "message_id", messageID, "user_id", userID)
@@ -1597,6 +1604,12 @@ func (s *Service) DeleteMessage(ctx context.Context, messageID, userID uuid.UUID
 			if err := s.enqueueEventTx(ctx, scope, event.TypeMessageDeleted, fmt.Sprintf("aloqa.chat.%s", msg.ChannelID), workspaceID, msg.ChannelID, userID, event.NewMessagePayload(msg, ch)); err != nil {
 				return err
 			}
+			// Also publish the delete to the workspace subject so clients in
+			// other channels drop it too (active-channel room only otherwise).
+			// Mirrors MessageCreated; FE apply handlers are idempotent (ALK-654).
+			if err := s.enqueueEventTx(ctx, scope, event.TypeMessageDeleted, fmt.Sprintf("aloqa.ws.%s", workspaceID), workspaceID, msg.ChannelID, userID, event.NewMessagePayload(msg, ch)); err != nil {
+				return err
+			}
 			return s.enqueueCascadeQuoteUpdateEventsTx(ctx, scope, affectedQuoteRows, userID)
 		}); err != nil {
 			slog.ErrorContext(ctx, "failed to delete message transaction", "message_id", messageID, "error", err)
@@ -1636,6 +1649,7 @@ func (s *Service) DeleteMessage(ctx context.Context, messageID, userID uuid.UUID
 			}
 		}
 		s.publishEvent(ctx, event.TypeMessageDeleted, workspaceID, msg.ChannelID, userID, event.NewMessagePayload(msg, ch))
+		s.publishToWorkspace(ctx, event.TypeMessageDeleted, workspaceID, msg.ChannelID, userID, event.NewMessagePayload(msg, ch))
 		s.publishCascadeQuoteUpdateEvents(ctx, affectedQuoteRows, userID)
 	}
 
@@ -1747,6 +1761,8 @@ func (s *Service) AddReaction(ctx context.Context, messageID, userID uuid.UUID, 
 	}
 
 	s.publishEvent(ctx, event.TypeReactionAdded, channelWorkspaceIDOrNil(ch), msg.ChannelID, userID, reaction)
+	// Fan out to the workspace subject too so background channels update (ALK-654).
+	s.publishToWorkspace(ctx, event.TypeReactionAdded, channelWorkspaceIDOrNil(ch), msg.ChannelID, userID, reaction)
 
 	return reaction, nil
 }
@@ -1780,6 +1796,7 @@ func (s *Service) RemoveReaction(ctx context.Context, messageID, userID uuid.UUI
 	}
 
 	s.publishEvent(ctx, event.TypeReactionRemoved, channelWorkspaceIDOrNil(ch), msg.ChannelID, userID, reaction)
+	s.publishToWorkspace(ctx, event.TypeReactionRemoved, channelWorkspaceIDOrNil(ch), msg.ChannelID, userID, reaction)
 
 	return nil
 }
@@ -1812,6 +1829,7 @@ func (s *Service) RemoveReactionByID(ctx context.Context, reactionID, userID uui
 	}
 
 	s.publishEvent(ctx, event.TypeReactionRemoved, channelWorkspaceIDOrNil(ch), msg.ChannelID, userID, reaction)
+	s.publishToWorkspace(ctx, event.TypeReactionRemoved, channelWorkspaceIDOrNil(ch), msg.ChannelID, userID, reaction)
 
 	return nil
 }
@@ -1844,6 +1862,11 @@ func (s *Service) PinMessage(ctx context.Context, messageID, userID uuid.UUID) e
 	workspaceID := uuid.Nil
 	workspaceID = channelWorkspaceIDOrNil(ch)
 	s.publishEvent(ctx, event.TypeMessagePinned, workspaceID, msg.ChannelID, userID, event.PinPayload{
+		MessageID: messageID,
+		ChannelID: msg.ChannelID,
+		UserID:    userID,
+	})
+	s.publishToWorkspace(ctx, event.TypeMessagePinned, workspaceID, msg.ChannelID, userID, event.PinPayload{
 		MessageID: messageID,
 		ChannelID: msg.ChannelID,
 		UserID:    userID,
@@ -1881,6 +1904,11 @@ func (s *Service) UnpinMessage(ctx context.Context, messageID, userID uuid.UUID)
 	workspaceID := uuid.Nil
 	workspaceID = channelWorkspaceIDOrNil(ch)
 	s.publishEvent(ctx, event.TypeMessageUnpinned, workspaceID, msg.ChannelID, userID, event.PinPayload{
+		MessageID: messageID,
+		ChannelID: msg.ChannelID,
+		UserID:    userID,
+	})
+	s.publishToWorkspace(ctx, event.TypeMessageUnpinned, workspaceID, msg.ChannelID, userID, event.PinPayload{
 		MessageID: messageID,
 		ChannelID: msg.ChannelID,
 		UserID:    userID,

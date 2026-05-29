@@ -974,34 +974,38 @@ func TestDeleteMessagePublishesRedactedTombstone(t *testing.T) {
 	if err := svc.DeleteMessage(ctx, messageID, userID); err != nil {
 		t.Fatalf("DeleteMessage returned error: %v", err)
 	}
-	if len(publisher.events) != 1 {
-		t.Fatalf("published events = %d, want 1", len(publisher.events))
+	// Delete now fans out to BOTH the channel subject and the workspace subject
+	// (ALK-654); both must carry the same redacted tombstone.
+	if len(publisher.events) != 2 {
+		t.Fatalf("published events = %d, want 2 (channel + workspace)", len(publisher.events))
 	}
 
-	var envelope struct {
-		Type    eventpkg.Type `json:"type"`
-		Payload struct {
-			Message entity.Message `json:"message"`
-		} `json:"payload"`
-	}
-	if err := json.Unmarshal(publisher.events[0], &envelope); err != nil {
-		t.Fatalf("unmarshal event: %v", err)
-	}
-	if envelope.Type != eventpkg.TypeMessageDeleted {
-		t.Fatalf("event type = %s, want %s", envelope.Type, eventpkg.TypeMessageDeleted)
-	}
-	got := envelope.Payload.Message
-	if got.ID != messageID || got.DeletedAt == nil {
-		t.Fatalf("event message = %+v, want deleted tombstone for %s", got, messageID)
-	}
-	if got.Content != "" {
-		t.Fatalf("event content = %q, want redacted empty content", got.Content)
-	}
-	if got.ForwardedFrom != nil {
-		t.Fatalf("event forwarded_from = %s, want nil after delete", got.ForwardedFrom)
-	}
-	if got.Edited || got.EditedAt != nil || got.Pinned || got.PinnedBy != nil || got.PinnedAt != nil {
-		t.Fatalf("event deleted metadata was not redacted: %+v", got)
+	for i, raw := range publisher.events {
+		var envelope struct {
+			Type    eventpkg.Type `json:"type"`
+			Payload struct {
+				Message entity.Message `json:"message"`
+			} `json:"payload"`
+		}
+		if err := json.Unmarshal(raw, &envelope); err != nil {
+			t.Fatalf("unmarshal event %d: %v", i, err)
+		}
+		if envelope.Type != eventpkg.TypeMessageDeleted {
+			t.Fatalf("event[%d] type = %s, want %s", i, envelope.Type, eventpkg.TypeMessageDeleted)
+		}
+		got := envelope.Payload.Message
+		if got.ID != messageID || got.DeletedAt == nil {
+			t.Fatalf("event[%d] message = %+v, want deleted tombstone for %s", i, got, messageID)
+		}
+		if got.Content != "" {
+			t.Fatalf("event[%d] content = %q, want redacted empty content", i, got.Content)
+		}
+		if got.ForwardedFrom != nil {
+			t.Fatalf("event[%d] forwarded_from = %s, want nil after delete", i, got.ForwardedFrom)
+		}
+		if got.Edited || got.EditedAt != nil || got.Pinned || got.PinnedBy != nil || got.PinnedAt != nil {
+			t.Fatalf("event[%d] deleted metadata was not redacted: %+v", i, got)
+		}
 	}
 }
 

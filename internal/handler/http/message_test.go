@@ -178,8 +178,9 @@ func TestMessageAddReactionReturnsReactionAndPublishesSchema(t *testing.T) {
 		t.Fatalf("reaction = %+v, want full reaction object", reaction)
 	}
 
-	if len(f.publisher.events) != 1 {
-		t.Fatalf("published events = %d, want reaction.added", len(f.publisher.events))
+	// reaction.added now fans out to both the channel and workspace subjects (ALK-654).
+	if len(f.publisher.events) != 2 {
+		t.Fatalf("published events = %d, want 2 (channel + workspace) reaction.added", len(f.publisher.events))
 	}
 	var envelope struct {
 		Type    eventpkg.Type   `json:"type"`
@@ -232,8 +233,10 @@ func TestMessageAddReactionDuplicateReturnsExistingReaction(t *testing.T) {
 	if existing.ID != created.ID || existing.CreatedAt.IsZero() {
 		t.Fatalf("duplicate reaction = %+v, want existing reaction %+v", existing, created)
 	}
-	if len(f.publisher.events) != 1 {
-		t.Fatalf("published events = %d, want one event for initial reaction only", len(f.publisher.events))
+	// Initial add fans out to channel + workspace (2); the duplicate publishes
+	// nothing, so the total stays 2 (ALK-654).
+	if len(f.publisher.events) != 2 {
+		t.Fatalf("published events = %d, want 2 for the initial reaction only", len(f.publisher.events))
 	}
 }
 
@@ -303,8 +306,9 @@ func TestMessageRemoveReactionByID(t *testing.T) {
 	if _, ok := f.messages.reactions[reaction.ID]; ok {
 		t.Fatalf("reaction %s still exists after delete", reaction.ID)
 	}
-	if len(f.publisher.events) != 1 {
-		t.Fatalf("published events = %d, want reaction.removed", len(f.publisher.events))
+	// reaction.removed now fans out to both the channel and workspace subjects (ALK-654).
+	if len(f.publisher.events) != 2 {
+		t.Fatalf("published events = %d, want 2 (channel + workspace) reaction.removed", len(f.publisher.events))
 	}
 	var envelope struct {
 		Type    eventpkg.Type   `json:"type"`

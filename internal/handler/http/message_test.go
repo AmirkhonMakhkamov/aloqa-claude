@@ -123,6 +123,37 @@ func TestMessagePostEchoesClientMessageID(t *testing.T) {
 	}
 }
 
+func TestMessagePostEchoesIdempotencyKeyHeaderWhenNoBodyField(t *testing.T) {
+	f := newMessageHTTPFixture()
+	clientID := "019e7300-0000-7000-8000-0000004400ff"
+	// No client_message_id body field — the handler falls back to the
+	// Idempotency-Key header the client already sends (ALK-440).
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/channels/"+f.channelID.String()+"/messages",
+		strings.NewReader(`{"content":"hi"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", clientID)
+	res := httptest.NewRecorder()
+	f.router.ServeHTTP(res, req)
+
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", res.Code, res.Body.String())
+	}
+	var msg entity.Message
+	if err := json.Unmarshal(res.Body.Bytes(), &msg); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if msg.ClientMessageID == nil || *msg.ClientMessageID != clientID {
+		t.Fatalf(
+			"client_message_id = %v, want %s (from Idempotency-Key header)",
+			msg.ClientMessageID,
+			clientID,
+		)
+	}
+}
+
 func TestMessageGetIncludesForwardedFrom(t *testing.T) {
 	f := newMessageHTTPFixture()
 	forwardedFrom := json.RawMessage(`{"message_id":"m1","snapshot":{"content":"original"}}`)

@@ -81,6 +81,48 @@ func TestMessagePostForwardedFromCases(t *testing.T) {
 	})
 }
 
+func TestMessagePostEchoesClientMessageID(t *testing.T) {
+	f := newMessageHTTPFixture()
+	clientID := "019e7300-0000-7000-8000-000000000440"
+	res := f.serve(
+		http.MethodPost,
+		"/channels/"+f.channelID.String()+"/messages",
+		`{"content":"hi","client_message_id":"`+clientID+`"}`,
+	)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", res.Code, res.Body.String())
+	}
+
+	var msg entity.Message
+	if err := json.Unmarshal(res.Body.Bytes(), &msg); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if msg.ClientMessageID == nil || *msg.ClientMessageID != clientID {
+		t.Fatalf("response client_message_id = %v, want %s", msg.ClientMessageID, clientID)
+	}
+
+	// The message.created event must also carry it so the client can dedup by id.
+	if len(f.publisher.events) == 0 {
+		t.Fatalf("expected at least one published event")
+	}
+	var envelope struct {
+		Payload struct {
+			Message entity.Message `json:"message"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(f.publisher.events[0], &envelope); err != nil {
+		t.Fatalf("decode event: %v", err)
+	}
+	if envelope.Payload.Message.ClientMessageID == nil ||
+		*envelope.Payload.Message.ClientMessageID != clientID {
+		t.Fatalf(
+			"event client_message_id = %v, want %s",
+			envelope.Payload.Message.ClientMessageID,
+			clientID,
+		)
+	}
+}
+
 func TestMessageGetIncludesForwardedFrom(t *testing.T) {
 	f := newMessageHTTPFixture()
 	forwardedFrom := json.RawMessage(`{"message_id":"m1","snapshot":{"content":"original"}}`)

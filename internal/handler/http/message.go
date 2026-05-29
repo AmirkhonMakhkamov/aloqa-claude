@@ -31,6 +31,9 @@ type sendMessageRequest struct {
 	ForwardedFrom   json.RawMessage           `json:"forwarded_from,omitempty"`
 	QuotedMessageID *string                   `json:"quoted_message_id,omitempty"`
 	QuotedSnapshot  *chat.QuotedSnapshotInput `json:"quoted_snapshot,omitempty"`
+	// Optional client-generated id (the optimistic message id). Echoed back on
+	// the message.created event so the client can dedup by exact id (ALK-440).
+	ClientMessageID *string `json:"client_message_id,omitempty"`
 }
 
 func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
@@ -80,6 +83,7 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 		ForwardedFrom:   req.ForwardedFrom,
 		QuotedMessageID: quotedMessageID,
 		QuotedSnapshot:  quotedSnapshot,
+		ClientMessageID: req.ClientMessageID,
 	})
 	if err != nil {
 		writeErr(w, err)

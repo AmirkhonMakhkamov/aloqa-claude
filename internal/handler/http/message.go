@@ -77,13 +77,24 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 
 	userID := middleware.UserIDFromContext(r.Context())
 
+	// The client's optimistic message id is the Idempotency-Key it already
+	// sends; fall back to it when no explicit client_message_id body field is
+	// present, so the created-message echo carries it for exact-id dedup
+	// (ALK-440) without requiring a body change.
+	clientMessageID := req.ClientMessageID
+	if clientMessageID == nil {
+		if headerKey := r.Header.Get("Idempotency-Key"); headerKey != "" {
+			clientMessageID = &headerKey
+		}
+	}
+
 	msg, err := h.svc.SendMessage(r.Context(), channelID, userID, chat.SendMessageInput{
 		Content:         req.Content,
 		ParentID:        parentID,
 		ForwardedFrom:   req.ForwardedFrom,
 		QuotedMessageID: quotedMessageID,
 		QuotedSnapshot:  quotedSnapshot,
-		ClientMessageID: req.ClientMessageID,
+		ClientMessageID: clientMessageID,
 	})
 	if err != nil {
 		writeErr(w, err)

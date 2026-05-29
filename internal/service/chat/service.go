@@ -307,6 +307,8 @@ type SendMessageInput struct {
 	ForwardedFrom   json.RawMessage
 	QuotedMessageID *uuid.UUID
 	QuotedSnapshot  *ParsedQuotedSnapshotInput
+	// Optional client-supplied id, echoed on the created message for dedup (ALK-440).
+	ClientMessageID *string
 }
 
 type QuotedSnapshotInput struct {
@@ -1259,6 +1261,8 @@ func (s *Service) SendMessage(
 		QuotedSnapshot:  quotedSnapshot,
 		CreatedAt:       now,
 		UpdatedAt:       now,
+		// Transient echo only — not a persisted column (see entity.Message).
+		ClientMessageID: input.ClientMessageID,
 	}
 
 	if s.tx != nil {

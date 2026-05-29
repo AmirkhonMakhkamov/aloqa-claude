@@ -355,6 +355,7 @@ func run() error {
 	callSvc := call.NewService(callRepo, breakoutRoomRepo, channelRepo, workspaceRepo, realtimePublisher, sfuServer, call.MediaConfig{
 		TokenSecret:              []byte(cfg.JWT.Secret),
 		TokenTTL:                 cfg.WebRTC.MediaTokenTTL,
+		STUNURLs:                 cfg.WebRTC.STUNServers,
 		TURNURLs:                 turnURLsFromConfig(cfg.WebRTC.TURNServer),
 		TURNUsername:             cfg.WebRTC.TURNUsername,
 		TURNCredential:           cfg.WebRTC.TURNPassword,

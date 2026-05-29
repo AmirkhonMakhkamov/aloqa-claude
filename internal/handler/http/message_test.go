@@ -81,6 +81,79 @@ func TestMessagePostForwardedFromCases(t *testing.T) {
 	})
 }
 
+func TestMessagePostEchoesClientMessageID(t *testing.T) {
+	f := newMessageHTTPFixture()
+	clientID := "019e7300-0000-7000-8000-000000000440"
+	res := f.serve(
+		http.MethodPost,
+		"/channels/"+f.channelID.String()+"/messages",
+		`{"content":"hi","client_message_id":"`+clientID+`"}`,
+	)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", res.Code, res.Body.String())
+	}
+
+	var msg entity.Message
+	if err := json.Unmarshal(res.Body.Bytes(), &msg); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if msg.ClientMessageID == nil || *msg.ClientMessageID != clientID {
+		t.Fatalf("response client_message_id = %v, want %s", msg.ClientMessageID, clientID)
+	}
+
+	// The message.created event must also carry it so the client can dedup by id.
+	if len(f.publisher.events) == 0 {
+		t.Fatalf("expected at least one published event")
+	}
+	var envelope struct {
+		Payload struct {
+			Message entity.Message `json:"message"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(f.publisher.events[0], &envelope); err != nil {
+		t.Fatalf("decode event: %v", err)
+	}
+	if envelope.Payload.Message.ClientMessageID == nil ||
+		*envelope.Payload.Message.ClientMessageID != clientID {
+		t.Fatalf(
+			"event client_message_id = %v, want %s",
+			envelope.Payload.Message.ClientMessageID,
+			clientID,
+		)
+	}
+}
+
+func TestMessagePostEchoesIdempotencyKeyHeaderWhenNoBodyField(t *testing.T) {
+	f := newMessageHTTPFixture()
+	clientID := "019e7300-0000-7000-8000-0000004400ff"
+	// No client_message_id body field — the handler falls back to the
+	// Idempotency-Key header the client already sends (ALK-440).
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/channels/"+f.channelID.String()+"/messages",
+		strings.NewReader(`{"content":"hi"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", clientID)
+	res := httptest.NewRecorder()
+	f.router.ServeHTTP(res, req)
+
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", res.Code, res.Body.String())
+	}
+	var msg entity.Message
+	if err := json.Unmarshal(res.Body.Bytes(), &msg); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if msg.ClientMessageID == nil || *msg.ClientMessageID != clientID {
+		t.Fatalf(
+			"client_message_id = %v, want %s (from Idempotency-Key header)",
+			msg.ClientMessageID,
+			clientID,
+		)
+	}
+}
+
 func TestMessageGetIncludesForwardedFrom(t *testing.T) {
 	f := newMessageHTTPFixture()
 	forwardedFrom := json.RawMessage(`{"message_id":"m1","snapshot":{"content":"original"}}`)
@@ -178,8 +251,9 @@ func TestMessageAddReactionReturnsReactionAndPublishesSchema(t *testing.T) {
 		t.Fatalf("reaction = %+v, want full reaction object", reaction)
 	}
 
-	if len(f.publisher.events) != 1 {
-		t.Fatalf("published events = %d, want reaction.added", len(f.publisher.events))
+	// reaction.added now fans out to both the channel and workspace subjects (ALK-654).
+	if len(f.publisher.events) != 2 {
+		t.Fatalf("published events = %d, want 2 (channel + workspace) reaction.added", len(f.publisher.events))
 	}
 	var envelope struct {
 		Type    eventpkg.Type   `json:"type"`
@@ -232,8 +306,10 @@ func TestMessageAddReactionDuplicateReturnsExistingReaction(t *testing.T) {
 	if existing.ID != created.ID || existing.CreatedAt.IsZero() {
 		t.Fatalf("duplicate reaction = %+v, want existing reaction %+v", existing, created)
 	}
-	if len(f.publisher.events) != 1 {
-		t.Fatalf("published events = %d, want one event for initial reaction only", len(f.publisher.events))
+	// Initial add fans out to channel + workspace (2); the duplicate publishes
+	// nothing, so the total stays 2 (ALK-654).
+	if len(f.publisher.events) != 2 {
+		t.Fatalf("published events = %d, want 2 for the initial reaction only", len(f.publisher.events))
 	}
 }
 
@@ -303,8 +379,9 @@ func TestMessageRemoveReactionByID(t *testing.T) {
 	if _, ok := f.messages.reactions[reaction.ID]; ok {
 		t.Fatalf("reaction %s still exists after delete", reaction.ID)
 	}
-	if len(f.publisher.events) != 1 {
-		t.Fatalf("published events = %d, want reaction.removed", len(f.publisher.events))
+	// reaction.removed now fans out to both the channel and workspace subjects (ALK-654).
+	if len(f.publisher.events) != 2 {
+		t.Fatalf("published events = %d, want 2 (channel + workspace) reaction.removed", len(f.publisher.events))
 	}
 	var envelope struct {
 		Type    eventpkg.Type   `json:"type"`

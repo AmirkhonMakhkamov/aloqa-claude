@@ -49,6 +49,12 @@ type Message struct {
 	Reactions   []Reaction   `json:"reactions,omitempty"`
 	Attachments []Attachment `json:"attachments,omitempty"`
 	User        *User        `json:"user,omitempty"`
+
+	// Transient echo of the client-supplied id on send. NOT persisted (absent
+	// from the messages columns); set only on the in-memory message before the
+	// message.created event/HTTP response so the client can match its optimistic
+	// row by exact id rather than a content+timestamp heuristic (ALK-440).
+	ClientMessageID *string `json:"client_message_id,omitempty"`
 }
 
 type Reaction struct {

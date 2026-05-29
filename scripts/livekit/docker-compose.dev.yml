@@ -1,6 +1,6 @@
 services:
   livekit-server:
-    image: livekit/livekit-server:v1.7.0
+    image: livekit/livekit-server:v1.10.0
     command: --config /etc/livekit.yaml
     restart: unless-stopped
     ports:
@@ -15,8 +15,9 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:6379:6379"
+    # No host port mapping: livekit-server reaches redis via the compose network
+    # (service DNS `redis:6379`). Exposing 6379 on the host collides with other
+    # local redis instances and is unnecessary for dev.
     volumes:
       - livekit-redis-data:/data
 

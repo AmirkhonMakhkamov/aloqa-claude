@@ -96,3 +96,63 @@ func TestSuppressCanceled_SurvivesWithAttrs(t *testing.T) {
 		t.Fatalf("expected suppression to survive With(), got: %s", buf.String())
 	}
 }
+
+func TestSuppressCanceled_SurvivesWithGroup(t *testing.T) {
+	var buf bytes.Buffer
+	logger := newTestLogger(&buf).WithGroup("db")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	logger.ErrorContext(ctx, "failed to check workspace membership")
+
+	if buf.Len() != 0 {
+		t.Fatalf("expected suppression to survive WithGroup(), got: %s", buf.String())
+	}
+}
+
+// On a canceled request a genuine, unrelated server fault must still surface —
+// a client disconnect must not blind us to real errors firing concurrently.
+func TestSuppressCanceled_KeepsGenuineErrorOnCanceledContext(t *testing.T) {
+	var buf bytes.Buffer
+	logger := newTestLogger(&buf)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	logger.ErrorContext(ctx, "failed to check workspace membership", "error", fmt.Errorf("connection refused"))
+
+	if !strings.Contains(buf.String(), `"level":"ERROR"`) {
+		t.Fatalf("expected genuine error on canceled context to stay ERROR, got: %q", buf.String())
+	}
+}
+
+// When the base handler is verbose (DEBUG), suppressed records survive as DEBUG
+// breadcrumbs rather than being dropped.
+func TestSuppressCanceled_PreservedAtDebugBase(t *testing.T) {
+	var buf bytes.Buffer
+	base := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	logger := slog.New(SuppressCanceled(base))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	logger.ErrorContext(ctx, "failed to fetch user")
+
+	out := buf.String()
+	if !strings.Contains(out, `"level":"DEBUG"`) {
+		t.Fatalf("expected suppressed record preserved at DEBUG when base is verbose, got: %q", out)
+	}
+	if !strings.Contains(out, "failed to fetch user") {
+		t.Fatalf("expected message preserved in DEBUG breadcrumb, got: %q", out)
+	}
+}
+
+func TestSuppressCanceled_EnabledDelegatesToInner(t *testing.T) {
+	var buf bytes.Buffer
+	h := SuppressCanceled(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	if h.Enabled(context.Background(), slog.LevelDebug) {
+		t.Fatal("Enabled(Debug) should be false for an Info-level base handler")
+	}
+	if !h.Enabled(context.Background(), slog.LevelError) {
+		t.Fatal("Enabled(Error) should be true for an Info-level base handler")
+	}
+}

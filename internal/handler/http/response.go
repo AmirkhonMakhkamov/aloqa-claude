@@ -14,6 +14,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
+		if cerrors.IsClientDisconnect(err) {
+			// Client went away mid-flush (common on large list responses).
+			// Not a server fault — keep it out of the ERROR sink.
+			slog.Debug("response encode aborted: client disconnected", "error", err)
+			return
+		}
 		slog.Error("failed to encode response", "error", err)
 	}
 }

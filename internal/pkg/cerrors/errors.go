@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"syscall"
 )
 
 // StatusClientClosedRequest is the non-standard 499 status (nginx convention)
 // returned when the client closed the connection before the server finished.
-// net/http has no constant for it. It is treated as a non-error by request
-// logging and metrics so client disconnects don't pollute the 5xx rate.
+// net/http has no constant for it. Because it is < 500 it stays out of the
+// 5xx error-rate metric, and the request-log line for it is suppressed via the
+// canceled request context (see internal/pkg/logging.SuppressCanceled).
 const StatusClientClosedRequest = 499
 
 // Code represents an application error code.
@@ -151,6 +154,24 @@ func Canceled(msg string) *AppError {
 // want surfaced as a 5xx and alerted on.
 func IsContextCanceled(err error) bool {
 	return errors.Is(err, context.Canceled)
+}
+
+// IsClientDisconnect reports whether err means the client went away: a canceled
+// context, or a network write failure to a peer that has already gone (broken
+// pipe, connection reset, closed connection). Used when encoding a response
+// body so a disconnect mid-flush is not logged as a server ERROR. A genuine
+// encode failure (e.g. an unmarshalable value) is not a disconnect and stays
+// loud.
+func IsClientDisconnect(err error) bool {
+	if err == nil {
+		return false
+	}
+	if IsContextCanceled(err) {
+		return true
+	}
+	return errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, net.ErrClosed)
 }
 
 // AsAppError extracts an *AppError from an error chain.

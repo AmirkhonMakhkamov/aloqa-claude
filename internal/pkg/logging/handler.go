@@ -54,22 +54,35 @@ func (h *canceledHandler) WithGroup(name string) slog.Handler {
 }
 
 func isCancellation(ctx context.Context, r slog.Record) bool {
-	if isCanceled(ctx.Err()) {
-		return true
-	}
-
-	found := false
+	// The attr scan is intentionally top-level / inline-only: errors bound via
+	// logger.With(...) or nested in a group are folded into the inner handler
+	// and never reach this Record. The codebase logs errors as call-site attrs
+	// (slog.ErrorContext(ctx, msg, "error", err)), so that is sufficient.
+	sawCanceled := false
+	sawGenuine := false
 	r.Attrs(func(a slog.Attr) bool {
 		if a.Value.Kind() != slog.KindAny {
 			return true
 		}
-		if err, ok := a.Value.Any().(error); ok && isCanceled(err) {
-			found = true
-			return false // stop iterating
+		err, ok := a.Value.Any().(error)
+		if !ok || err == nil {
+			return true
+		}
+		if isCanceled(err) {
+			sawCanceled = true
+		} else {
+			sawGenuine = true
 		}
 		return true
 	})
-	return found
+
+	// A genuine (non-cancellation) error rode in on this record — keep it even
+	// when the request context is canceled, so a client disconnect can never
+	// mask a real fault that fired concurrently.
+	if sawGenuine {
+		return false
+	}
+	return sawCanceled || isCanceled(ctx.Err())
 }
 
 func isCanceled(err error) bool {

@@ -3,7 +3,9 @@ package cerrors
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
+	"syscall"
 	"testing"
 )
 
@@ -61,5 +63,28 @@ func TestInternal_UnwrapsContextCanceled(t *testing.T) {
 	}
 	if IsContextCanceled(fmt.Errorf("query: %w", context.DeadlineExceeded)) {
 		t.Fatalf("DeadlineExceeded is a server-side timeout, not a client cancellation")
+	}
+}
+
+func TestIsClientDisconnect(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"context canceled", fmt.Errorf("encode: %w", context.Canceled), true},
+		{"broken pipe", &net.OpError{Op: "write", Err: syscall.EPIPE}, true},
+		{"connection reset", &net.OpError{Op: "write", Err: syscall.ECONNRESET}, true},
+		{"closed connection", fmt.Errorf("write: %w", net.ErrClosed), true},
+		{"deadline exceeded", fmt.Errorf("q: %w", context.DeadlineExceeded), false},
+		{"genuine encode error", fmt.Errorf("json: unsupported type"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsClientDisconnect(tc.err); got != tc.want {
+				t.Errorf("IsClientDisconnect(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }

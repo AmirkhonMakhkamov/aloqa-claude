@@ -3,7 +3,30 @@ package middleware
 import (
 	"net/http"
 	"testing"
+
+	"aloqa/internal/pkg/cerrors"
 )
+
+// A 499 (client closed the connection) and any 5xx must never be memoized:
+// the handler's side effect may be incomplete, so replaying the stored
+// response on retry would skip re-running the write and silently drop it.
+func TestIsCacheableStatus(t *testing.T) {
+	cases := map[int]bool{
+		http.StatusOK:                     true,
+		http.StatusCreated:                true,
+		http.StatusNoContent:              true,
+		http.StatusConflict:               true,
+		http.StatusBadRequest:             true,
+		cerrors.StatusClientClosedRequest: false,
+		http.StatusInternalServerError:    false,
+		http.StatusServiceUnavailable:     false,
+	}
+	for status, want := range cases {
+		if got := isCacheableStatus(status); got != want {
+			t.Errorf("isCacheableStatus(%d) = %v, want %v", status, got, want)
+		}
+	}
+}
 
 // Regression test for the bug where copyHeaders wiped headers set by outer
 // middleware (CORS, security headers) before idempotency wrapped the writer.

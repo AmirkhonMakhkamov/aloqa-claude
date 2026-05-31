@@ -14,6 +14,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
+
+	"aloqa/internal/pkg/cerrors"
 )
 
 type IdempotencyConfig struct {
@@ -104,7 +106,7 @@ func Idempotency(rdb *redis.Client, cfg IdempotencyConfig) func(http.Handler) ht
 				_, _ = w.Write(rec.body.Bytes())
 			}
 
-			if rec.status >= 500 {
+			if !isCacheableStatus(rec.status) {
 				return
 			}
 
@@ -169,6 +171,14 @@ func fingerprintRequest(r *http.Request, maxBodyBytes int64) (string, []byte, er
 
 func idempotencyKey(userID uuid.UUID, method, path, key string) string {
 	return fmt.Sprintf("idempotency:%s:%s:%s:%s", userID, method, path, key)
+}
+
+// isCacheableStatus reports whether a response status may be memoized for
+// idempotent replay. 5xx and 499 (client closed the connection) are never
+// cached: the handler's side effect may be incomplete, so replaying the stored
+// response on retry would skip re-running it and silently drop the write.
+func isCacheableStatus(status int) bool {
+	return status < 500 && status != cerrors.StatusClientClosedRequest
 }
 
 func isIdempotentWriteMethod(method string) bool {

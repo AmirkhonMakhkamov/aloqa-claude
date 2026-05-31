@@ -8,15 +8,16 @@ import (
 	"time"
 
 	"aloqa/internal/config"
+	applog "aloqa/internal/pkg/logging"
 	"aloqa/internal/platform/db"
 	"aloqa/internal/repository/postgres"
 	"github.com/google/uuid"
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	slog.SetDefault(slog.New(applog.SuppressCanceled(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
-	})))
+	}))))
 
 	if err := run(); err != nil {
 		slog.Error("search reindex failed", "error", err)

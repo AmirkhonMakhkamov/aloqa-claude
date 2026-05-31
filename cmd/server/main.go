@@ -20,6 +20,7 @@ import (
 	wshandler "aloqa/internal/handler/ws"
 	"aloqa/internal/media/sfu"
 	"aloqa/internal/middleware"
+	applog "aloqa/internal/pkg/logging"
 	"aloqa/internal/platform/cache"
 	"aloqa/internal/platform/db"
 	"aloqa/internal/platform/pubsub"
@@ -64,10 +65,11 @@ var (
 )
 
 func main() {
-	// Structured logging.
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	// Structured logging. SuppressCanceled demotes client-disconnect noise
+	// (context.Canceled / DeadlineExceeded) out of the ERROR/WARN sinks.
+	slog.SetDefault(slog.New(applog.SuppressCanceled(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
-	})))
+	}))))
 
 	slog.Info("starting aloqa", "version", version, "commit", commit, "build_time", buildTime)
 

@@ -1,10 +1,17 @@
 package cerrors
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 )
+
+// StatusClientClosedRequest is the non-standard 499 status (nginx convention)
+// returned when the client closed the connection before the server finished.
+// net/http has no constant for it. It is treated as a non-error by request
+// logging and metrics so client disconnects don't pollute the 5xx rate.
+const StatusClientClosedRequest = 499
 
 // Code represents an application error code.
 type Code string
@@ -24,6 +31,7 @@ const (
 	CodeUnavailable        Code = "UNAVAILABLE"
 	CodeUnprocessable      Code = "UNPROCESSABLE"
 	CodeCallEnded          Code = "CALL_ENDED"
+	CodeCanceled           Code = "CANCELED"
 )
 
 // AppError is the standard application error type.
@@ -65,6 +73,8 @@ func (e *AppError) HTTPStatus() int {
 		return http.StatusServiceUnavailable
 	case CodeCallEnded:
 		return http.StatusGone
+	case CodeCanceled:
+		return StatusClientClosedRequest
 	default:
 		return http.StatusInternalServerError
 	}
@@ -124,6 +134,23 @@ func Unprocessable(msg string) *AppError {
 // 403 retry spinner.
 func CallEnded(msg string) *AppError {
 	return &AppError{Code: CodeCallEnded, Message: msg}
+}
+
+// Canceled returns a typed AppError with HTTP 499 status, used when a request
+// is abandoned because the client closed the connection.
+func Canceled(msg string) *AppError {
+	return &AppError{Code: CodeCanceled, Message: msg}
+}
+
+// IsContextCanceled reports whether err (or anything it wraps) is a
+// context.Canceled. Used by the HTTP layer to distinguish a client disconnect
+// (the parent request context was canceled) from a genuine server fault.
+//
+// context.DeadlineExceeded is deliberately NOT treated as a cancellation: it
+// signals a server-side timeout (e.g. a slow or dead dependency) that we still
+// want surfaced as a 5xx and alerted on.
+func IsContextCanceled(err error) bool {
+	return errors.Is(err, context.Canceled)
 }
 
 // AsAppError extracts an *AppError from an error chain.

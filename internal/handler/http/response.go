@@ -40,6 +40,15 @@ type errorDetail struct {
 }
 
 func writeErr(w http.ResponseWriter, err error) {
+	// The client closed the connection before we finished (navigation, reload,
+	// aborted fetch). Record the canonical 499 so request logging and metrics
+	// treat it as a non-error, and skip the body — writing to a gone client
+	// would only fail. errors.Is unwraps cerrors.Internal(msg, context.Canceled).
+	if cerrors.IsContextCanceled(err) {
+		w.WriteHeader(cerrors.StatusClientClosedRequest)
+		return
+	}
+
 	if appErr, ok := cerrors.AsAppError(err); ok {
 		writeJSON(w, appErr.HTTPStatus(), errorBody{
 			Error: errorDetail{

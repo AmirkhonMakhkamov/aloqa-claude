@@ -135,6 +135,11 @@ func (h *FileHandler) Download(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 
 	if _, err := io.Copy(w, reader); err != nil {
+		if cerrors.IsClientDisconnect(err) {
+			// Client navigated away / aborted mid-download — not a server fault.
+			slog.DebugContext(r.Context(), "file download aborted: client disconnected", "key", key, "error", err)
+			return
+		}
 		slog.ErrorContext(r.Context(), "failed to stream file download", "key", key, "error", err)
 	}
 }

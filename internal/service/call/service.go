@@ -262,23 +262,25 @@ func (s *Service) requireCallAccess(ctx context.Context, workspaceID, callID, us
 		return nil, err
 	}
 	if call.ChannelID != nil {
-		// A connected participant of a private one_to_one call (DM-only per
-		// ALK-665) keeps access to their own call without a DM channel-member row
-		// — but only while still workspace-authorized. This skips ONLY the
-		// channel-membership requirement (the source of the 1:1 in-call chat 403),
-		// not the workspace trust boundary, and is scoped strictly to one_to_one so
-		// that revoking a user from a shared/private group channel still takes
-		// effect for group/meeting calls. (ALK-695)
+		ch, err := s.channels.GetByID(ctx, *call.ChannelID)
+		if err != nil {
+			return nil, cerrors.Internal("failed to get channel", err)
+		}
+		// A connected participant of a private one_to_one DM call keeps access to
+		// their own call without a DM channel-member row — but only while still
+		// workspace-authorized. This skips ONLY the channel-membership requirement
+		// (the source of the 1:1 in-call chat 403), not the workspace trust
+		// boundary. Scoped both to one_to_one AND to an actual DM/GroupDM channel
+		// type, so a one_to_one mistakenly linked to a private group channel, and
+		// every group/meeting call, still goes through the full channel gate where
+		// revoking a member revokes the call. (ALK-695, ALK-665)
 		if call.Type == entity.CallTypeOneToOne &&
+			(ch.Type == entity.ChannelTypeDM || ch.Type == entity.ChannelTypeGroupDM) &&
 			s.canAccessWorkspaceContent(ctx, call.WorkspaceID, userID) == nil {
 			if p, perr := s.calls.GetParticipant(ctx, callID, userID); perr == nil &&
 				p.Status == entity.ParticipantStatusConnected {
 				return call, nil
 			}
-		}
-		ch, err := s.channels.GetByID(ctx, *call.ChannelID)
-		if err != nil {
-			return nil, cerrors.Internal("failed to get channel", err)
 		}
 		if err := s.requireChannelAccess(ctx, ch, userID); err != nil {
 			return nil, err

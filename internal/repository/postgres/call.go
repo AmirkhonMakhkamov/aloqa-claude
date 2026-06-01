@@ -891,10 +891,15 @@ func (r *CallRepo) DisconnectParticipantIfConnectedWithReason(ctx context.Contex
 }
 
 func (r *CallRepo) UpdateParticipantRole(ctx context.Context, id uuid.UUID, role entity.CallRole) error {
+	// `role <> 'host'` guard: the host slot is single-occupancy and only changes
+	// hands through TransferHost. This also closes a race where a generic role
+	// update (which read the target as non-host) could otherwise clobber a host
+	// that a concurrent TransferHost just promoted, leaving the call with zero
+	// hosts. (ALK-696)
 	query := `
 		UPDATE call_participants
 		SET role = $2
-		WHERE id = $1`
+		WHERE id = $1 AND role <> 'host'`
 
 	tag, err := r.db.Exec(ctx, query, id, role)
 	if err != nil {

@@ -907,6 +907,38 @@ func (r *CallRepo) UpdateParticipantRole(ctx context.Context, id uuid.UUID, role
 	return nil
 }
 
+func (r *CallRepo) TransferHost(ctx context.Context, callID, fromUserID, toUserID uuid.UUID) (bool, error) {
+	// One atomic statement swaps the two roles, gated on the actor still being
+	// the host AND the target still being a participant of the call. Under
+	// concurrent transfers the contended old-host row serialises the writers;
+	// the loser re-evaluates the guard against the committed state, matches zero
+	// rows, and reports a no-op. Both rows flip together (all-or-nothing) so the
+	// call can never end up with zero or two hosts.
+	query := `
+		UPDATE call_participants
+		SET role = CASE user_id
+			WHEN $2 THEN 'participant'
+			WHEN $3 THEN 'host'
+			ELSE role
+		END
+		WHERE call_id = $1
+		  AND user_id IN ($2, $3)
+		  AND EXISTS (
+			SELECT 1 FROM call_participants
+			WHERE call_id = $1 AND user_id = $2 AND role = 'host'
+		  )
+		  AND EXISTS (
+			SELECT 1 FROM call_participants
+			WHERE call_id = $1 AND user_id = $3
+		  )`
+
+	tag, err := r.db.Exec(ctx, query, callID, fromUserID, toUserID)
+	if err != nil {
+		return false, fmt.Errorf("postgres: transfer host: %w", err)
+	}
+	return tag.RowsAffected() == 2, nil
+}
+
 func (r *CallRepo) UpdateParticipantMedia(ctx context.Context, id uuid.UUID, audioMuted, videoMuted, screenSharing bool) error {
 	query := `
 		UPDATE call_participants

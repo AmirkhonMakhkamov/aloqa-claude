@@ -335,6 +335,9 @@ func (r *fakeHTTPCallRepo) UpdateParticipantStatus(context.Context, uuid.UUID, e
 func (r *fakeHTTPCallRepo) UpdateParticipantRole(context.Context, uuid.UUID, entity.CallRole) error {
 	return nil
 }
+func (r *fakeHTTPCallRepo) TransferHost(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error) {
+	return true, nil
+}
 
 func (r *fakeHTTPCallRepo) UpdateParticipantMedia(context.Context, uuid.UUID, bool, bool, bool) error {
 	return nil

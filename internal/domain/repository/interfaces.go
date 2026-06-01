@@ -226,6 +226,13 @@ type CallRepository interface {
 	ListParticipants(ctx context.Context, callID uuid.UUID) ([]entity.CallParticipant, error)
 	UpdateParticipantStatus(ctx context.Context, id uuid.UUID, status entity.ParticipantStatus) error
 	UpdateParticipantRole(ctx context.Context, id uuid.UUID, role entity.CallRole) error
+	// TransferHost atomically demotes the current host (fromUserID) to participant
+	// and promotes toUserID to host in a single all-or-nothing statement that only
+	// fires while fromUserID is still the host AND toUserID is still a participant
+	// of the call. Returns true when the swap happened, false when it was a no-op
+	// (host already changed / target gone). Enforces the single-host invariant
+	// under concurrency. (ALK-696)
+	TransferHost(ctx context.Context, callID, fromUserID, toUserID uuid.UUID) (bool, error)
 	UpdateParticipantMedia(ctx context.Context, id uuid.UUID, audioMuted, videoMuted, screenSharing bool) error
 	RemoveParticipant(ctx context.Context, callID, userID uuid.UUID) error
 }

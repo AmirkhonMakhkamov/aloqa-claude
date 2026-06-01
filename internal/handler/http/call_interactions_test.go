@@ -459,6 +459,9 @@ func (r *httpCallRepo) UpdateParticipantStatusWithReason(_ context.Context, id u
 func (r *httpCallRepo) UpdateParticipantRole(context.Context, uuid.UUID, entity.CallRole) error {
 	return nil
 }
+func (r *httpCallRepo) TransferHost(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error) {
+	return true, nil
+}
 func (r *httpCallRepo) UpdateParticipantMedia(context.Context, uuid.UUID, bool, bool, bool) error {
 	return nil
 }

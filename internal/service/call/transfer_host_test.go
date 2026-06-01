@@ -91,6 +91,17 @@ func TestTransferHost_Self_InvalidInput(t *testing.T) {
 	}
 }
 
+// The generic role endpoint must never be able to mint a second host — host is
+// single-occupancy and only changes hands through /transfer-host. (ALK-696)
+func TestUpdateParticipantRole_RejectsHostAssignment(t *testing.T) {
+	ctx := context.Background()
+	svc, _, workspaceID, callID, hostID, targetID := transferHostFixture(t)
+
+	if err := svc.UpdateParticipantRole(ctx, workspaceID, callID, hostID, targetID, entity.CallRoleHost); !hasCode(err, cerrors.CodeInvalidInput) {
+		t.Fatalf("UpdateParticipantRole assigning host error = %v, want INVALID_INPUT", err)
+	}
+}
+
 // ALK-695: a connected participant of a DM-linked call must keep call access
 // (chat/roster/media) even when they are not a member row of the underlying DM
 // channel. Without the short-circuit, requireCallAccess would 403 them.

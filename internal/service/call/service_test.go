@@ -2125,6 +2125,16 @@ func (r *fakeCallRepo) UpdateParticipantRole(_ context.Context, id uuid.UUID, ro
 	}
 	return cerrors.NotFound("call participant not found")
 }
+func (r *fakeCallRepo) TransferHost(_ context.Context, callID, fromUserID, toUserID uuid.UUID) (bool, error) {
+	from := r.participants[[2]uuid.UUID{callID, fromUserID}]
+	to := r.participants[[2]uuid.UUID{callID, toUserID}]
+	if from == nil || to == nil || from.Role != entity.CallRoleHost {
+		return false, nil
+	}
+	from.Role = entity.CallRoleParticipant
+	to.Role = entity.CallRoleHost
+	return true, nil
+}
 func (r *fakeCallRepo) UpdateParticipantMedia(context.Context, uuid.UUID, bool, bool, bool) error {
 	return nil
 }

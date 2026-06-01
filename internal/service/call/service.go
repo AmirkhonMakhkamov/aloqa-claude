@@ -261,15 +261,18 @@ func (s *Service) requireCallAccess(ctx context.Context, workspaceID, callID, us
 	if err != nil {
 		return nil, err
 	}
-	// A connected participant always retains access to their own call,
-	// independent of the underlying (possibly DM) channel membership. This is
-	// what lets in-call chat, the roster and media work for a one_to_one call
-	// (DM-only per ALK-665) whose participant joined the call but is not a
-	// member row of the underlying DM channel. Without this short-circuit the
-	// channel gate below would 403 a legitimately-connected participant. (ALK-695)
-	if p, err := s.calls.GetParticipant(ctx, callID, userID); err == nil &&
-		p.Status == entity.ParticipantStatusConnected {
-		return call, nil
+	// A connected participant of a private one_to_one call (DM-only per ALK-665)
+	// retains access to their own call independent of the underlying DM channel
+	// membership — this is what lets in-call chat, the roster and media work for
+	// a 1:1 call whose participant joined via the call but is not a member row of
+	// the DM channel. Scoped strictly to one_to_one so that revoking a user from
+	// a shared/private group channel still takes effect for group/meeting calls
+	// (where channel membership is the correct authorization boundary). (ALK-695)
+	if call.Type == entity.CallTypeOneToOne {
+		if p, err := s.calls.GetParticipant(ctx, callID, userID); err == nil &&
+			p.Status == entity.ParticipantStatusConnected {
+			return call, nil
+		}
 	}
 	if call.ChannelID != nil {
 		ch, err := s.channels.GetByID(ctx, *call.ChannelID)
@@ -1355,6 +1358,12 @@ func (s *Service) UpdateParticipantRole(ctx context.Context, workspaceID, callID
 	if err := validateAssignableRole(call.Type, role); err != nil {
 		return err
 	}
+	// Host is single-occupancy and may only change hands through the atomic
+	// /transfer-host endpoint; the generic role endpoint must never be able to
+	// mint a second host. (ALK-696)
+	if role == entity.CallRoleHost {
+		return cerrors.InvalidInput("host role can only be assigned via transfer-host")
+	}
 
 	actor, err := s.calls.GetParticipant(ctx, callID, actorUserID)
 	if err != nil {
@@ -1445,39 +1454,24 @@ func (s *Service) TransferHost(ctx context.Context, workspaceID, callID, actorUs
 		return cerrors.Conflict("target is already the host")
 	}
 
-	if s.tx != nil {
-		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
-			if scope.Calls() == nil {
-				return cerrors.Unavailable("call transaction scope is not configured")
-			}
-			if err := scope.Calls().UpdateParticipantRole(ctx, actor.ID, entity.CallRoleParticipant); err != nil {
-				return err
-			}
-			if err := scope.Calls().UpdateParticipantRole(ctx, target.ID, entity.CallRoleHost); err != nil {
-				return err
-			}
-			actor.Role = entity.CallRoleParticipant
-			target.Role = entity.CallRoleHost
-			if err := s.enqueueParticipantEventTx(ctx, scope, event.TypeCallParticipantUpdated, call, actor); err != nil {
-				return err
-			}
-			return s.enqueueParticipantEventTx(ctx, scope, event.TypeCallParticipantUpdated, call, target)
-		}); err != nil {
-			slog.ErrorContext(ctx, "failed to transfer host", "call_id", callID, "from", actorUserID, "to", targetUserID, "error", err)
-			return cerrors.Internal("failed to transfer host", err)
-		}
-	} else {
-		if err := s.calls.UpdateParticipantRole(ctx, actor.ID, entity.CallRoleParticipant); err != nil {
-			return cerrors.Internal("failed to demote current host", err)
-		}
-		if err := s.calls.UpdateParticipantRole(ctx, target.ID, entity.CallRoleHost); err != nil {
-			return cerrors.Internal("failed to promote new host", err)
-		}
-		actor.Role = entity.CallRoleParticipant
-		target.Role = entity.CallRoleHost
-		s.publishParticipantEvent(ctx, event.TypeCallParticipantUpdated, call, actor)
-		s.publishParticipantEvent(ctx, event.TypeCallParticipantUpdated, call, target)
+	// The demote-old + promote-new swap is performed as ONE atomic repository
+	// operation that only fires while the actor is still the host and the target
+	// is still present (all-or-nothing). This guarantees the single-host
+	// invariant even under concurrent transfers: the loser observes the host
+	// already changed and gets a no-op (swapped=false → Conflict). The pre-checks
+	// above only produce friendly errors for the common case. (ALK-696)
+	swapped, err := s.calls.TransferHost(ctx, callID, actorUserID, targetUserID)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to transfer host", "call_id", callID, "from", actorUserID, "to", targetUserID, "error", err)
+		return cerrors.Internal("failed to transfer host", err)
 	}
+	if !swapped {
+		return cerrors.Conflict("host changed; please retry")
+	}
+	actor.Role = entity.CallRoleParticipant
+	target.Role = entity.CallRoleHost
+	s.publishParticipantEvent(ctx, event.TypeCallParticipantUpdated, call, actor)
+	s.publishParticipantEvent(ctx, event.TypeCallParticipantUpdated, call, target)
 
 	slog.InfoContext(ctx, "host transferred", "call_id", callID, "from", actorUserID, "to", targetUserID)
 	return nil

@@ -3,6 +3,7 @@ package call
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -83,12 +84,49 @@ func (s *Service) IssueLiveKitJoinInfo(ctx context.Context, call *entity.Call, u
 	}
 
 	canPublish := participant.Role != entity.CallRoleViewer
+	return s.mintLiveKitToken(call.ID.String(), userID, displayName, canPublish)
+}
+
+// IssueLiveKitBreakoutJoinInfo signs an access token granting the user
+// permission to join the dedicated LiveKit room for a breakout sub-session.
+// The room name uses the breakout scheme ({callID}:breakout:{breakoutRoomID})
+// so breakout media is isolated from the main room. The grant is derived from
+// the persisted call participant row (must be connected; viewers cannot publish).
+func (s *Service) IssueLiveKitBreakoutJoinInfo(ctx context.Context, call *entity.Call, breakoutRoomID, userID uuid.UUID) (*LiveKitJoinInfo, error) {
+	if call == nil {
+		return nil, cerrors.InvalidInput("call is required")
+	}
+	if !s.livekit.IsConfigured() {
+		return nil, cerrors.Unavailable("livekit is not configured")
+	}
+
+	participant, err := s.calls.GetParticipant(ctx, call.ID, userID)
+	if err != nil {
+		if isNotFound(err) {
+			return nil, cerrors.Forbidden("user is not a participant in this call")
+		}
+		return nil, cerrors.Internal("failed to load call participant for livekit breakout token", err)
+	}
+	if participant.Status != entity.ParticipantStatusConnected {
+		return nil, cerrors.Forbidden("participant is not connected")
+	}
+
+	canPublish := participant.Role != entity.CallRoleViewer
+	roomName := breakoutLiveKitRoomName(call.ID, breakoutRoomID)
+	return s.mintLiveKitToken(roomName, userID, "", canPublish)
+}
+
+// mintLiveKitToken signs a LiveKit access token for the given room and user.
+// Shared by the main-room and breakout-room join flows so the grant/signing
+// logic stays in one place.
+func (s *Service) mintLiveKitToken(roomName string, userID uuid.UUID, displayName string, canPublish bool) (*LiveKitJoinInfo, error) {
+	canPublishFlag := canPublish
 	canSubscribe := true
 	canPublishData := true
 	grant := &auth.VideoGrant{
-		Room:           call.ID.String(),
+		Room:           roomName,
 		RoomJoin:       true,
-		CanPublish:     &canPublish,
+		CanPublish:     &canPublishFlag,
 		CanSubscribe:   &canSubscribe,
 		CanPublishData: &canPublishData,
 	}
@@ -136,6 +174,30 @@ func (s *Service) EnsureLiveKitRoom(ctx context.Context, call *entity.Call) erro
 
 	return s.livekitRooms.EnsureRoom(ctx, LiveKitEnsureRoomArgs{
 		CallID:          call.ID,
+		WorkspaceID:     call.WorkspaceID,
+		CallType:        call.Type,
+		MaxParticipants: maxParticipants,
+		EmptyTimeout:    defaultLiveKitEmptyTimeout,
+		Metadata:        liveKitRoomMetadata(call),
+	})
+}
+
+// EnsureLiveKitBreakoutRoom creates (or refreshes) the dedicated LiveKit room
+// backing a breakout sub-session. Best-effort and a no-op when LiveKit is not
+// wired up, mirroring EnsureLiveKitRoom.
+func (s *Service) EnsureLiveKitBreakoutRoom(ctx context.Context, call *entity.Call, breakoutRoomID uuid.UUID) error {
+	if call == nil || !s.livekit.IsConfigured() || s.livekitRooms == nil {
+		return nil
+	}
+
+	maxParticipants := uint32(0)
+	if cap := s.effectiveParticipantCap(call); cap > 0 {
+		maxParticipants = uint32(cap)
+	}
+
+	return s.livekitRooms.EnsureRoom(ctx, LiveKitEnsureRoomArgs{
+		CallID:          call.ID,
+		RoomName:        breakoutLiveKitRoomName(call.ID, breakoutRoomID),
 		WorkspaceID:     call.WorkspaceID,
 		CallType:        call.Type,
 		MaxParticipants: maxParticipants,
@@ -202,6 +264,14 @@ func (s *Service) HandleLiveKitWebhook(ctx context.Context, ev *livekitpb.Webhoo
 		slog.WarnContext(ctx, "livekit webhook missing room name", "event", ev.GetEvent(), "id", ev.GetId())
 		return nil
 	}
+
+	// Breakout rooms use the "{callID}:breakout:{breakoutRoomID}" scheme and are
+	// not bare call UUIDs. Bridge their participant_left so the participant is
+	// unassigned from the breakout room in our domain state; ignore everything else.
+	if strings.Contains(roomName, breakoutRoomNameSeparator) {
+		return s.handleLiveKitBreakoutWebhook(ctx, ev, roomName)
+	}
+
 	callID, err := uuid.Parse(roomName)
 	if err != nil {
 		// room name is not a call uuid; ignore (room may belong to a different feature)
@@ -436,6 +506,66 @@ func (s *Service) autoEndAfterLiveKitParticipantLeft(ctx context.Context, call *
 		}
 	}
 	slog.InfoContext(ctx, "livekit participant_left bridged", "call_id", callID, "user_id", userID, "reason", reason)
+	return nil
+}
+
+// handleLiveKitBreakoutWebhook bridges webhooks for breakout-room LiveKit rooms
+// (named "{callID}:breakout:{breakoutRoomID}"). Only participant_left is acted
+// on: the participant is unassigned from the breakout room in our domain state,
+// mirroring ReturnToMainRoom's effect. Other breakout events are ignored.
+//
+// We deliberately skip the livekit_webhook_events idempotency claim here: that
+// table keys on a bare call UUID, and unassigning an already-unassigned
+// participant is itself a no-op, so duplicate deliveries are harmless.
+func (s *Service) handleLiveKitBreakoutWebhook(ctx context.Context, ev *livekitpb.WebhookEvent, roomName string) error {
+	if ev.GetEvent() != "participant_left" {
+		return nil
+	}
+
+	callID, breakoutRoomID, ok := parseBreakoutRoomName(roomName)
+	if !ok {
+		return nil
+	}
+
+	p := ev.GetParticipant()
+	if p == nil {
+		return nil
+	}
+	userID, err := uuid.Parse(p.GetIdentity())
+	if err != nil {
+		return nil
+	}
+
+	call, err := s.calls.GetByID(ctx, callID)
+	if err != nil {
+		if isNotFound(err) {
+			return nil
+		}
+		return cerrors.Internal("failed to load call for livekit breakout participant_left", err)
+	}
+
+	participant, err := s.calls.GetParticipant(ctx, callID, userID)
+	if err != nil {
+		if isNotFound(err) {
+			return nil
+		}
+		return cerrors.Internal("failed to load participant for livekit breakout participant_left", err)
+	}
+	// Only act when the participant is actually assigned to this breakout room.
+	if participant.BreakoutRoomID == nil || *participant.BreakoutRoomID != breakoutRoomID {
+		return nil
+	}
+
+	if err := s.breakoutRooms.UnassignParticipant(ctx, callID, userID); err != nil {
+		return cerrors.Internal("failed to unassign participant on livekit breakout participant_left", err)
+	}
+
+	s.publishBreakoutEvent(ctx, event.TypeBreakoutParticipantMoved, call, event.BreakoutParticipantMovedPayload{
+		CallID:         callID,
+		UserID:         userID,
+		BreakoutRoomID: nil,
+	})
+	slog.InfoContext(ctx, "livekit breakout participant_left bridged", "call_id", callID, "breakout_room_id", breakoutRoomID, "user_id", userID)
 	return nil
 }
 

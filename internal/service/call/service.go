@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -102,6 +103,10 @@ type Service struct {
 	collab        CollaborationAccessAuthorizer
 	control       MediaControlPlane
 	tx            txscope.Manager
+
+	// breakoutTimers holds in-memory auto-close timers keyed by callID
+	// (uuid.UUID -> *time.Timer). See breakout_timer.go.
+	breakoutTimers sync.Map
 }
 
 type MediaConfig struct {

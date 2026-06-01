@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,6 +20,10 @@ import (
 type CreateBreakoutRoomInput struct {
 	Name      string `json:"name"`
 	TimeLimit *int   `json:"time_limit,omitempty"` // seconds
+	// ParticipantUserIDs lets the host pre-assign connected call participants to
+	// the room at creation time. Unknown / non-connected ids and the actor are
+	// silently skipped.
+	ParticipantUserIDs []uuid.UUID `json:"participant_user_ids,omitempty"`
 }
 
 // CreateBreakoutRooms creates one or more breakout rooms within an active call.
@@ -50,8 +55,16 @@ func (s *Service) CreateBreakoutRooms(
 		return nil, cerrors.InvalidInput("at least one breakout room is required")
 	}
 
+	// Snapshot connected participants once so host pre-assignment can validate
+	// the requested user ids without an N+1 lookup per id.
+	connected, err := s.connectedParticipants(ctx, callID)
+	if err != nil {
+		return nil, err
+	}
+
 	now := time.Now()
 	rooms := make([]entity.BreakoutRoom, 0, len(inputs))
+	maxTimeLimit := 0
 
 	for _, input := range inputs {
 		if input.Name == "" {
@@ -73,12 +86,18 @@ func (s *Service) CreateBreakoutRooms(
 			return nil, cerrors.Internal("failed to create breakout room", err)
 		}
 
-		// Create a dedicated SFU room for this breakout room.
+		// Create a dedicated SFU room for this breakout room (legacy Pion plane).
 		sfuRoomID := breakoutSFURoomID(callID, room.ID)
 		if _, err := s.sfu.CreateRoom(sfuRoomID, sfu.RoomOptions{
 			MaxPresenters: call.Settings.MaxParticipants,
 		}); err != nil {
 			slog.ErrorContext(ctx, "failed to create SFU room for breakout", "breakout_id", room.ID, "error", err)
+		}
+
+		// Provision the dedicated LiveKit room for this breakout (best-effort;
+		// no-op when LiveKit is not configured).
+		if err := s.EnsureLiveKitBreakoutRoom(ctx, call, room.ID); err != nil {
+			slog.WarnContext(ctx, "failed to ensure livekit breakout room", "breakout_id", room.ID, "error", err)
 		}
 
 		rooms = append(rooms, room)
@@ -87,10 +106,55 @@ func (s *Service) CreateBreakoutRooms(
 			CallID: callID,
 			Room:   &room,
 		})
+
+		// Host-driven pre-assignment of participants into this room.
+		for _, uid := range input.ParticipantUserIDs {
+			if uid == userID {
+				continue // never move the host/actor automatically
+			}
+			if !connected[uid] {
+				continue // skip unknown / non-connected ids silently
+			}
+			if err := s.breakoutRooms.AssignParticipant(ctx, callID, uid, room.ID); err != nil {
+				slog.ErrorContext(ctx, "failed to pre-assign participant to breakout room",
+					"call_id", callID, "user_id", uid, "breakout_room_id", room.ID, "error", err)
+				continue
+			}
+			assigned := room.ID
+			s.publishBreakoutEvent(ctx, event.TypeBreakoutParticipantMoved, call, event.BreakoutParticipantMovedPayload{
+				CallID:         callID,
+				UserID:         uid,
+				BreakoutRoomID: &assigned,
+			})
+		}
+
+		if input.TimeLimit != nil && *input.TimeLimit > maxTimeLimit {
+			maxTimeLimit = *input.TimeLimit
+		}
 	}
+
+	// Schedule a best-effort auto-close if any room has a positive time limit.
+	s.scheduleBreakoutAutoClose(callID, call.CreatedBy, maxTimeLimit)
 
 	slog.InfoContext(ctx, "breakout rooms created", "call_id", callID, "count", len(rooms), "user_id", userID)
 	return rooms, nil
+}
+
+// connectedParticipants returns the set of user ids that are connected
+// participants of the call, used to validate host pre-assignment requests.
+func (s *Service) connectedParticipants(ctx context.Context, callID uuid.UUID) (map[uuid.UUID]bool, error) {
+	participants, err := s.calls.ListParticipants(ctx, callID)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to list participants for breakout assignment", "call_id", callID, "error", err)
+		return nil, cerrors.Internal("failed to list call participants", err)
+	}
+	connected := make(map[uuid.UUID]bool, len(participants))
+	for _, p := range participants {
+		if p.Status == entity.ParticipantStatusConnected {
+			connected[p.UserID] = true
+		}
+	}
+	return connected, nil
 }
 
 // ListBreakoutRooms returns all breakout rooms for a call.
@@ -114,41 +178,41 @@ func (s *Service) ListBreakoutRooms(ctx context.Context, callID uuid.UUID) ([]en
 func (s *Service) JoinBreakoutRoom(
 	ctx context.Context,
 	callID, userID, breakoutRoomID uuid.UUID,
-) error {
+) (*LiveKitJoinInfo, error) {
 	call, err := s.calls.GetByID(ctx, callID)
 	if err != nil {
-		return s.wrapCallError(ctx, err, callID, "join breakout room")
+		return nil, s.wrapCallError(ctx, err, callID, "join breakout room")
 	}
 
 	if call.Status != entity.CallStatusActive {
-		return cerrors.Forbidden("call is not active")
+		return nil, cerrors.Forbidden("call is not active")
 	}
 
 	// Verify the breakout room exists and is active.
 	room, err := s.breakoutRooms.GetByID(ctx, breakoutRoomID)
 	if err != nil {
 		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
-			return cerrors.NotFound("breakout room not found")
+			return nil, cerrors.NotFound("breakout room not found")
 		}
-		return cerrors.Internal("failed to get breakout room", err)
+		return nil, cerrors.Internal("failed to get breakout room", err)
 	}
 	if room.CallID != callID {
-		return cerrors.Forbidden("breakout room does not belong to this call")
+		return nil, cerrors.Forbidden("breakout room does not belong to this call")
 	}
 	if room.Status != entity.BreakoutRoomStatusActive {
-		return cerrors.Forbidden("breakout room is closed")
+		return nil, cerrors.Forbidden("breakout room is closed")
 	}
 
 	// Verify participant is connected to the call.
 	participant, err := s.calls.GetParticipant(ctx, callID, userID)
 	if err != nil {
 		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
-			return cerrors.Forbidden("user is not a participant in this call")
+			return nil, cerrors.Forbidden("user is not a participant in this call")
 		}
-		return cerrors.Internal("failed to get participant", err)
+		return nil, cerrors.Internal("failed to get participant", err)
 	}
 	if participant.Status != entity.ParticipantStatusConnected {
-		return cerrors.Forbidden("participant is not connected")
+		return nil, cerrors.Forbidden("participant is not connected")
 	}
 
 	// If already in a breakout room, remove from that SFU room first.
@@ -168,7 +232,12 @@ func (s *Service) JoinBreakoutRoom(
 	if err := s.breakoutRooms.AssignParticipant(ctx, callID, userID, breakoutRoomID); err != nil {
 		slog.ErrorContext(ctx, "failed to assign participant to breakout room",
 			"call_id", callID, "user_id", userID, "breakout_room_id", breakoutRoomID, "error", err)
-		return cerrors.Internal("failed to join breakout room", err)
+		return nil, cerrors.Internal("failed to join breakout room", err)
+	}
+
+	// Make sure the dedicated LiveKit breakout room exists before issuing a token.
+	if err := s.EnsureLiveKitBreakoutRoom(ctx, call, breakoutRoomID); err != nil {
+		slog.WarnContext(ctx, "failed to ensure livekit breakout room on join", "breakout_room_id", breakoutRoomID, "error", err)
 	}
 
 	s.publishBreakoutEvent(ctx, event.TypeBreakoutParticipantMoved, call, event.BreakoutParticipantMovedPayload{
@@ -179,27 +248,31 @@ func (s *Service) JoinBreakoutRoom(
 
 	slog.InfoContext(ctx, "participant joined breakout room",
 		"call_id", callID, "user_id", userID, "breakout_room_id", breakoutRoomID)
-	return nil
+
+	if !s.livekit.IsConfigured() {
+		return nil, nil
+	}
+	return s.IssueLiveKitBreakoutJoinInfo(ctx, call, breakoutRoomID, userID)
 }
 
 // ReturnToMainRoom moves a participant from their current breakout room back
 // to the main call room.
-func (s *Service) ReturnToMainRoom(ctx context.Context, callID, userID uuid.UUID) error {
+func (s *Service) ReturnToMainRoom(ctx context.Context, callID, userID uuid.UUID) (*LiveKitJoinInfo, error) {
 	call, err := s.calls.GetByID(ctx, callID)
 	if err != nil {
-		return s.wrapCallError(ctx, err, callID, "return to main room")
+		return nil, s.wrapCallError(ctx, err, callID, "return to main room")
 	}
 
 	participant, err := s.calls.GetParticipant(ctx, callID, userID)
 	if err != nil {
 		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
-			return cerrors.Forbidden("user is not a participant in this call")
+			return nil, cerrors.Forbidden("user is not a participant in this call")
 		}
-		return cerrors.Internal("failed to get participant", err)
+		return nil, cerrors.Internal("failed to get participant", err)
 	}
 
 	if participant.BreakoutRoomID == nil {
-		return cerrors.Conflict("participant is already in the main room")
+		return nil, cerrors.Conflict("participant is already in the main room")
 	}
 
 	// Remove from breakout SFU room.
@@ -212,7 +285,7 @@ func (s *Service) ReturnToMainRoom(ctx context.Context, callID, userID uuid.UUID
 	if err := s.breakoutRooms.UnassignParticipant(ctx, callID, userID); err != nil {
 		slog.ErrorContext(ctx, "failed to unassign participant from breakout room",
 			"call_id", callID, "user_id", userID, "error", err)
-		return cerrors.Internal("failed to return to main room", err)
+		return nil, cerrors.Internal("failed to return to main room", err)
 	}
 
 	s.publishBreakoutEvent(ctx, event.TypeBreakoutParticipantMoved, call, event.BreakoutParticipantMovedPayload{
@@ -222,7 +295,12 @@ func (s *Service) ReturnToMainRoom(ctx context.Context, callID, userID uuid.UUID
 	})
 
 	slog.InfoContext(ctx, "participant returned to main room", "call_id", callID, "user_id", userID)
-	return nil
+
+	if !s.livekit.IsConfigured() {
+		return nil, nil
+	}
+	// Re-issue a token for the MAIN call room so the FE can reconnect there.
+	return s.IssueLiveKitJoinInfo(ctx, call, userID, "")
 }
 
 // CloseBreakoutRoom closes a specific breakout room. All participants in the
@@ -257,9 +335,16 @@ func (s *Service) CloseBreakoutRoom(ctx context.Context, callID, userID, breakou
 			"breakout_room_id", breakoutRoomID, "error", err)
 	}
 
-	// Close the breakout SFU room.
+	// Close the breakout SFU room (legacy Pion plane).
 	sfuRoomID := breakoutSFURoomID(callID, breakoutRoomID)
 	s.sfu.CloseRoom(sfuRoomID)
+
+	// Delete the dedicated LiveKit breakout room (best-effort, swallows NotFound).
+	if s.livekitRooms != nil {
+		if err := s.livekitRooms.DeleteRoomByName(ctx, breakoutLiveKitRoomName(callID, breakoutRoomID)); err != nil {
+			slog.WarnContext(ctx, "failed to delete livekit breakout room", "breakout_room_id", breakoutRoomID, "error", err)
+		}
+	}
 
 	// Close the DB record.
 	if err := s.breakoutRooms.Close(ctx, breakoutRoomID); err != nil {
@@ -272,8 +357,23 @@ func (s *Service) CloseBreakoutRoom(ctx context.Context, callID, userID, breakou
 		Room:   room,
 	})
 
+	// If no active breakout rooms remain, cancel any pending auto-close timer.
+	if remaining, err := s.breakoutRooms.ListByCall(ctx, callID); err == nil && !hasActiveBreakoutRoom(remaining) {
+		s.cancelBreakoutAutoClose(callID)
+	}
+
 	slog.InfoContext(ctx, "breakout room closed", "call_id", callID, "breakout_room_id", breakoutRoomID, "user_id", userID)
 	return nil
+}
+
+// hasActiveBreakoutRoom reports whether any of the rooms is still active.
+func hasActiveBreakoutRoom(rooms []entity.BreakoutRoom) bool {
+	for _, r := range rooms {
+		if r.Status == entity.BreakoutRoomStatusActive {
+			return true
+		}
+	}
+	return false
 }
 
 // CloseAllBreakoutRooms closes every active breakout room in the call and
@@ -294,7 +394,11 @@ func (s *Service) CloseAllBreakoutRooms(ctx context.Context, callID, userID uuid
 		return cerrors.Internal("failed to list breakout rooms", err)
 	}
 
-	// Close each SFU breakout room and unassign participants.
+	// Cancel any pending auto-close timer first (CloseAll supersedes it and the
+	// timer itself ends up here — cancelling makes the operation idempotent).
+	s.cancelBreakoutAutoClose(callID)
+
+	// Close each breakout room media plane and unassign participants.
 	for _, room := range rooms {
 		if room.Status != entity.BreakoutRoomStatusActive {
 			continue
@@ -304,6 +408,11 @@ func (s *Service) CloseAllBreakoutRooms(ctx context.Context, callID, userID uuid
 		}
 		sfuRoomID := breakoutSFURoomID(callID, room.ID)
 		s.sfu.CloseRoom(sfuRoomID)
+		if s.livekitRooms != nil {
+			if err := s.livekitRooms.DeleteRoomByName(ctx, breakoutLiveKitRoomName(callID, room.ID)); err != nil {
+				slog.WarnContext(ctx, "failed to delete livekit breakout room", "breakout_room_id", room.ID, "error", err)
+			}
+		}
 	}
 
 	// Bulk-close all breakout rooms in DB.
@@ -415,8 +524,38 @@ func (s *Service) publishBreakoutEvent(ctx context.Context, evtType event.Type, 
 	s.doPublish(ctx, evtType, subject, call.WorkspaceID, channelID, call.CreatedBy, payload)
 }
 
+// breakoutRoomNameSeparator delimits the call and breakout-room UUIDs in a
+// breakout room name ("{callID}:breakout:{breakoutRoomID}").
+const breakoutRoomNameSeparator = ":breakout:"
+
 // breakoutSFURoomID returns the SFU room ID for a breakout room.
 // Format: {callID}:breakout:{breakoutRoomID}
 func breakoutSFURoomID(callID, breakoutRoomID uuid.UUID) string {
-	return fmt.Sprintf("%s:breakout:%s", callID, breakoutRoomID)
+	return fmt.Sprintf("%s%s%s", callID, breakoutRoomNameSeparator, breakoutRoomID)
+}
+
+// breakoutLiveKitRoomName returns the LiveKit room name for a breakout room.
+// It uses the same scheme as breakoutSFURoomID so the main-room/breakout-room
+// distinction is consistent across the legacy SFU and the LiveKit media plane.
+func breakoutLiveKitRoomName(callID, breakoutRoomID uuid.UUID) string {
+	return fmt.Sprintf("%s%s%s", callID, breakoutRoomNameSeparator, breakoutRoomID)
+}
+
+// parseBreakoutRoomName parses a "{callID}:breakout:{breakoutRoomID}" room name
+// back into its call and breakout-room UUIDs. ok is false if the name does not
+// match the scheme or either segment is not a valid UUID.
+func parseBreakoutRoomName(name string) (callID, breakoutRoomID uuid.UUID, ok bool) {
+	left, right, found := strings.Cut(name, breakoutRoomNameSeparator)
+	if !found {
+		return uuid.Nil, uuid.Nil, false
+	}
+	callID, err := uuid.Parse(left)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, false
+	}
+	breakoutRoomID, err = uuid.Parse(right)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, false
+	}
+	return callID, breakoutRoomID, true
 }

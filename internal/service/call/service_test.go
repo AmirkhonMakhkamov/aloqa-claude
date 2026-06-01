@@ -2149,18 +2149,31 @@ type removedLiveKitParticipant struct {
 type fakeLiveKitRoomClient struct {
 	ensureCalls           int
 	ensureErr             error
+	ensuredRoomNames      []string
+	deletedRoomNames      []string
 	removedParticipants   []removedLiveKitParticipant
 	participantsByCall    map[uuid.UUID][]*livekitpb.ParticipantInfo
 	listParticipantsErr   error
 	listParticipantsCalls int
 }
 
-func (c *fakeLiveKitRoomClient) EnsureRoom(context.Context, LiveKitEnsureRoomArgs) error {
+func (c *fakeLiveKitRoomClient) EnsureRoom(_ context.Context, args LiveKitEnsureRoomArgs) error {
 	c.ensureCalls++
+	name := args.RoomName
+	if name == "" {
+		name = args.CallID.String()
+	}
+	c.ensuredRoomNames = append(c.ensuredRoomNames, name)
 	return c.ensureErr
 }
 
-func (c *fakeLiveKitRoomClient) DeleteRoom(context.Context, uuid.UUID) error {
+func (c *fakeLiveKitRoomClient) DeleteRoom(_ context.Context, callID uuid.UUID) error {
+	c.deletedRoomNames = append(c.deletedRoomNames, callID.String())
+	return nil
+}
+
+func (c *fakeLiveKitRoomClient) DeleteRoomByName(_ context.Context, name string) error {
+	c.deletedRoomNames = append(c.deletedRoomNames, name)
 	return nil
 }
 

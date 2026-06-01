@@ -726,7 +726,17 @@ func (r *fakeCallRepo) UpdateParticipantRole(context.Context, uuid.UUID, entity.
 	return nil
 }
 
+func (r *fakeCallRepo) TransferHost(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error) {
+	return false, nil
+}
+
 func (r *fakeCallRepo) UpdateParticipantMedia(context.Context, uuid.UUID, bool, bool, bool) error {
+	return nil
+}
+
+func (r *fakeCallRepo) SetCanScreenShare(context.Context, uuid.UUID, bool) error { return nil }
+
+func (r *fakeCallRepo) SetFeaturedShareUserID(context.Context, uuid.UUID, *uuid.UUID) error {
 	return nil
 }
 

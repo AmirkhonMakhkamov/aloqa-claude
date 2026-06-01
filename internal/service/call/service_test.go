@@ -2136,8 +2136,32 @@ func (r *fakeCallRepo) TransferHost(_ context.Context, callID, fromUserID, toUse
 	to.Role = entity.CallRoleHost
 	return true, nil
 }
-func (r *fakeCallRepo) UpdateParticipantMedia(context.Context, uuid.UUID, bool, bool, bool) error {
-	return nil
+func (r *fakeCallRepo) UpdateParticipantMedia(_ context.Context, id uuid.UUID, audioMuted, videoMuted, screenSharing bool) error {
+	for _, p := range r.participants {
+		if p.ID == id {
+			p.AudioMuted = audioMuted
+			p.VideoMuted = videoMuted
+			p.ScreenSharing = screenSharing
+			return nil
+		}
+	}
+	return cerrors.NotFound("call participant not found")
+}
+func (r *fakeCallRepo) SetCanScreenShare(_ context.Context, id uuid.UUID, canShare bool) error {
+	for _, p := range r.participants {
+		if p.ID == id {
+			p.CanScreenShare = canShare
+			return nil
+		}
+	}
+	return cerrors.NotFound("participant not found")
+}
+func (r *fakeCallRepo) SetFeaturedShareUserID(_ context.Context, callID uuid.UUID, userID *uuid.UUID) error {
+	if c := r.calls[callID]; c != nil {
+		c.FeaturedShareUserID = userID
+		return nil
+	}
+	return cerrors.NotFound("call not found")
 }
 func (r *fakeCallRepo) RemoveParticipant(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 

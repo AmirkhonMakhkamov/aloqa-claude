@@ -245,6 +245,18 @@ func (s *Service) deleteLiveKitRoomBestEffort(ctx context.Context, callID uuid.U
 	}
 }
 
+// stopActiveEgressForCallBestEffort stops an in-flight recording egress when a
+// call ends without an explicit host Stop (ALK-701). The ensuing egress_ended
+// webhook finalizes the recording to ready. No-op when egress is not wired.
+func (s *Service) stopActiveEgressForCallBestEffort(ctx context.Context, callID uuid.UUID) {
+	if s.egressSink == nil {
+		return
+	}
+	if err := s.egressSink.StopActiveEgressForCall(ctx, callID); err != nil {
+		slog.WarnContext(ctx, "failed to stop active egress on call end", "call_id", callID, "error", err)
+	}
+}
+
 func (s *Service) removeLiveKitParticipantBestEffort(ctx context.Context, callID, userID uuid.UUID) {
 	if err := s.RemoveLiveKitParticipant(ctx, callID, userID); err != nil {
 		slog.WarnContext(ctx, "failed to remove livekit participant", "call_id", callID, "user_id", userID, "error", err)
@@ -260,6 +272,11 @@ func (s *Service) HandleLiveKitWebhook(ctx context.Context, ev *livekitpb.Webhoo
 	}
 
 	roomName := ev.GetRoom().GetName()
+	if roomName == "" {
+		// Egress webhooks (egress_*) may not populate the top-level Room; the
+		// room is on the EgressInfo instead (ALK-701).
+		roomName = ev.GetEgressInfo().GetRoomName()
+	}
 	if roomName == "" {
 		slog.WarnContext(ctx, "livekit webhook missing room name", "event", ev.GetEvent(), "id", ev.GetId())
 		return nil
@@ -310,10 +327,40 @@ func (s *Service) processLiveKitWebhook(ctx context.Context, ev *livekitpb.Webho
 		return s.handleLiveKitTrackChanged(ctx, callID, ev.GetParticipant(), ev.GetTrack(), true)
 	case "track_unpublished":
 		return s.handleLiveKitTrackChanged(ctx, callID, ev.GetParticipant(), ev.GetTrack(), false)
+	case "egress_started", "egress_updated", "egress_ended":
+		return s.handleLiveKitEgressEvent(ctx, callID, ev.GetEvent(), ev.GetEgressInfo())
 	default:
-		// room_started / recording_started — not used in this slice
+		// room_started and other events are not used in this slice.
 		return nil
 	}
+}
+
+// handleLiveKitEgressEvent bridges a LiveKit egress_* webhook to the recording
+// finalizer (ALK-701). egress_ended on EGRESS_COMPLETE finalizes the recording
+// to ready with the composite artifact; FAILED/ABORTED marks it failed.
+func (s *Service) handleLiveKitEgressEvent(ctx context.Context, callID uuid.UUID, eventName string, info *livekitpb.EgressInfo) error {
+	if info == nil || s.egressSink == nil {
+		return nil
+	}
+	out := EgressEventInfo{
+		EgressID: info.GetEgressId(),
+		CallID:   callID,
+	}
+	switch eventName {
+	case "egress_started":
+		out.Phase = EgressEventStarted
+	case "egress_updated":
+		out.Phase = EgressEventUpdated
+	case "egress_ended":
+		out.Phase = EgressEventEnded
+		out.Succeeded = info.GetStatus() == livekitpb.EgressStatus_EGRESS_COMPLETE
+		if files := info.GetFileResults(); len(files) > 0 {
+			out.FileSizeBytes = files[0].GetSize()
+			// LiveKit reports duration in nanoseconds.
+			out.DurationSeconds = int(files[0].GetDuration() / int64(time.Second))
+		}
+	}
+	return s.egressSink.HandleEgressEvent(ctx, out)
 }
 
 func (s *Service) claimLiveKitWebhookEvent(ctx context.Context, ev *livekitpb.WebhookEvent, callID uuid.UUID) (entity.LiveKitWebhookClaimResult, string, error) {
@@ -379,6 +426,7 @@ func (s *Service) handleLiveKitRoomFinished(ctx context.Context, callID uuid.UUI
 	markCallEnded(call, entity.CallEndReasonAllLeft)
 
 	s.publishCallEvent(ctx, event.TypeCallEnded, call, call.CreatedBy)
+	s.stopActiveEgressForCallBestEffort(ctx, callID)
 	s.closeAllBreakoutSFURooms(ctx, callID)
 	s.deleteLiveKitRoomBestEffort(ctx, callID)
 	if s.sfu != nil {
@@ -499,6 +547,7 @@ func (s *Service) autoEndAfterLiveKitParticipantLeft(ctx context.Context, call *
 		}
 		markCallEnded(call, entity.CallEndReasonAllLeft)
 		s.publishCallEvent(ctx, event.TypeCallEnded, call, userID)
+		s.stopActiveEgressForCallBestEffort(ctx, callID)
 		s.closeAllBreakoutSFURooms(ctx, callID)
 		s.deleteLiveKitRoomBestEffort(ctx, callID)
 		if s.sfu != nil {

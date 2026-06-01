@@ -437,6 +437,34 @@ func run() error {
 	searchSvc.SetAccessPolicy(channelAccessPolicy)
 	recordingSvc.SetCallAccessAuthorizer(callSvc)
 
+	// ALK-701: wire LiveKit Egress recording. egressClient is nil when egress is
+	// not configured, in which case StartRecording returns 503 and new calls
+	// advertise settings.recording=false (the FE control stays hidden).
+	egressOutput := call.EgressSettings{
+		Enabled:  cfg.LiveKit.EgressEnabled,
+		FileRoot: cfg.LiveKit.EgressFileRoot,
+	}
+	if cfg.Media.StorageBackend == "s3" || cfg.Media.StorageBackend == "minio" {
+		egressOutput.S3 = &call.EgressS3Settings{
+			AccessKey:      cfg.Media.ObjectStorageAccessKey,
+			Secret:         cfg.Media.ObjectStorageSecretKey,
+			Region:         cfg.Media.ObjectStorageRegion,
+			Endpoint:       cfg.Media.ObjectStorageEndpoint,
+			Bucket:         cfg.Media.ObjectStorageBucket,
+			ForcePathStyle: cfg.Media.ObjectStorageForcePathStyle,
+		}
+	}
+	egressClient := call.NewEgressClient(call.LiveKitSettings{
+		URL:       cfg.LiveKit.URL,
+		APIKey:    cfg.LiveKit.APIKey,
+		APISecret: cfg.LiveKit.APISecret,
+		TokenTTL:  cfg.LiveKit.TokenTTL,
+	}, egressOutput)
+	recordingSvc.SetEgressClient(egressClient)
+	recordingSvc.SetBroadcaster(callSvc)
+	callSvc.SetEgressSink(recordingSvc)
+	callSvc.SetRecordingEnabled(egressClient != nil)
+
 	reliability.Supervise(ctx, "session_touch", func(c context.Context) {
 		authSvc.RunSessionTouchWorker(c, 30*time.Second)
 	})

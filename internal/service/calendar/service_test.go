@@ -2021,6 +2021,10 @@ func (r *txCallRepo) UpdateParticipantMedia(context.Context, uuid.UUID, bool, bo
 }
 func (r *txCallRepo) RemoveParticipant(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 
+func (r *txCallRepo) TransferHost(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error) {
+	return true, nil
+}
+
 type fakeCalendarTxScope struct {
 	calendars repository.CalendarRepository
 	calls     repository.CallRepository

@@ -19,7 +19,15 @@ import (
 	"aloqa/internal/platform/reliability"
 	"aloqa/internal/platform/storage"
 	"aloqa/internal/platform/txscope"
+	"aloqa/internal/service/call"
 )
+
+// RecordingBroadcaster emits call.recording.* workspace events. Implemented by
+// the call service (which owns the realtime publisher), wired in main (ALK-701).
+type RecordingBroadcaster interface {
+	BroadcastRecordingStarted(ctx context.Context, c *entity.Call, rec *entity.Recording)
+	BroadcastRecordingUpdated(ctx context.Context, c *entity.Call, rec *entity.Recording)
+}
 
 type MediaRooms interface {
 	GetRoom(id string) (*sfu.Room, bool)
@@ -55,6 +63,8 @@ type Service struct {
 	archiveAfter time.Duration
 	callAccess   CallAccessAuthorizer
 	tx           txscope.Manager
+	egress       call.EgressClient    // ALK-701: LiveKit Egress (nil when recording disabled)
+	broadcaster  RecordingBroadcaster // ALK-701: emits call.recording.* events
 	observer     interface {
 		RecordRecordingRun(workerName string, processed, failed, deleted, tiered int, duration time.Duration, err error)
 		RecordRecordingHookFailure(err error)
@@ -119,6 +129,17 @@ func (s *Service) SetCallAccessAuthorizer(authorizer CallAccessAuthorizer) {
 	s.callAccess = authorizer
 }
 
+// SetEgressClient installs the LiveKit Egress client (ALK-701). A nil client
+// means recording is not available; StartRecording then returns 503.
+func (s *Service) SetEgressClient(client call.EgressClient) {
+	s.egress = client
+}
+
+// SetBroadcaster installs the call.recording.* event broadcaster (ALK-701).
+func (s *Service) SetBroadcaster(b RecordingBroadcaster) {
+	s.broadcaster = b
+}
+
 func (s *Service) SetTransactionManager(manager txscope.Manager) {
 	s.tx = manager
 }
@@ -150,13 +171,10 @@ func (s *Service) StartRecording(ctx context.Context, workspaceID, callID, userI
 	if !call.Settings.Recording {
 		return nil, cerrors.Forbidden("recording is disabled for this call")
 	}
-	if strategy == "" {
-		strategy = entity.RecordingStrategyBoth
-	}
-	switch strategy {
-	case entity.RecordingStrategyComposite, entity.RecordingStrategyPerTrack, entity.RecordingStrategyBoth:
-	default:
-		return nil, cerrors.InvalidInput("invalid recording strategy")
+	// Recording is a single LiveKit room-composite egress → one MP4.
+	strategy = entity.RecordingStrategyComposite
+	if s.egress == nil {
+		return nil, cerrors.Unavailable("recording is not available")
 	}
 	if err := s.ensureQuotaAvailable(ctx, workspaceID); err != nil {
 		return nil, err
@@ -173,90 +191,115 @@ func (s *Service) StartRecording(ctx context.Context, workspaceID, callID, userI
 		return nil, cerrors.Forbidden("only host or co-host can start recording")
 	}
 
+	// Fast-path conflict check; the durable guard is the
+	// ux_recordings_active_per_call unique index enforced at Create below
+	// (concurrent starts → 409).
 	existing, err := s.recordings.ListByCall(ctx, callID)
 	if err != nil {
 		return nil, cerrors.Internal("failed to check existing recordings", err)
 	}
 	for _, r := range existing {
-		if r.Status == entity.RecordingStatusRecording {
+		if r.Status == entity.RecordingStatusRecording || r.Status == entity.RecordingStatusProcessing {
 			return nil, cerrors.Conflict("call is already being recorded")
 		}
 	}
 
-	room, ok := s.mediaRoom(callID)
-	if !ok {
-		return nil, cerrors.Unavailable("media room is not initialized")
-	}
-	if s.capture == nil {
-		return nil, cerrors.Unavailable("recording capture is not configured")
-	}
-
 	now := time.Now().UTC()
+	recID := id.New()
+	storageKey := recordingStorageKey(callID, recID)
 	rec := &entity.Recording{
-		ID:                    id.New(),
+		ID:                    recID,
 		CallID:                callID,
 		WorkspaceID:           call.WorkspaceID,
 		StartedBy:             userID,
 		Strategy:              strategy,
-		Format:                entity.RecordingFormatBundle,
+		Format:                entity.RecordingFormatMP4,
 		Status:                entity.RecordingStatusRecording,
+		StoragePath:           storageKey,
 		StorageTier:           entity.RecordingStorageTierHot,
 		StorageClass:          s.defaultStorageClass(entity.RecordingStorageTierHot),
-		Downloadable:          strategy != entity.RecordingStrategyPerTrack,
+		Downloadable:          true,
 		ProcessingAttempts:    0,
 		MaxProcessingAttempts: s.maxAttempts,
 		Metadata:              map[string]any{},
 		StartedAt:             now,
 		CreatedAt:             now,
 	}
-	rec.Metadata["capture_spool_dir"] = s.capture.WorkDir(rec.ID)
 	if s.retention > 0 {
 		expiresAt := now.Add(s.retention)
 		rec.ExpiresAt = &expiresAt
 	}
 
-	if err := s.capture.Start(ctx, *rec, room); err != nil {
-		return nil, cerrors.Internal("failed to attach recording capture", err)
+	// (i) Persist the row FIRST so the egress_* webhook always has a correlatable
+	// row even if egress_ended races the egress_id backfill (spec §3 item 4).
+	auditMeta := map[string]any{
+		"call_id":  rec.CallID.String(),
+		"strategy": string(rec.Strategy),
+		"format":   string(rec.Format),
 	}
+	if err := s.createRecordingRow(ctx, workspaceID, userID, rec, auditMeta); err != nil {
+		return nil, err // typed AppError (409 on active-per-call unique violation)
+	}
+
+	// (ii) Start the egress job. On failure mark the row failed (no orphan
+	// 'recording' row) and surface 503.
+	egressID, err := s.egress.StartRoomCompositeFile(ctx, callID, storageKey)
+	if err != nil {
+		_ = s.recordings.MarkFailed(ctx, rec.ID, "failed to start egress: "+err.Error(), nil)
+		if appErr, ok := cerrors.AsAppError(err); ok {
+			return nil, appErr
+		}
+		return nil, cerrors.Unavailable("failed to start recording")
+	}
+
+	// (iii) Backfill the egress_id correlation key.
+	if err := s.recordings.SetEgressID(ctx, rec.ID, egressID); err != nil {
+		slog.ErrorContext(ctx, "failed to persist egress id", "recording_id", rec.ID, "egress_id", egressID, "error", err)
+	}
+	rec.EgressID = &egressID
+
+	if s.broadcaster != nil {
+		s.broadcaster.BroadcastRecordingStarted(ctx, call, rec)
+	}
+	slog.InfoContext(ctx, "recording started", "recording_id", rec.ID, "call_id", callID, "egress_id", egressID)
+	return rec, nil
+}
+
+func recordingStorageKey(callID, recordingID uuid.UUID) string {
+	return "recordings/" + callID.String() + "/" + recordingID.String() + ".mp4"
+}
+
+// createRecordingRow persists a new recording (+ audit) transactionally when a
+// tx manager is configured, propagating a typed AppError (e.g. 409 on the
+// active-per-call unique violation) so callers can surface it directly.
+func (s *Service) createRecordingRow(ctx context.Context, workspaceID, userID uuid.UUID, rec *entity.Recording, auditMeta map[string]any) error {
 	if s.tx != nil {
-		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
+		err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
 			if scope.Recordings() == nil {
 				return cerrors.Unavailable("recording transaction scope is not configured")
 			}
 			if err := scope.Recordings().Create(ctx, rec); err != nil {
 				return err
 			}
-			return s.createAuditTx(ctx, scope, workspaceID, userID, entity.AuditActionRecordingStarted, "recording", rec.ID.String(), map[string]any{
-				"call_id":   rec.CallID.String(),
-				"strategy":  string(rec.Strategy),
-				"format":    string(rec.Format),
-				"spool_dir": s.capture.WorkDir(rec.ID),
-			})
-		}); err != nil {
-			_ = s.capture.Stop(rec.ID)
-			return nil, cerrors.Internal("failed to start recording", err)
-		}
-	} else {
-		if err := s.recordings.Create(ctx, rec); err != nil {
-			slog.ErrorContext(ctx, "failed to create recording", "call_id", callID, "error", err)
-			_ = s.capture.Stop(rec.ID)
-			return nil, cerrors.Internal("failed to start recording", err)
-		}
-
-		s.logAudit(ctx, workspaceID, userID, entity.AuditActionRecordingStarted, "recording", rec.ID.String(), map[string]any{
-			"call_id":   rec.CallID.String(),
-			"strategy":  string(rec.Strategy),
-			"format":    string(rec.Format),
-			"spool_dir": s.capture.WorkDir(rec.ID),
+			return s.createAuditTx(ctx, scope, workspaceID, userID, entity.AuditActionRecordingStarted, "recording", rec.ID.String(), auditMeta)
 		})
+		if err != nil {
+			if appErr, ok := cerrors.AsAppError(err); ok {
+				return appErr
+			}
+			return cerrors.Internal("failed to start recording", err)
+		}
+		return nil
 	}
-
-	recID := rec.ID
-	callWS := call.WorkspaceID
-	reliability.SafeGo("recording_auto_stop", func() { s.autoStopOnRoomClose(callWS, recID, room) })
-
-	slog.InfoContext(ctx, "recording started", "recording_id", rec.ID, "call_id", callID)
-	return rec, nil
+	if err := s.recordings.Create(ctx, rec); err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok {
+			return appErr
+		}
+		slog.ErrorContext(ctx, "failed to create recording", "call_id", rec.CallID, "error", err)
+		return cerrors.Internal("failed to start recording", err)
+	}
+	s.logAudit(ctx, workspaceID, userID, entity.AuditActionRecordingStarted, "recording", rec.ID.String(), auditMeta)
+	return nil
 }
 
 // StopRecording stops an active recording and transitions it to processing.
@@ -271,8 +314,11 @@ func (s *Service) StopRecording(ctx context.Context, workspaceID, recordingID, u
 	if rec.WorkspaceID != workspaceID {
 		return cerrors.NotFound("recording not found")
 	}
+	// Idempotent: only a 'recording'-status row transitions. A row already
+	// processing/ready/failed is a no-op success — no second StopEgress, no
+	// regression, no duplicate broadcast.
 	if rec.Status != entity.RecordingStatusRecording {
-		return cerrors.Conflict("recording is not active")
+		return nil
 	}
 
 	participant, err := s.calls.GetParticipant(ctx, rec.CallID, userID)
@@ -285,34 +331,202 @@ func (s *Service) StopRecording(ctx context.Context, workspaceID, recordingID, u
 	if participant.Role != entity.CallRoleHost && participant.Role != entity.CallRoleCoHost {
 		return cerrors.Forbidden("only host or co-host can stop recording")
 	}
-	if s.capture != nil {
-		if err := s.capture.Stop(recordingID); err != nil {
-			return cerrors.Internal("failed to finalize capture", err)
+
+	if rec.EgressID != nil && *rec.EgressID != "" && s.egress != nil {
+		if err := s.egress.StopEgress(ctx, *rec.EgressID); err != nil {
+			return cerrors.Internal("failed to stop egress", err)
 		}
 	}
+
+	var stopped *entity.Recording
 	if s.tx != nil {
 		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
 			if scope.Recordings() == nil {
 				return cerrors.Unavailable("recording transaction scope is not configured")
 			}
-			if _, err := scope.Recordings().Stop(ctx, recordingID); err != nil {
+			r, err := scope.Recordings().Stop(ctx, recordingID)
+			if err != nil {
 				return err
 			}
+			stopped = r
 			return s.createAuditTx(ctx, scope, workspaceID, userID, entity.AuditActionRecordingStopped, "recording", recordingID.String(), nil)
 		}); err != nil {
+			// Stop() matches only status='recording'; a concurrent finalize that
+			// already advanced the row yields ErrNoRows → benign no-op.
+			if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+				return nil
+			}
 			slog.ErrorContext(ctx, "failed to stop recording transaction", "recording_id", recordingID, "error", err)
 			return cerrors.Internal("failed to stop recording", err)
 		}
 	} else {
-		if _, err := s.recordings.Stop(ctx, recordingID); err != nil {
+		r, err := s.recordings.Stop(ctx, recordingID)
+		if err != nil {
+			if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+				return nil
+			}
 			slog.ErrorContext(ctx, "failed to stop recording", "recording_id", recordingID, "error", err)
 			return cerrors.Internal("failed to stop recording", err)
 		}
-
+		stopped = r
 		s.logAudit(ctx, workspaceID, userID, entity.AuditActionRecordingStopped, "recording", recordingID.String(), nil)
+	}
+
+	if stopped != nil && s.broadcaster != nil {
+		if c, err := s.calls.GetByID(ctx, stopped.CallID); err == nil {
+			s.broadcaster.BroadcastRecordingUpdated(ctx, c, stopped)
+		}
 	}
 	slog.InfoContext(ctx, "recording stopped", "recording_id", recordingID)
 	return nil
+}
+
+// HandleEgressEvent finalizes a recording from a LiveKit egress webhook event
+// (ALK-701). Implements call.EgressWebhookSink. Correlation is two-tier
+// (GetByEgressID then GetActiveByCall + egress_id backfill) so a terminal event
+// that races the egress_id backfill still finalizes the row.
+func (s *Service) HandleEgressEvent(ctx context.Context, info call.EgressEventInfo) error {
+	rec := s.correlateEgress(ctx, info.EgressID, info.CallID)
+	if rec == nil {
+		if info.Phase == call.EgressEventEnded {
+			// Leave the webhook unprocessed so LiveKit redelivery can retry once
+			// the row exists (create-before-egress race net).
+			return cerrors.NotFound("no recording for egress event")
+		}
+		return nil
+	}
+	switch info.Phase {
+	case call.EgressEventStarted, call.EgressEventUpdated:
+		return nil // status touch only; no domain transition before the terminal event
+	case call.EgressEventEnded:
+		if info.Succeeded {
+			return s.finalizeRecordingReady(ctx, rec, info.FileSizeBytes, info.DurationSeconds)
+		}
+		return s.finalizeRecordingFailed(ctx, rec)
+	}
+	return nil
+}
+
+// StopActiveEgressForCall best-effort stops a call's in-flight egress on room
+// close (ALK-701). No-op when no active recording or its egress_id is unset.
+func (s *Service) StopActiveEgressForCall(ctx context.Context, callID uuid.UUID) error {
+	if s.egress == nil {
+		return nil
+	}
+	rec, err := s.recordings.GetActiveByCall(ctx, callID)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return nil
+		}
+		return err
+	}
+	if rec.EgressID == nil || *rec.EgressID == "" {
+		return nil // egress not started yet (create-before-egress race window)
+	}
+	return s.egress.StopEgress(ctx, *rec.EgressID)
+}
+
+func (s *Service) correlateEgress(ctx context.Context, egressID string, callID uuid.UUID) *entity.Recording {
+	if egressID != "" {
+		if rec, err := s.recordings.GetByEgressID(ctx, egressID); err == nil {
+			return rec
+		}
+	}
+	rec, err := s.recordings.GetActiveByCall(ctx, callID)
+	if err != nil {
+		return nil
+	}
+	if egressID != "" && (rec.EgressID == nil || *rec.EgressID == "") {
+		if err := s.recordings.SetEgressID(ctx, rec.ID, egressID); err == nil {
+			ev := egressID
+			rec.EgressID = &ev
+		}
+	}
+	return rec
+}
+
+func (s *Service) finalizeRecordingReady(ctx context.Context, rec *entity.Recording, fileSizeBytes int64, durationSeconds int) error {
+	if rec.Status == entity.RecordingStatusReady || rec.Status == entity.RecordingStatusFailed {
+		return nil // idempotent: terminal rows are not re-finalized
+	}
+	now := time.Now().UTC()
+	size := fileSizeBytes
+	dur := durationSeconds
+	tier := entity.RecordingStorageTierHot
+	storageClass := s.defaultStorageClass(tier)
+
+	rec.Format = entity.RecordingFormatMP4
+	rec.Status = entity.RecordingStatusReady
+	rec.FileSize = &size
+	rec.Duration = &dur
+	rec.StorageTier = tier
+	rec.StorageClass = storageClass
+	rec.Downloadable = true
+	rec.TierUpdatedAt = &now
+
+	artifacts := []entity.RecordingArtifact{{
+		ID:           id.New(),
+		RecordingID:  rec.ID,
+		WorkspaceID:  rec.WorkspaceID,
+		Kind:         entity.RecordingArtifactKindComposite,
+		Format:       "mp4",
+		MimeType:     "video/mp4",
+		StoragePath:  rec.StoragePath,
+		StorageTier:  tier,
+		StorageClass: storageClass,
+		FileSize:     size,
+		Duration:     &dur,
+		Downloadable: true,
+		CreatedAt:    now,
+	}}
+
+	finalize := func(ctx context.Context) error {
+		if s.tx != nil {
+			return s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
+				if scope.Recordings() == nil {
+					return cerrors.Unavailable("recording transaction scope is not configured")
+				}
+				if err := scope.Recordings().ReplaceArtifacts(ctx, rec.ID, artifacts); err != nil {
+					return err
+				}
+				return scope.Recordings().SetReady(ctx, rec)
+			})
+		}
+		if err := s.recordings.ReplaceArtifacts(ctx, rec.ID, artifacts); err != nil {
+			return err
+		}
+		return s.recordings.SetReady(ctx, rec)
+	}
+	if err := finalize(ctx); err != nil {
+		return cerrors.Internal("failed to finalize recording", err)
+	}
+	s.broadcastRecordingUpdated(ctx, rec)
+	slog.InfoContext(ctx, "recording ready", "recording_id", rec.ID, "call_id", rec.CallID)
+	return nil
+}
+
+func (s *Service) finalizeRecordingFailed(ctx context.Context, rec *entity.Recording) error {
+	if rec.Status == entity.RecordingStatusReady || rec.Status == entity.RecordingStatusFailed {
+		return nil
+	}
+	if err := s.recordings.MarkFailed(ctx, rec.ID, "livekit egress failed", nil); err != nil {
+		return cerrors.Internal("failed to mark recording failed", err)
+	}
+	rec.Status = entity.RecordingStatusFailed
+	s.broadcastRecordingUpdated(ctx, rec)
+	slog.WarnContext(ctx, "recording failed", "recording_id", rec.ID, "call_id", rec.CallID)
+	return nil
+}
+
+func (s *Service) broadcastRecordingUpdated(ctx context.Context, rec *entity.Recording) {
+	if s.broadcaster == nil {
+		return
+	}
+	c, err := s.calls.GetByID(ctx, rec.CallID)
+	if err != nil {
+		return
+	}
+	s.broadcaster.BroadcastRecordingUpdated(ctx, c, rec)
 }
 
 // GetRecording returns a recording by ID if the user can view it.
@@ -1038,38 +1252,6 @@ func (s *Service) handleProcessingFailure(ctx context.Context, rec entity.Record
 		slog.ErrorContext(ctx, "failed to mark recording processing failure", "recording_id", rec.ID, "error", err)
 	}
 	slog.ErrorContext(ctx, "recording processing failed", "recording_id", rec.ID, "attempts", attempts, "error", cause)
-}
-
-func (s *Service) autoStopOnRoomClose(workspaceID, recordingID uuid.UUID, room *sfu.Room) {
-	if s.capture == nil {
-		return
-	}
-	if room == nil {
-		return
-	}
-	<-room.Done()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	rec, err := s.recordings.GetByID(ctx, recordingID)
-	if err != nil || rec.Status != entity.RecordingStatusRecording {
-		return
-	}
-	if err := s.capture.Stop(recordingID); err != nil {
-		slog.WarnContext(ctx, "failed to auto-stop recording capture on room close", "recording_id", recordingID, "error", err)
-		return
-	}
-	if _, err := s.recordings.Stop(ctx, recordingID); err != nil {
-		slog.WarnContext(ctx, "failed to auto-transition recording after room close", "recording_id", recordingID, "error", err)
-		return
-	}
-	slog.InfoContext(ctx, "recording auto-stopped after room close", "recording_id", recordingID, "workspace_id", workspaceID)
-}
-
-func (s *Service) mediaRoom(callID uuid.UUID) (*sfu.Room, bool) {
-	if s.rooms == nil {
-		return nil, false
-	}
-	return s.rooms.GetRoom(callID.String())
 }
 
 func (s *Service) workerPolicy(maxAttempts int) reliability.Policy {

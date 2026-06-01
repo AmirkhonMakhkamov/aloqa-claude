@@ -133,6 +133,9 @@ type UnreadSummary struct {
 type RecordingRepository interface {
 	Create(ctx context.Context, rec *entity.Recording) error
 	GetByID(ctx context.Context, id uuid.UUID) (*entity.Recording, error)
+	GetByEgressID(ctx context.Context, egressID string) (*entity.Recording, error)
+	GetActiveByCall(ctx context.Context, callID uuid.UUID) (*entity.Recording, error)
+	SetEgressID(ctx context.Context, id uuid.UUID, egressID string) error
 	ListByCall(ctx context.Context, callID uuid.UUID) ([]entity.Recording, error)
 	ListByWorkspace(ctx context.Context, workspaceID uuid.UUID, p pagination.Params) ([]entity.Recording, error)
 	ListByStatus(ctx context.Context, status entity.RecordingStatus, p pagination.Params) ([]entity.Recording, error)

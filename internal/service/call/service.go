@@ -89,24 +89,38 @@ type CancelCallResult struct {
 
 // Service handles call lifecycle, participant management, and WebRTC signaling.
 type Service struct {
-	calls         repository.CallRepository
-	callMessages  repository.CallMessageRepository
-	breakoutRooms repository.BreakoutRoomRepository
-	channels      repository.ChannelRepository
-	members       repository.WorkspaceRepository
-	pubsub        EventPublisher
-	sfu           *sfu.SFU
-	media         MediaConfig
-	livekit       LiveKitSettings
-	livekitRooms  LiveKitRoomClient
-	guests        *guestaccess.Checker
-	collab        CollaborationAccessAuthorizer
-	control       MediaControlPlane
-	tx            txscope.Manager
+	calls            repository.CallRepository
+	callMessages     repository.CallMessageRepository
+	breakoutRooms    repository.BreakoutRoomRepository
+	channels         repository.ChannelRepository
+	members          repository.WorkspaceRepository
+	pubsub           EventPublisher
+	sfu              *sfu.SFU
+	media            MediaConfig
+	livekit          LiveKitSettings
+	livekitRooms     LiveKitRoomClient
+	guests           *guestaccess.Checker
+	collab           CollaborationAccessAuthorizer
+	control          MediaControlPlane
+	tx               txscope.Manager
+	egressSink       EgressWebhookSink // ALK-701: recording finalizer for egress_* webhooks
+	recordingEnabled bool              // ALK-701: egress configured → calls advertise settings.recording
 
 	// breakoutTimers holds in-memory auto-close timers keyed by callID
 	// (uuid.UUID -> *time.Timer). See breakout_timer.go.
 	breakoutTimers sync.Map
+}
+
+// SetEgressSink installs the recording finalizer invoked by the egress_* webhook
+// bridge (ALK-701). Implemented by the recording service.
+func (s *Service) SetEgressSink(sink EgressWebhookSink) {
+	s.egressSink = sink
+}
+
+// SetRecordingEnabled records whether egress recording is configured so new
+// calls advertise an honest settings.recording capability to the FE (ALK-701).
+func (s *Service) SetRecordingEnabled(enabled bool) {
+	s.recordingEnabled = enabled
 }
 
 type MediaConfig struct {
@@ -504,6 +518,9 @@ func (s *Service) StartCall(
 	if err := validateCallSettings(callType, settings); err != nil {
 		return nil, err
 	}
+	// Recording is only offerable when egress is configured server-side; advertise
+	// an honest capability so the FE control gate (settings.recording) is truthful (ALK-701).
+	settings.Recording = s.recordingEnabled
 	if err := s.requireWorkspaceMember(ctx, workspaceID, userID); err != nil {
 		return nil, err
 	}
@@ -1665,6 +1682,29 @@ func (s *Service) publishCallMessageEvent(ctx context.Context, evtType event.Typ
 	subject := fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID)
 	payload := callMessagePayloadFor(evtType, call, msg)
 	s.doPublish(ctx, evtType, subject, call.WorkspaceID, channelID, msg.SenderID, payload)
+}
+
+func (s *Service) publishRecordingEvent(ctx context.Context, evtType event.Type, call *entity.Call, rec *entity.Recording) {
+	channelID := uuid.Nil
+	if call.ChannelID != nil {
+		channelID = *call.ChannelID
+	}
+	subject := fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID)
+	s.doPublish(ctx, evtType, subject, call.WorkspaceID, channelID, rec.StartedBy, event.CallRecordingPayload{
+		CallID:    call.ID,
+		Recording: rec,
+	})
+}
+
+// BroadcastRecordingStarted / BroadcastRecordingUpdated implement the
+// recording.RecordingBroadcaster seam (ALK-701) so the recording service can
+// emit call.recording.* events through the call service's publisher.
+func (s *Service) BroadcastRecordingStarted(ctx context.Context, call *entity.Call, rec *entity.Recording) {
+	s.publishRecordingEvent(ctx, event.TypeCallRecordingStarted, call, rec)
+}
+
+func (s *Service) BroadcastRecordingUpdated(ctx context.Context, call *entity.Call, rec *entity.Recording) {
+	s.publishRecordingEvent(ctx, event.TypeCallRecordingUpdated, call, rec)
 }
 
 func (s *Service) enqueueCallEventTx(ctx context.Context, scope txscope.Scope, evtType event.Type, call *entity.Call, userID uuid.UUID) error {

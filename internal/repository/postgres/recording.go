@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"aloqa/internal/domain/entity"
@@ -16,6 +17,14 @@ import (
 	"aloqa/internal/pkg/pagination"
 	"aloqa/internal/platform/reliability"
 )
+
+// pgUniqueViolation is the Postgres SQLSTATE for a unique_violation.
+const pgUniqueViolation = "23505"
+
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation
+}
 
 // RecordingRepo implements repository.RecordingRepository using PostgreSQL.
 type RecordingRepo struct {
@@ -53,23 +62,41 @@ func (r *RecordingRepo) Create(ctx context.Context, rec *entity.Recording) error
 			id, call_id, workspace_id, started_by, strategy, format, status, duration, file_size,
 			storage_path, storage_tier, storage_class, integrity_sha256, downloadable, processing_attempts, max_processing_attempts,
 			last_error, metadata, legal_hold, started_at, stopped_at, ready_at, next_retry_at,
-			tier_updated_at, expires_at, created_at
+			tier_updated_at, expires_at, created_at, egress_id
 		)
 		VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8, $9,
 			$10, $11, $12, $13, $14, $15, $16,
 			$17, $18, $19, $20, $21, $22, $23,
-			$24, $25
+			$24, $25, $26, $27
 		)`
 
 	_, err = r.db.Exec(ctx, query,
 		rec.ID, rec.CallID, rec.WorkspaceID, rec.StartedBy, rec.Strategy, rec.Format, rec.Status, rec.Duration, rec.FileSize,
 		rec.StoragePath, rec.StorageTier, rec.StorageClass, rec.IntegritySHA256, rec.Downloadable, rec.ProcessingAttempts, rec.MaxProcessingAttempts,
 		rec.LastError, metadata, rec.LegalHold, rec.StartedAt, rec.StoppedAt, rec.ReadyAt, rec.NextRetryAt,
-		rec.TierUpdatedAt, rec.ExpiresAt, rec.CreatedAt,
+		rec.TierUpdatedAt, rec.ExpiresAt, rec.CreatedAt, rec.EgressID,
 	)
 	if err != nil {
+		// ux_recordings_active_per_call enforces one in-flight recording per call;
+		// a concurrent start trips this (ALK-701) → surface as a conflict.
+		if isUniqueViolation(err) {
+			return cerrors.Conflict("call is already being recorded")
+		}
 		return fmt.Errorf("postgres: create recording: %w", err)
+	}
+	return nil
+}
+
+// SetEgressID backfills the LiveKit Egress job id used to correlate egress_*
+// webhooks to the recording row (ALK-701).
+func (r *RecordingRepo) SetEgressID(ctx context.Context, id uuid.UUID, egressID string) error {
+	tag, err := r.db.Exec(ctx, `UPDATE recordings SET egress_id = $2 WHERE id = $1`, id, egressID)
+	if err != nil {
+		return fmt.Errorf("postgres: set recording egress id: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return cerrors.NotFound("recording not found")
 	}
 	return nil
 }
@@ -79,9 +106,37 @@ func (r *RecordingRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Reco
 		SELECT id, call_id, workspace_id, started_by, strategy, format, status, duration, file_size,
 			storage_path, storage_tier, storage_class, integrity_sha256, downloadable, processing_attempts, max_processing_attempts,
 			last_error, metadata, legal_hold, started_at, stopped_at, ready_at, next_retry_at,
-			tier_updated_at, expires_at, created_at
+			tier_updated_at, expires_at, created_at, egress_id
 		FROM recordings WHERE id = $1`
 	return r.queryRecording(ctx, query, id)
+}
+
+// GetByEgressID returns the recording whose LiveKit Egress job matches egressID.
+// Used by the egress_* webhook bridge to finalize the recording (ALK-701).
+func (r *RecordingRepo) GetByEgressID(ctx context.Context, egressID string) (*entity.Recording, error) {
+	query := `
+		SELECT id, call_id, workspace_id, started_by, strategy, format, status, duration, file_size,
+			storage_path, storage_tier, storage_class, integrity_sha256, downloadable, processing_attempts, max_processing_attempts,
+			last_error, metadata, legal_hold, started_at, stopped_at, ready_at, next_retry_at,
+			tier_updated_at, expires_at, created_at, egress_id
+		FROM recordings WHERE egress_id = $1`
+	return r.queryRecording(ctx, query, egressID)
+}
+
+// GetActiveByCall returns the single in-flight (recording|processing) recording for a call.
+// At most one exists because StartRecording rejects a concurrent recording with 409. This is the
+// webhook correlation fallback when an egress event races the egress_id backfill (ALK-701).
+func (r *RecordingRepo) GetActiveByCall(ctx context.Context, callID uuid.UUID) (*entity.Recording, error) {
+	query := `
+		SELECT id, call_id, workspace_id, started_by, strategy, format, status, duration, file_size,
+			storage_path, storage_tier, storage_class, integrity_sha256, downloadable, processing_attempts, max_processing_attempts,
+			last_error, metadata, legal_hold, started_at, stopped_at, ready_at, next_retry_at,
+			tier_updated_at, expires_at, created_at, egress_id
+		FROM recordings
+		WHERE call_id = $1 AND status IN ('recording', 'processing')
+		ORDER BY started_at DESC
+		LIMIT 1`
+	return r.queryRecording(ctx, query, callID)
 }
 
 func (r *RecordingRepo) ListByCall(ctx context.Context, callID uuid.UUID) ([]entity.Recording, error) {
@@ -89,7 +144,7 @@ func (r *RecordingRepo) ListByCall(ctx context.Context, callID uuid.UUID) ([]ent
 		SELECT id, call_id, workspace_id, started_by, strategy, format, status, duration, file_size,
 			storage_path, storage_tier, storage_class, integrity_sha256, downloadable, processing_attempts, max_processing_attempts,
 			last_error, metadata, legal_hold, started_at, stopped_at, ready_at, next_retry_at,
-			tier_updated_at, expires_at, created_at
+			tier_updated_at, expires_at, created_at, egress_id
 		FROM recordings WHERE call_id = $1 ORDER BY started_at`
 	return r.queryRecordings(ctx, query, callID)
 }
@@ -104,7 +159,7 @@ func (r *RecordingRepo) ListByWorkspace(ctx context.Context, workspaceID uuid.UU
 		SELECT id, call_id, workspace_id, started_by, strategy, format, status, duration, file_size,
 			storage_path, storage_tier, storage_class, integrity_sha256, downloadable, processing_attempts, max_processing_attempts,
 			last_error, metadata, legal_hold, started_at, stopped_at, ready_at, next_retry_at,
-			tier_updated_at, expires_at, created_at
+			tier_updated_at, expires_at, created_at, egress_id
 		FROM recordings WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`
 	return r.queryRecordings(ctx, query, workspaceID, limit, p.Offset)
 }
@@ -119,7 +174,7 @@ func (r *RecordingRepo) ListByStatus(ctx context.Context, status entity.Recordin
 		SELECT id, call_id, workspace_id, started_by, strategy, format, status, duration, file_size,
 			storage_path, storage_tier, storage_class, integrity_sha256, downloadable, processing_attempts, max_processing_attempts,
 			last_error, metadata, legal_hold, started_at, stopped_at, ready_at, next_retry_at,
-			tier_updated_at, expires_at, created_at
+			tier_updated_at, expires_at, created_at, egress_id
 		FROM recordings
 		WHERE status = $1
 		ORDER BY stopped_at NULLS FIRST, created_at
@@ -137,7 +192,7 @@ func (r *RecordingRepo) ListProcessable(ctx context.Context, now time.Time, p pa
 		SELECT id, call_id, workspace_id, started_by, strategy, format, status, duration, file_size,
 			storage_path, storage_tier, storage_class, integrity_sha256, downloadable, processing_attempts, max_processing_attempts,
 			last_error, metadata, legal_hold, started_at, stopped_at, ready_at, next_retry_at,
-			tier_updated_at, expires_at, created_at
+			tier_updated_at, expires_at, created_at, egress_id
 		FROM recordings
 		WHERE status IN ('processing', 'failed')
 		  AND (next_retry_at IS NULL OR next_retry_at <= $1)
@@ -157,7 +212,7 @@ func (r *RecordingRepo) ListExpired(ctx context.Context, now time.Time, p pagina
 		SELECT id, call_id, workspace_id, started_by, strategy, format, status, duration, file_size,
 			storage_path, storage_tier, storage_class, integrity_sha256, downloadable, processing_attempts, max_processing_attempts,
 			last_error, metadata, legal_hold, started_at, stopped_at, ready_at, next_retry_at,
-			tier_updated_at, expires_at, created_at
+			tier_updated_at, expires_at, created_at, egress_id
 		FROM recordings
 		WHERE expires_at IS NOT NULL
 		  AND expires_at <= $1
@@ -234,7 +289,7 @@ func (r *RecordingRepo) MarkProcessingAttempt(ctx context.Context, id uuid.UUID,
 		RETURNING id, call_id, workspace_id, started_by, strategy, format, status, duration, file_size,
 			storage_path, storage_tier, storage_class, integrity_sha256, downloadable, processing_attempts, max_processing_attempts,
 			last_error, metadata, legal_hold, started_at, stopped_at, ready_at, next_retry_at,
-			tier_updated_at, expires_at, created_at`,
+			tier_updated_at, expires_at, created_at, egress_id`,
 		id,
 		nextRetryAt.UTC(),
 	)
@@ -325,7 +380,7 @@ func (r *RecordingRepo) Stop(ctx context.Context, id uuid.UUID) (*entity.Recordi
 		RETURNING id, call_id, workspace_id, started_by, strategy, format, status, duration, file_size,
 			storage_path, storage_tier, storage_class, integrity_sha256, downloadable, processing_attempts, max_processing_attempts,
 			last_error, metadata, legal_hold, started_at, stopped_at, ready_at, next_retry_at,
-			tier_updated_at, expires_at, created_at`,
+			tier_updated_at, expires_at, created_at, egress_id`,
 		id,
 		time.Now().UTC(),
 	)
@@ -493,7 +548,7 @@ func scanRecording(row rowScanner) (*entity.Recording, error) {
 		&rec.ID, &rec.CallID, &rec.WorkspaceID, &rec.StartedBy, &rec.Strategy, &rec.Format, &rec.Status, &rec.Duration, &rec.FileSize,
 		&rec.StoragePath, &rec.StorageTier, &rec.StorageClass, &rec.IntegritySHA256, &rec.Downloadable, &rec.ProcessingAttempts, &rec.MaxProcessingAttempts,
 		&rec.LastError, &metadataJSON, &rec.LegalHold, &rec.StartedAt, &rec.StoppedAt, &rec.ReadyAt, &rec.NextRetryAt,
-		&rec.TierUpdatedAt, &rec.ExpiresAt, &rec.CreatedAt,
+		&rec.TierUpdatedAt, &rec.ExpiresAt, &rec.CreatedAt, &rec.EgressID,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

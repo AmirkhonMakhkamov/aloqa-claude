@@ -16,20 +16,48 @@ import (
 	"aloqa/internal/pkg/cerrors"
 	"aloqa/internal/pkg/pagination"
 	"aloqa/internal/platform/storage"
+	"aloqa/internal/service/call"
 )
 
-func TestStartRecordingSetsRetentionAndRequiresEnabledCall(t *testing.T) {
-	ctx := context.Background()
-	workspaceID := uuid.New()
-	callID := uuid.New()
-	hostID := uuid.New()
-	started := time.Now().UTC()
+type fakeEgressClient struct {
+	egressID   string
+	startErr   error
+	startCalls int
+	stopCalls  int
+	lastKey    string
+	lastCallID uuid.UUID
+}
 
-	recordings := &fakeRecordingRepo{
-		recordings: map[uuid.UUID]*entity.Recording{},
-		artifacts:  map[uuid.UUID][]entity.RecordingArtifact{},
+func (c *fakeEgressClient) StartRoomCompositeFile(_ context.Context, callID uuid.UUID, key string) (string, error) {
+	c.startCalls++
+	c.lastKey = key
+	c.lastCallID = callID
+	if c.startErr != nil {
+		return "", c.startErr
 	}
-	calls := &fakeCallRepo{
+	return c.egressID, nil
+}
+
+func (c *fakeEgressClient) StopEgress(_ context.Context, _ string) error {
+	c.stopCalls++
+	return nil
+}
+
+type fakeBroadcaster struct {
+	started int
+	updated []entity.RecordingStatus
+}
+
+func (b *fakeBroadcaster) BroadcastRecordingStarted(_ context.Context, _ *entity.Call, _ *entity.Recording) {
+	b.started++
+}
+
+func (b *fakeBroadcaster) BroadcastRecordingUpdated(_ context.Context, _ *entity.Call, rec *entity.Recording) {
+	b.updated = append(b.updated, rec.Status)
+}
+
+func activeCallRepo(callID, workspaceID, hostID uuid.UUID) *fakeCallRepo {
+	return &fakeCallRepo{
 		calls: map[uuid.UUID]*entity.Call{
 			callID: {
 				ID:          callID,
@@ -48,46 +76,259 @@ func TestStartRecordingSetsRetentionAndRequiresEnabledCall(t *testing.T) {
 			},
 		},
 	}
-	room := newTestRoom(t, callID.String())
-	capture, err := NewCaptureManager(t.TempDir())
-	if err != nil {
-		t.Fatalf("NewCaptureManager returned error: %v", err)
-	}
-	svc := NewService(
-		recordings,
-		calls,
-		nil,
-		&memoryStorage{},
-		fakeMediaRooms{rooms: map[string]*sfu.Room{callID.String(): room}},
-		capture,
-		Config{Retention: 24 * time.Hour},
-	)
+}
 
-	rec, err := svc.StartRecording(ctx, workspaceID, callID, hostID, entity.RecordingStrategyBoth)
+func TestStartRecordingCreatesRowThenEgress(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	started := time.Now().UTC()
+
+	recordings := &fakeRecordingRepo{recordings: map[uuid.UUID]*entity.Recording{}, artifacts: map[uuid.UUID][]entity.RecordingArtifact{}}
+	calls := activeCallRepo(callID, workspaceID, hostID)
+	egress := &fakeEgressClient{egressID: "EG-" + uuid.NewString()}
+	broadcaster := &fakeBroadcaster{}
+
+	svc := NewService(recordings, calls, nil, &memoryStorage{}, nil, nil, Config{Retention: 24 * time.Hour})
+	svc.SetEgressClient(egress)
+	svc.SetBroadcaster(broadcaster)
+
+	rec, err := svc.StartRecording(ctx, workspaceID, callID, hostID, "")
 	if err != nil {
 		t.Fatalf("StartRecording returned error: %v", err)
 	}
-	t.Cleanup(func() {
-		room.Close()
-		_ = capture.Stop(rec.ID)
-	})
 
-	if rec.ExpiresAt == nil || rec.ExpiresAt.Before(started.Add(23*time.Hour)) {
-		t.Fatalf("ExpiresAt = %v, want retention timestamp", rec.ExpiresAt)
-	}
 	if rec.Status != entity.RecordingStatusRecording {
 		t.Fatalf("Status = %s, want recording", rec.Status)
 	}
-	if rec.Strategy != entity.RecordingStrategyBoth {
-		t.Fatalf("Strategy = %s, want both", rec.Strategy)
+	if rec.Strategy != entity.RecordingStrategyComposite {
+		t.Fatalf("Strategy = %s, want composite", rec.Strategy)
 	}
-	if !capture.IsActive(rec.ID) {
-		t.Fatalf("capture session was not started")
+	wantKey := "recordings/" + callID.String() + "/" + rec.ID.String() + ".mp4"
+	if rec.StoragePath != wantKey {
+		t.Fatalf("StoragePath = %s, want %s", rec.StoragePath, wantKey)
+	}
+	if egress.startCalls != 1 || egress.lastKey != wantKey || egress.lastCallID != callID {
+		t.Fatalf("egress not started with deterministic key (calls=%d key=%s)", egress.startCalls, egress.lastKey)
+	}
+	if rec.EgressID == nil || *rec.EgressID != egress.egressID {
+		t.Fatalf("egress_id not backfilled on returned recording")
+	}
+	if stored := recordings.recordings[rec.ID]; stored.EgressID == nil || *stored.EgressID != egress.egressID {
+		t.Fatalf("egress_id not persisted")
+	}
+	if broadcaster.started != 1 {
+		t.Fatalf("started broadcasts = %d, want 1", broadcaster.started)
+	}
+	if rec.ExpiresAt == nil || rec.ExpiresAt.Before(started.Add(23*time.Hour)) {
+		t.Fatalf("ExpiresAt = %v, want retention timestamp", rec.ExpiresAt)
 	}
 
 	calls.calls[callID].Settings.Recording = false
-	if _, err := svc.StartRecording(ctx, workspaceID, callID, hostID, entity.RecordingStrategyBoth); !hasCode(err, cerrors.CodeForbidden) {
+	if _, err := svc.StartRecording(ctx, workspaceID, callID, hostID, ""); !hasCode(err, cerrors.CodeForbidden) {
 		t.Fatalf("StartRecording with disabled setting error = %v, want FORBIDDEN", err)
+	}
+}
+
+func TestStartRecordingUnavailableWhenEgressMissing(t *testing.T) {
+	ctx := context.Background()
+	workspaceID, callID, hostID := uuid.New(), uuid.New(), uuid.New()
+	recordings := &fakeRecordingRepo{recordings: map[uuid.UUID]*entity.Recording{}}
+	svc := NewService(recordings, activeCallRepo(callID, workspaceID, hostID), nil, &memoryStorage{}, nil, nil, Config{})
+	// No SetEgressClient → egress nil.
+	if _, err := svc.StartRecording(ctx, workspaceID, callID, hostID, ""); !hasCode(err, cerrors.CodeUnavailable) {
+		t.Fatalf("StartRecording without egress error = %v, want UNAVAILABLE", err)
+	}
+}
+
+func TestStartRecordingMarksRowFailedOnEgressError(t *testing.T) {
+	ctx := context.Background()
+	workspaceID, callID, hostID := uuid.New(), uuid.New(), uuid.New()
+	recordings := &fakeRecordingRepo{recordings: map[uuid.UUID]*entity.Recording{}}
+	egress := &fakeEgressClient{startErr: cerrors.Unavailable("egress down")}
+	svc := NewService(recordings, activeCallRepo(callID, workspaceID, hostID), nil, &memoryStorage{}, nil, nil, Config{})
+	svc.SetEgressClient(egress)
+
+	if _, err := svc.StartRecording(ctx, workspaceID, callID, hostID, ""); !hasCode(err, cerrors.CodeUnavailable) {
+		t.Fatalf("StartRecording egress-error = %v, want UNAVAILABLE", err)
+	}
+	// The pre-created row must be marked failed (no orphan 'recording').
+	var failed int
+	for _, rec := range recordings.recordings {
+		if rec.Status == entity.RecordingStatusFailed {
+			failed++
+		}
+		if rec.Status == entity.RecordingStatusRecording {
+			t.Fatalf("orphan recording row left in 'recording' after egress failure")
+		}
+	}
+	if failed != 1 {
+		t.Fatalf("failed rows = %d, want 1", failed)
+	}
+}
+
+func TestStartRecordingConflictOnUniqueViolation(t *testing.T) {
+	ctx := context.Background()
+	workspaceID, callID, hostID := uuid.New(), uuid.New(), uuid.New()
+	// createErr simulates the ux_recordings_active_per_call unique violation
+	// (race past the fast-path ListByCall check).
+	recordings := &fakeRecordingRepo{recordings: map[uuid.UUID]*entity.Recording{}, createErr: cerrors.Conflict("call is already being recorded")}
+	egress := &fakeEgressClient{egressID: "EG"}
+	svc := NewService(recordings, activeCallRepo(callID, workspaceID, hostID), nil, &memoryStorage{}, nil, nil, Config{})
+	svc.SetEgressClient(egress)
+
+	if _, err := svc.StartRecording(ctx, workspaceID, callID, hostID, ""); !hasCode(err, cerrors.CodeConflict) {
+		t.Fatalf("StartRecording concurrent = %v, want CONFLICT", err)
+	}
+	if egress.startCalls != 0 {
+		t.Fatalf("egress started despite create conflict (calls=%d)", egress.startCalls)
+	}
+}
+
+func TestStopRecordingIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	workspaceID, callID, hostID := uuid.New(), uuid.New(), uuid.New()
+	egressID := "EG-" + uuid.NewString()
+	recID := uuid.New()
+	recordings := &fakeRecordingRepo{recordings: map[uuid.UUID]*entity.Recording{
+		recID: {ID: recID, CallID: callID, WorkspaceID: workspaceID, StartedBy: hostID, Status: entity.RecordingStatusRecording, EgressID: &egressID},
+	}}
+	egress := &fakeEgressClient{egressID: egressID}
+	broadcaster := &fakeBroadcaster{}
+	svc := NewService(recordings, activeCallRepo(callID, workspaceID, hostID), nil, &memoryStorage{}, nil, nil, Config{})
+	svc.SetEgressClient(egress)
+	svc.SetBroadcaster(broadcaster)
+
+	if err := svc.StopRecording(ctx, workspaceID, recID, hostID); err != nil {
+		t.Fatalf("first StopRecording error: %v", err)
+	}
+	if recordings.recordings[recID].Status != entity.RecordingStatusProcessing {
+		t.Fatalf("status after stop = %s, want processing", recordings.recordings[recID].Status)
+	}
+	if egress.stopCalls != 1 {
+		t.Fatalf("StopEgress calls = %d, want 1", egress.stopCalls)
+	}
+	if len(broadcaster.updated) != 1 || broadcaster.updated[0] != entity.RecordingStatusProcessing {
+		t.Fatalf("updated broadcasts = %v, want [processing]", broadcaster.updated)
+	}
+
+	// Second stop on an already-processing row: no-op success, no 2nd StopEgress, no 2nd broadcast.
+	if err := svc.StopRecording(ctx, workspaceID, recID, hostID); err != nil {
+		t.Fatalf("repeated StopRecording error: %v, want nil (no-op)", err)
+	}
+	if egress.stopCalls != 1 {
+		t.Fatalf("StopEgress called again on repeated stop (calls=%d)", egress.stopCalls)
+	}
+	if len(broadcaster.updated) != 1 {
+		t.Fatalf("extra broadcast on repeated stop: %v", broadcaster.updated)
+	}
+}
+
+func TestHandleEgressEventReadyRegistersCompositeArtifact(t *testing.T) {
+	ctx := context.Background()
+	workspaceID, callID, hostID := uuid.New(), uuid.New(), uuid.New()
+	egressID := "EG-" + uuid.NewString()
+	recID := uuid.New()
+	key := "recordings/" + callID.String() + "/" + recID.String() + ".mp4"
+	recordings := &fakeRecordingRepo{
+		recordings: map[uuid.UUID]*entity.Recording{
+			recID: {ID: recID, CallID: callID, WorkspaceID: workspaceID, StartedBy: hostID, Status: entity.RecordingStatusProcessing, StoragePath: key, EgressID: &egressID},
+		},
+		artifacts: map[uuid.UUID][]entity.RecordingArtifact{},
+	}
+	broadcaster := &fakeBroadcaster{}
+	svc := NewService(recordings, activeCallRepo(callID, workspaceID, hostID), nil, &memoryStorage{}, nil, nil, Config{})
+	svc.SetBroadcaster(broadcaster)
+
+	err := svc.HandleEgressEvent(ctx, call.EgressEventInfo{
+		EgressID: egressID, CallID: callID, Phase: call.EgressEventEnded, Succeeded: true,
+		FileSizeBytes: 4096, DurationSeconds: 12,
+	})
+	if err != nil {
+		t.Fatalf("HandleEgressEvent error: %v", err)
+	}
+	rec := recordings.recordings[recID]
+	if rec.Status != entity.RecordingStatusReady {
+		t.Fatalf("status = %s, want ready", rec.Status)
+	}
+	arts := recordings.artifacts[recID]
+	if len(arts) != 1 {
+		t.Fatalf("artifacts = %d, want 1", len(arts))
+	}
+	if arts[0].Kind != entity.RecordingArtifactKindComposite || arts[0].StoragePath != key {
+		t.Fatalf("artifact kind/path = %s/%s, want composite_playback/%s", arts[0].Kind, arts[0].StoragePath, key)
+	}
+	if len(broadcaster.updated) != 1 || broadcaster.updated[0] != entity.RecordingStatusReady {
+		t.Fatalf("updated broadcasts = %v, want [ready]", broadcaster.updated)
+	}
+}
+
+func TestHandleEgressEventRaceFallbackByCall(t *testing.T) {
+	ctx := context.Background()
+	workspaceID, callID, hostID := uuid.New(), uuid.New(), uuid.New()
+	egressID := "EG-" + uuid.NewString()
+	recID := uuid.New()
+	key := "recordings/" + callID.String() + "/" + recID.String() + ".mp4"
+	// egress_ended races the egress_id backfill: row has NO egress_id yet.
+	recordings := &fakeRecordingRepo{
+		recordings: map[uuid.UUID]*entity.Recording{
+			recID: {ID: recID, CallID: callID, WorkspaceID: workspaceID, StartedBy: hostID, Status: entity.RecordingStatusRecording, StoragePath: key},
+		},
+		artifacts: map[uuid.UUID][]entity.RecordingArtifact{},
+	}
+	svc := NewService(recordings, activeCallRepo(callID, workspaceID, hostID), nil, &memoryStorage{}, nil, nil, Config{})
+	svc.SetBroadcaster(&fakeBroadcaster{})
+
+	if err := svc.HandleEgressEvent(ctx, call.EgressEventInfo{EgressID: egressID, CallID: callID, Phase: call.EgressEventEnded, Succeeded: true, FileSizeBytes: 10, DurationSeconds: 1}); err != nil {
+		t.Fatalf("HandleEgressEvent (race) error: %v", err)
+	}
+	rec := recordings.recordings[recID]
+	if rec.Status != entity.RecordingStatusReady {
+		t.Fatalf("status = %s, want ready (correlated via GetActiveByCall)", rec.Status)
+	}
+	if rec.EgressID == nil || *rec.EgressID != egressID {
+		t.Fatalf("egress_id not backfilled during race fallback")
+	}
+}
+
+func TestHandleEgressEventFailed(t *testing.T) {
+	ctx := context.Background()
+	workspaceID, callID, hostID := uuid.New(), uuid.New(), uuid.New()
+	egressID := "EG-" + uuid.NewString()
+	recID := uuid.New()
+	recordings := &fakeRecordingRepo{recordings: map[uuid.UUID]*entity.Recording{
+		recID: {ID: recID, CallID: callID, WorkspaceID: workspaceID, StartedBy: hostID, Status: entity.RecordingStatusProcessing, EgressID: &egressID},
+	}}
+	broadcaster := &fakeBroadcaster{}
+	svc := NewService(recordings, activeCallRepo(callID, workspaceID, hostID), nil, &memoryStorage{}, nil, nil, Config{})
+	svc.SetBroadcaster(broadcaster)
+
+	if err := svc.HandleEgressEvent(ctx, call.EgressEventInfo{EgressID: egressID, CallID: callID, Phase: call.EgressEventEnded, Succeeded: false}); err != nil {
+		t.Fatalf("HandleEgressEvent (failed) error: %v", err)
+	}
+	if recordings.recordings[recID].Status != entity.RecordingStatusFailed {
+		t.Fatalf("status = %s, want failed", recordings.recordings[recID].Status)
+	}
+	if len(broadcaster.updated) != 1 || broadcaster.updated[0] != entity.RecordingStatusFailed {
+		t.Fatalf("updated broadcasts = %v, want [failed]", broadcaster.updated)
+	}
+}
+
+func TestHandleEgressEventUncorrelatedTerminalIsRetryable(t *testing.T) {
+	ctx := context.Background()
+	workspaceID, callID, hostID := uuid.New(), uuid.New(), uuid.New()
+	recordings := &fakeRecordingRepo{recordings: map[uuid.UUID]*entity.Recording{}}
+	svc := NewService(recordings, activeCallRepo(callID, workspaceID, hostID), nil, &memoryStorage{}, nil, nil, Config{})
+
+	// No recording exists for this egress/call: a terminal event must error so
+	// the webhook stays unprocessed and LiveKit can redeliver.
+	if err := svc.HandleEgressEvent(ctx, call.EgressEventInfo{EgressID: "EG-unknown", CallID: callID, Phase: call.EgressEventEnded, Succeeded: true}); err == nil {
+		t.Fatalf("HandleEgressEvent uncorrelated terminal error = nil, want non-nil")
+	}
+	// A non-terminal phase with no correlation is benign (no error).
+	if err := svc.HandleEgressEvent(ctx, call.EgressEventInfo{EgressID: "EG-unknown", CallID: callID, Phase: call.EgressEventStarted}); err != nil {
+		t.Fatalf("HandleEgressEvent uncorrelated started error = %v, want nil", err)
 	}
 }
 
@@ -458,13 +699,46 @@ func newTestRoom(t *testing.T, roomID string) *sfu.Room {
 type fakeRecordingRepo struct {
 	recordings map[uuid.UUID]*entity.Recording
 	artifacts  map[uuid.UUID][]entity.RecordingArtifact
+	createErr  error // injected to simulate the active-per-call unique violation
 }
 
 func (r *fakeRecordingRepo) Create(_ context.Context, rec *entity.Recording) error {
+	if r.createErr != nil {
+		return r.createErr
+	}
 	if r.recordings == nil {
 		r.recordings = map[uuid.UUID]*entity.Recording{}
 	}
 	r.recordings[rec.ID] = cloneRecording(rec)
+	return nil
+}
+
+func (r *fakeRecordingRepo) GetByEgressID(_ context.Context, egressID string) (*entity.Recording, error) {
+	for _, rec := range r.recordings {
+		if rec.EgressID != nil && *rec.EgressID == egressID {
+			return cloneRecording(rec), nil
+		}
+	}
+	return nil, cerrors.NotFound("recording not found")
+}
+
+func (r *fakeRecordingRepo) GetActiveByCall(_ context.Context, callID uuid.UUID) (*entity.Recording, error) {
+	for _, rec := range r.recordings {
+		if rec.CallID == callID &&
+			(rec.Status == entity.RecordingStatusRecording || rec.Status == entity.RecordingStatusProcessing) {
+			return cloneRecording(rec), nil
+		}
+	}
+	return nil, cerrors.NotFound("recording not found")
+}
+
+func (r *fakeRecordingRepo) SetEgressID(_ context.Context, id uuid.UUID, egressID string) error {
+	rec, ok := r.recordings[id]
+	if !ok {
+		return cerrors.NotFound("recording not found")
+	}
+	ev := egressID
+	rec.EgressID = &ev
 	return nil
 }
 
@@ -731,6 +1005,10 @@ func (r *fakeCallRepo) UpdateParticipantMedia(context.Context, uuid.UUID, bool, 
 }
 
 func (r *fakeCallRepo) RemoveParticipant(context.Context, uuid.UUID, uuid.UUID) error { return nil }
+
+func (r *fakeCallRepo) TransferHost(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error) {
+	return true, nil
+}
 
 type fakeCallAccessAuthorizer struct{}
 

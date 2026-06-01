@@ -51,6 +51,8 @@ const (
 	TypeCallHandRaised         Type = "call.participant.hand_raised"
 	TypeCallHandLowered        Type = "call.participant.hand_lowered"
 	TypeCallReaction           Type = "call.reaction.added"
+	TypeCallRecordingStarted   Type = "call.recording.started"
+	TypeCallRecordingUpdated   Type = "call.recording.updated"
 
 	// Waiting room events.
 	TypeWaitingRoomJoined   Type = "waiting_room.joined"
@@ -301,6 +303,14 @@ type CallReactionPayload struct {
 	CallID uuid.UUID `json:"call_id"`
 	UserID uuid.UUID `json:"user_id"`
 	Emoji  string    `json:"emoji"`
+}
+
+// CallRecordingPayload carries the full recording row (incl. status) for the
+// call.recording.started / call.recording.updated events (ALK-701). Matches the
+// FE CallRecordingPayloadSchema.
+type CallRecordingPayload struct {
+	CallID    uuid.UUID         `json:"call_id"`
+	Recording *entity.Recording `json:"recording"`
 }
 
 type BreakoutRoomPayload struct {

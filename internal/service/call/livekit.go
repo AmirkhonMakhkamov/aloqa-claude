@@ -613,6 +613,21 @@ func (s *Service) handleLiveKitTrackChanged(ctx context.Context, callID uuid.UUI
 		}
 		return cerrors.Internal("failed to load participant for livekit track event", err)
 	}
+	// Clear a stale host-featured share when its owner's screen track goes away.
+	// Runs before the no-change early-return so a duplicate/late unpublish still
+	// clears it. Best-effort: a failed clear logs and does not fail the webhook. (ALK-697)
+	if !screenSharing {
+		if c, cerr := s.calls.GetByID(ctx, callID); cerr == nil &&
+			c.FeaturedShareUserID != nil && *c.FeaturedShareUserID == userID {
+			if clearErr := s.calls.SetFeaturedShareUserID(ctx, callID, nil); clearErr != nil {
+				slog.ErrorContext(ctx, "failed to clear featured share on track unpublish", "call_id", callID, "error", clearErr)
+			} else {
+				c.FeaturedShareUserID = nil
+				s.publishShareEvent(ctx, event.TypeCallFeaturedShareUpdated, c, userID,
+					event.FeaturedSharePayload{CallID: callID, FeaturedShareUserID: nil})
+			}
+		}
+	}
 	if participant.ScreenSharing == screenSharing {
 		return nil
 	}

@@ -51,6 +51,10 @@ const (
 	TypeCallHandRaised         Type = "call.participant.hand_raised"
 	TypeCallHandLowered        Type = "call.participant.hand_lowered"
 	TypeCallReaction           Type = "call.reaction.added"
+	// Screen-share permission control (ALK-697).
+	TypeCallShareRequestCreated  Type = "call.share_request.created"
+	TypeCallShareRequestResolved Type = "call.share_request.resolved"
+	TypeCallFeaturedShareUpdated Type = "call.featured_share.updated"
 
 	// Waiting room events.
 	TypeWaitingRoomJoined   Type = "waiting_room.joined"
@@ -112,7 +116,8 @@ type Definition struct {
 func DefinitionForType(t Type) Definition {
 	switch t {
 	case TypeTypingStarted, TypeSignalOffer, TypeSignalAnswer, TypeSignalCandidate,
-		TypeCallHandRaised, TypeCallHandLowered, TypeCallReaction:
+		TypeCallHandRaised, TypeCallHandLowered, TypeCallReaction,
+		TypeCallShareRequestCreated, TypeCallShareRequestResolved, TypeCallFeaturedShareUpdated:
 		return Definition{
 			Version:          CurrentVersion,
 			DeliverySemantic: DeliveryEphemeral,
@@ -301,6 +306,28 @@ type CallReactionPayload struct {
 	CallID uuid.UUID `json:"call_id"`
 	UserID uuid.UUID `json:"user_id"`
 	Emoji  string    `json:"emoji"`
+}
+
+// ShareRequestPayload announces that a participant requested permission to
+// screen-share. (ALK-697)
+type ShareRequestPayload struct {
+	CallID          uuid.UUID `json:"call_id"`
+	RequesterUserID uuid.UUID `json:"requester_user_id"`
+}
+
+// ShareRequestResolvedPayload announces that a host approved or denied a
+// screen-share request. (ALK-697)
+type ShareRequestResolvedPayload struct {
+	CallID          uuid.UUID `json:"call_id"`
+	RequesterUserID uuid.UUID `json:"requester_user_id"`
+	Approved        bool      `json:"approved"`
+}
+
+// FeaturedSharePayload announces the host's featured-share pick for everyone;
+// a nil FeaturedShareUserID clears the featured share. (ALK-697)
+type FeaturedSharePayload struct {
+	CallID              uuid.UUID  `json:"call_id"`
+	FeaturedShareUserID *uuid.UUID `json:"featured_share_user_id"`
 }
 
 type BreakoutRoomPayload struct {

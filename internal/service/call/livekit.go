@@ -26,6 +26,24 @@ type LiveKitSettings struct {
 
 const liveKitWebhookClaimLease = 2 * time.Minute
 
+// screenShareSources returns the publishable track sources for a participant.
+// Hosts/co-hosts and granted participants may publish screen + audio; everyone
+// else who can publish is limited to camera + microphone. Setting CanPublishSources
+// supersedes CanPublish, so the SDK cannot publish a screen track unless listed.
+func screenShareSources(canShare bool) []livekitpb.TrackSource {
+	base := []livekitpb.TrackSource{livekitpb.TrackSource_CAMERA, livekitpb.TrackSource_MICROPHONE}
+	if canShare {
+		return append(base, livekitpb.TrackSource_SCREEN_SHARE, livekitpb.TrackSource_SCREEN_SHARE_AUDIO)
+	}
+	return base
+}
+
+// canShareScreen reports whether a participant may publish a screen-share track:
+// hosts/co-hosts always may; everyone else needs an explicit per-participant grant.
+func canShareScreen(p entity.CallParticipant) bool {
+	return p.Role == entity.CallRoleHost || p.Role == entity.CallRoleCoHost || p.CanScreenShare
+}
+
 // LiveKitJoinInfo is appended to the StartCall / JoinCall response so the FE
 // can connect to the LiveKit room without a second round-trip.
 type LiveKitJoinInfo struct {
@@ -84,7 +102,7 @@ func (s *Service) IssueLiveKitJoinInfo(ctx context.Context, call *entity.Call, u
 	}
 
 	canPublish := participant.Role != entity.CallRoleViewer
-	return s.mintLiveKitToken(call.ID.String(), userID, displayName, canPublish)
+	return s.mintLiveKitToken(call.ID.String(), userID, displayName, canPublish, canShareScreen(*participant))
 }
 
 // IssueLiveKitBreakoutJoinInfo signs an access token granting the user
@@ -113,13 +131,15 @@ func (s *Service) IssueLiveKitBreakoutJoinInfo(ctx context.Context, call *entity
 
 	canPublish := participant.Role != entity.CallRoleViewer
 	roomName := breakoutLiveKitRoomName(call.ID, breakoutRoomID)
-	return s.mintLiveKitToken(roomName, userID, "", canPublish)
+	return s.mintLiveKitToken(roomName, userID, "", canPublish, canShareScreen(*participant))
 }
 
 // mintLiveKitToken signs a LiveKit access token for the given room and user.
 // Shared by the main-room and breakout-room join flows so the grant/signing
-// logic stays in one place.
-func (s *Service) mintLiveKitToken(roomName string, userID uuid.UUID, displayName string, canPublish bool) (*LiveKitJoinInfo, error) {
+// logic stays in one place. When canPublish is true the publishable track
+// sources are gated by canShareScreen — non-granted, non-host participants get
+// camera + microphone only, so the SDK cannot publish a screen track at all.
+func (s *Service) mintLiveKitToken(roomName string, userID uuid.UUID, displayName string, canPublish, canShare bool) (*LiveKitJoinInfo, error) {
 	canPublishFlag := canPublish
 	canSubscribe := true
 	canPublishData := true
@@ -129,6 +149,11 @@ func (s *Service) mintLiveKitToken(roomName string, userID uuid.UUID, displayNam
 		CanPublish:     &canPublishFlag,
 		CanSubscribe:   &canSubscribe,
 		CanPublishData: &canPublishData,
+	}
+	if canPublish {
+		// Setting CanPublishSources supersedes CanPublish; only sharers get
+		// the screen + screen-audio sources (ALK-697).
+		grant.SetCanPublishSources(screenShareSources(canShare))
 	}
 
 	name := displayName

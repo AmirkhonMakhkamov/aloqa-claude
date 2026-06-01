@@ -2170,6 +2170,12 @@ type removedLiveKitParticipant struct {
 	userID uuid.UUID
 }
 
+type updatedLiveKitParticipant struct {
+	room     string
+	identity string
+	perm     *livekitpb.ParticipantPermission
+}
+
 type fakeLiveKitRoomClient struct {
 	ensureCalls           int
 	ensureErr             error
@@ -2179,6 +2185,8 @@ type fakeLiveKitRoomClient struct {
 	participantsByCall    map[uuid.UUID][]*livekitpb.ParticipantInfo
 	listParticipantsErr   error
 	listParticipantsCalls int
+	updatedParticipants   []updatedLiveKitParticipant
+	updateParticipantErr  error
 }
 
 func (c *fakeLiveKitRoomClient) EnsureRoom(_ context.Context, args LiveKitEnsureRoomArgs) error {
@@ -2215,6 +2223,14 @@ func (c *fakeLiveKitRoomClient) ListParticipants(_ context.Context, callID uuid.
 		return nil, c.listParticipantsErr
 	}
 	return c.participantsByCall[callID], nil
+}
+
+func (c *fakeLiveKitRoomClient) UpdateParticipant(_ context.Context, room, identity string, perm *livekitpb.ParticipantPermission) error {
+	if c.updateParticipantErr != nil {
+		return c.updateParticipantErr
+	}
+	c.updatedParticipants = append(c.updatedParticipants, updatedLiveKitParticipant{room: room, identity: identity, perm: perm})
+	return nil
 }
 
 type fakeBreakoutRepo struct{}

@@ -28,6 +28,9 @@ type LiveKitRoomClient interface {
 	DeleteRoomByName(ctx context.Context, name string) error
 	RemoveParticipant(ctx context.Context, callID, userID uuid.UUID) error
 	ListParticipants(ctx context.Context, callID uuid.UUID) ([]*livekitpb.ParticipantInfo, error)
+	// UpdateParticipant replaces a connected participant's LiveKit permission so
+	// a grant/revoke applies at the media plane with no rejoin. (ALK-697)
+	UpdateParticipant(ctx context.Context, room, identity string, perm *livekitpb.ParticipantPermission) error
 }
 
 type LiveKitEnsureRoomArgs struct {
@@ -155,6 +158,18 @@ func (c *liveKitRoomServiceClient) ListParticipants(ctx context.Context, callID 
 		return nil, mapTwirpErrorToAppError(err, "failed to list livekit participants")
 	}
 	return resp.GetParticipants(), nil
+}
+
+func (c *liveKitRoomServiceClient) UpdateParticipant(ctx context.Context, room, identity string, perm *livekitpb.ParticipantPermission) error {
+	_, err := c.client.UpdateParticipant(ctx, &livekitpb.UpdateParticipantRequest{
+		Room:       room,
+		Identity:   identity,
+		Permission: perm,
+	})
+	if err != nil {
+		return mapTwirpErrorToAppError(err, "failed to update livekit participant")
+	}
+	return nil
 }
 
 func isTwirpCode(err error, code twirp.ErrorCode) bool {

@@ -537,6 +537,133 @@ func (h *CallHandler) TransferHost(w http.ResponseWriter, r *http.Request) {
 	writeNoContent(w)
 }
 
+// --- Screen-share controls (ALK-697) ---
+
+// RequestScreenShare lets a connected non-viewer ask the host for permission.
+// POST /calls/{callID}/share-requests
+func (h *CallHandler) RequestScreenShare(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	if err := h.svc.RequestScreenShare(r.Context(), workspaceID, callID, userID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
+type resolveShareRequest struct {
+	Approved *bool `json:"approved"`
+}
+
+// ResolveShareRequest lets a host approve or deny a screen-share request.
+// POST /calls/{callID}/share-requests/{requesterUserID}/resolve
+func (h *CallHandler) ResolveShareRequest(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	requesterID, err := id.Parse(chi.URLParam(r, "requesterUserID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	var req resolveShareRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if req.Approved == nil {
+		writeErr(w, cerrors.InvalidInput("approved is required"))
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	if err := h.svc.ResolveShareRequest(r.Context(), workspaceID, callID, userID, requesterID, *req.Approved); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
+// RevokeScreenShare lets a host revoke a participant's screen-share grant.
+// POST /calls/{callID}/participants/{userID}/revoke-screen-share
+func (h *CallHandler) RevokeScreenShare(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	targetID, err := id.Parse(chi.URLParam(r, "userID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	if err := h.svc.RevokeScreenShare(r.Context(), workspaceID, callID, userID, targetID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
+type setFeaturedShareRequest struct {
+	UserID *string `json:"user_id"`
+}
+
+// SetFeaturedShare lets a host feature one participant's screen-share for
+// everyone (a null user_id clears the featured share).
+// PUT /calls/{callID}/featured-share
+func (h *CallHandler) SetFeaturedShare(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	var req setFeaturedShareRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	var target *uuid.UUID
+	if req.UserID != nil {
+		parsed, perr := id.Parse(*req.UserID)
+		if perr != nil {
+			writeErr(w, perr)
+			return
+		}
+		target = &parsed
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	if err := h.svc.SetFeaturedShare(r.Context(), workspaceID, callID, userID, target); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
 func (h *CallHandler) TurnCredentials(w http.ResponseWriter, r *http.Request) {
 	callID, err := id.Parse(chi.URLParam(r, "callID"))
 	if err != nil {

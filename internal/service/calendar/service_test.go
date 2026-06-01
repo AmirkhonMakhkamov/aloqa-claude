@@ -2012,6 +2012,9 @@ func (r *txCallRepo) UpdateParticipantStatus(context.Context, uuid.UUID, entity.
 	return nil
 }
 
+func (r *txCallRepo) TransferHost(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error) {
+	return false, nil
+}
 func (r *txCallRepo) UpdateParticipantRole(context.Context, uuid.UUID, entity.CallRole) error {
 	return nil
 }
@@ -2019,11 +2022,11 @@ func (r *txCallRepo) UpdateParticipantRole(context.Context, uuid.UUID, entity.Ca
 func (r *txCallRepo) UpdateParticipantMedia(context.Context, uuid.UUID, bool, bool, bool) error {
 	return nil
 }
-func (r *txCallRepo) RemoveParticipant(context.Context, uuid.UUID, uuid.UUID) error { return nil }
-
-func (r *txCallRepo) TransferHost(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error) {
-	return true, nil
+func (r *txCallRepo) SetCanScreenShare(context.Context, uuid.UUID, bool) error { return nil }
+func (r *txCallRepo) SetFeaturedShareUserID(context.Context, uuid.UUID, *uuid.UUID) error {
+	return nil
 }
+func (r *txCallRepo) RemoveParticipant(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 
 type fakeCalendarTxScope struct {
 	calendars repository.CalendarRepository

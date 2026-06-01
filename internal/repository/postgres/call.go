@@ -146,8 +146,8 @@ func (r *CallRepo) Create(ctx context.Context, call *entity.Call) error {
 	}
 
 	query := `
-		INSERT INTO calls (id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, end_reason, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`
+		INSERT INTO calls (id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, end_reason, featured_share_user_id, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`
 
 	_, err = r.db.Exec(ctx, query,
 		call.ID,
@@ -162,6 +162,7 @@ func (r *CallRepo) Create(ctx context.Context, call *entity.Call) error {
 		call.StartedAt,
 		call.EndedAt,
 		nullableCallEndReason(call.EndReason),
+		call.FeaturedShareUserID,
 		call.CreatedAt,
 	)
 	if err != nil {
@@ -173,7 +174,7 @@ func (r *CallRepo) Create(ctx context.Context, call *entity.Call) error {
 
 func (r *CallRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Call, error) {
 	query := `
-		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), created_at
+		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, created_at
 		FROM calls
 		WHERE id = $1`
 
@@ -193,6 +194,7 @@ func (r *CallRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Call, err
 		&call.StartedAt,
 		&call.EndedAt,
 		&call.EndReason,
+		&call.FeaturedShareUserID,
 		&call.CreatedAt,
 	)
 	if err != nil {
@@ -211,7 +213,7 @@ func (r *CallRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Call, err
 
 func (r *CallRepo) ListActiveByWorkspace(ctx context.Context, workspaceID uuid.UUID) ([]entity.Call, error) {
 	query := `
-		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), created_at
+		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, created_at
 		FROM calls
 		WHERE workspace_id = $1 AND status != 'ended'
 		ORDER BY created_at DESC`
@@ -240,6 +242,7 @@ func (r *CallRepo) ListActiveByWorkspace(ctx context.Context, workspaceID uuid.U
 			&call.StartedAt,
 			&call.EndedAt,
 			&call.EndReason,
+			&call.FeaturedShareUserID,
 			&call.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("postgres: list active calls scan: %w", err)
@@ -270,7 +273,7 @@ func (r *CallRepo) ListStaleOpen(ctx context.Context, before time.Time, limit in
 	}
 
 	query := `
-		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), created_at
+		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, created_at
 		FROM calls
 		WHERE status IN ('ringing', 'active')
 		  AND COALESCE(started_at, created_at) < $1
@@ -301,6 +304,7 @@ func (r *CallRepo) ListStaleOpen(ctx context.Context, before time.Time, limit in
 			&call.StartedAt,
 			&call.EndedAt,
 			&call.EndReason,
+			&call.FeaturedShareUserID,
 			&call.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("postgres: list stale open calls scan: %w", err)
@@ -535,7 +539,7 @@ func (r *CallRepo) ListRecentByWorkspace(ctx context.Context, workspaceID uuid.U
 	}
 
 	query := `
-		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), created_at
+		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, created_at
 		FROM calls
 		WHERE workspace_id = $1`
 	args := []any{workspaceID}
@@ -572,6 +576,7 @@ func (r *CallRepo) ListRecentByWorkspace(ctx context.Context, workspaceID uuid.U
 			&call.StartedAt,
 			&call.EndedAt,
 			&call.EndReason,
+			&call.FeaturedShareUserID,
 			&call.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("postgres: list recent calls scan: %w", err)
@@ -703,8 +708,8 @@ func (r *CallRepo) ensureCallParticipantExists(ctx context.Context, id uuid.UUID
 
 func (r *CallRepo) AddParticipant(ctx context.Context, p *entity.CallParticipant) error {
 	query := `
-		INSERT INTO call_participants (id, call_id, user_id, role, status, audio_muted, video_muted, screen_sharing, joined_at, left_at, left_reason)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
+		INSERT INTO call_participants (id, call_id, user_id, role, status, audio_muted, video_muted, screen_sharing, can_screen_share, joined_at, left_at, left_reason)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`
 
 	_, err := r.db.Exec(ctx, query,
 		p.ID,
@@ -715,6 +720,7 @@ func (r *CallRepo) AddParticipant(ctx context.Context, p *entity.CallParticipant
 		p.AudioMuted,
 		p.VideoMuted,
 		p.ScreenSharing,
+		p.CanScreenShare,
 		p.JoinedAt,
 		p.LeftAt,
 		nullableParticipantLeftReason(p.LeftReason),
@@ -735,16 +741,16 @@ func (r *CallRepo) AddParticipantIfCapacity(ctx context.Context, p *entity.CallP
 	// count within the same statement, eliminating the TOCTOU race between
 	// checking capacity and inserting.
 	query := `
-		INSERT INTO call_participants (id, call_id, user_id, role, status, audio_muted, video_muted, screen_sharing, joined_at, left_at, left_reason)
-		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+		INSERT INTO call_participants (id, call_id, user_id, role, status, audio_muted, video_muted, screen_sharing, can_screen_share, joined_at, left_at, left_reason)
+		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 		WHERE (
 			SELECT COUNT(*) FROM call_participants
 			WHERE call_id = $2 AND status IN ('connected', 'joining')
-		) < $12`
+		) < $13`
 
 	tag, err := r.db.Exec(ctx, query,
 		p.ID, p.CallID, p.UserID, p.Role, p.Status,
-		p.AudioMuted, p.VideoMuted, p.ScreenSharing,
+		p.AudioMuted, p.VideoMuted, p.ScreenSharing, p.CanScreenShare,
 		p.JoinedAt, p.LeftAt, nullableParticipantLeftReason(p.LeftReason), maxParticipants,
 	)
 	if err != nil {
@@ -762,7 +768,7 @@ func (r *CallRepo) AddParticipantIfCapacity(ctx context.Context, p *entity.CallP
 
 func (r *CallRepo) GetParticipant(ctx context.Context, callID, userID uuid.UUID) (*entity.CallParticipant, error) {
 	query := `
-		SELECT id, call_id, user_id, breakout_room_id, role, status, audio_muted, video_muted, screen_sharing, joined_at, left_at, COALESCE(left_reason, '')
+		SELECT id, call_id, user_id, breakout_room_id, role, status, audio_muted, video_muted, screen_sharing, can_screen_share, joined_at, left_at, COALESCE(left_reason, '')
 		FROM call_participants
 		WHERE call_id = $1 AND user_id = $2`
 
@@ -777,6 +783,7 @@ func (r *CallRepo) GetParticipant(ctx context.Context, callID, userID uuid.UUID)
 		&p.AudioMuted,
 		&p.VideoMuted,
 		&p.ScreenSharing,
+		&p.CanScreenShare,
 		&p.JoinedAt,
 		&p.LeftAt,
 		&p.LeftReason,
@@ -793,7 +800,7 @@ func (r *CallRepo) GetParticipant(ctx context.Context, callID, userID uuid.UUID)
 
 func (r *CallRepo) ListParticipants(ctx context.Context, callID uuid.UUID) ([]entity.CallParticipant, error) {
 	query := `
-		SELECT id, call_id, user_id, breakout_room_id, role, status, audio_muted, video_muted, screen_sharing, joined_at, left_at, COALESCE(left_reason, '')
+		SELECT id, call_id, user_id, breakout_room_id, role, status, audio_muted, video_muted, screen_sharing, can_screen_share, joined_at, left_at, COALESCE(left_reason, '')
 		FROM call_participants
 		WHERE call_id = $1
 		ORDER BY joined_at`
@@ -817,6 +824,7 @@ func (r *CallRepo) ListParticipants(ctx context.Context, callID uuid.UUID) ([]en
 			&p.AudioMuted,
 			&p.VideoMuted,
 			&p.ScreenSharing,
+			&p.CanScreenShare,
 			&p.JoinedAt,
 			&p.LeftAt,
 			&p.LeftReason,
@@ -990,6 +998,26 @@ func (r *CallRepo) UpdateParticipantMedia(ctx context.Context, id uuid.UUID, aud
 		return cerrors.NotFound("call participant not found")
 	}
 
+	return nil
+}
+
+// SetCanScreenShare flips a participant's screen-share grant, keyed by the
+// participant id (uuid) to match UpdateParticipantMedia. (ALK-697)
+func (r *CallRepo) SetCanScreenShare(ctx context.Context, id uuid.UUID, canShare bool) error {
+	_, err := r.db.Exec(ctx, `UPDATE call_participants SET can_screen_share = $2 WHERE id = $1`, id, canShare)
+	if err != nil {
+		return fmt.Errorf("postgres: set participant can_screen_share: %w", err)
+	}
+	return nil
+}
+
+// SetFeaturedShareUserID sets (or clears with nil) the host-featured share pick
+// on a call row. Passing nil writes SQL NULL. (ALK-697)
+func (r *CallRepo) SetFeaturedShareUserID(ctx context.Context, callID uuid.UUID, userID *uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `UPDATE calls SET featured_share_user_id = $2 WHERE id = $1`, callID, userID)
+	if err != nil {
+		return fmt.Errorf("postgres: set call featured_share_user_id: %w", err)
+	}
 	return nil
 }
 

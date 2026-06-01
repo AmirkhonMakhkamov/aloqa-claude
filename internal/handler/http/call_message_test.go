@@ -343,6 +343,12 @@ func (r *fakeHTTPCallRepo) UpdateParticipantMedia(context.Context, uuid.UUID, bo
 	return nil
 }
 
+func (r *fakeHTTPCallRepo) SetCanScreenShare(context.Context, uuid.UUID, bool) error { return nil }
+
+func (r *fakeHTTPCallRepo) SetFeaturedShareUserID(context.Context, uuid.UUID, *uuid.UUID) error {
+	return nil
+}
+
 func (r *fakeHTTPCallRepo) RemoveParticipant(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 
 type fakeHTTPCallMessageRepo struct {

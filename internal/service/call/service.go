@@ -1363,6 +1363,12 @@ func (s *Service) UpdateMedia(ctx context.Context, workspaceID, callID, userID u
 			return err
 		}
 	}
+	// Defense-in-depth per-participant gate (secondary to the join-token
+	// CanPublishSources gate): a non-host without an explicit grant cannot flip
+	// screen-sharing ON. (ALK-697)
+	if screenSharing != nil && *screenSharing && !participant.ScreenSharing && !canShareScreen(*participant) {
+		return cerrors.Forbidden("screen_share_not_granted")
+	}
 
 	if err := s.calls.UpdateParticipantMedia(ctx, participant.ID, nextAudio, nextVideo, nextScreen); err != nil {
 		slog.ErrorContext(ctx, "failed to update participant media", "participant_id", participant.ID, "error", err)

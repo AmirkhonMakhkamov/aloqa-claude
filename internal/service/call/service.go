@@ -261,6 +261,16 @@ func (s *Service) requireCallAccess(ctx context.Context, workspaceID, callID, us
 	if err != nil {
 		return nil, err
 	}
+	// A connected participant always retains access to their own call,
+	// independent of the underlying (possibly DM) channel membership. This is
+	// what lets in-call chat, the roster and media work for a one_to_one call
+	// (DM-only per ALK-665) whose participant joined the call but is not a
+	// member row of the underlying DM channel. Without this short-circuit the
+	// channel gate below would 403 a legitimately-connected participant. (ALK-695)
+	if p, err := s.calls.GetParticipant(ctx, callID, userID); err == nil &&
+		p.Status == entity.ParticipantStatusConnected {
+		return call, nil
+	}
 	if call.ChannelID != nil {
 		ch, err := s.channels.GetByID(ctx, *call.ChannelID)
 		if err != nil {
@@ -1389,6 +1399,87 @@ func (s *Service) UpdateParticipantRole(ctx context.Context, workspaceID, callID
 	}
 
 	s.publishParticipantEvent(ctx, event.TypeCallParticipantUpdated, call, target)
+	return nil
+}
+
+// TransferHost performs an atomic single-host transfer: the current host is
+// demoted to a regular participant and the target is promoted to host in one
+// transaction. Unlike UpdateParticipantRole (which can leave two hosts and
+// forbids self-demotion), this gives the call exactly one host. Only the
+// current host may transfer; the target must be a connected participant of the
+// call that is not already the host. (ALK-696)
+func (s *Service) TransferHost(ctx context.Context, workspaceID, callID, actorUserID, targetUserID uuid.UUID) error {
+	call, err := s.requireCallAccess(ctx, workspaceID, callID, actorUserID)
+	if err != nil {
+		return err
+	}
+	if call.Status == entity.CallStatusEnded {
+		return cerrors.Forbidden("call has already ended")
+	}
+	if actorUserID == targetUserID {
+		return cerrors.InvalidInput("cannot transfer host to yourself")
+	}
+
+	actor, err := s.calls.GetParticipant(ctx, callID, actorUserID)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return cerrors.Forbidden("actor is not a participant")
+		}
+		return cerrors.Internal("failed to get actor participant", err)
+	}
+	if actor.Role != entity.CallRoleHost {
+		return cerrors.Forbidden("only the host can transfer host")
+	}
+
+	target, err := s.calls.GetParticipant(ctx, callID, targetUserID)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return cerrors.NotFound("target participant not found")
+		}
+		return cerrors.Internal("failed to get target participant", err)
+	}
+	if target.Status != entity.ParticipantStatusConnected {
+		return cerrors.InvalidInput("target participant is not connected")
+	}
+	if target.Role == entity.CallRoleHost {
+		return cerrors.Conflict("target is already the host")
+	}
+
+	if s.tx != nil {
+		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
+			if scope.Calls() == nil {
+				return cerrors.Unavailable("call transaction scope is not configured")
+			}
+			if err := scope.Calls().UpdateParticipantRole(ctx, actor.ID, entity.CallRoleParticipant); err != nil {
+				return err
+			}
+			if err := scope.Calls().UpdateParticipantRole(ctx, target.ID, entity.CallRoleHost); err != nil {
+				return err
+			}
+			actor.Role = entity.CallRoleParticipant
+			target.Role = entity.CallRoleHost
+			if err := s.enqueueParticipantEventTx(ctx, scope, event.TypeCallParticipantUpdated, call, actor); err != nil {
+				return err
+			}
+			return s.enqueueParticipantEventTx(ctx, scope, event.TypeCallParticipantUpdated, call, target)
+		}); err != nil {
+			slog.ErrorContext(ctx, "failed to transfer host", "call_id", callID, "from", actorUserID, "to", targetUserID, "error", err)
+			return cerrors.Internal("failed to transfer host", err)
+		}
+	} else {
+		if err := s.calls.UpdateParticipantRole(ctx, actor.ID, entity.CallRoleParticipant); err != nil {
+			return cerrors.Internal("failed to demote current host", err)
+		}
+		if err := s.calls.UpdateParticipantRole(ctx, target.ID, entity.CallRoleHost); err != nil {
+			return cerrors.Internal("failed to promote new host", err)
+		}
+		actor.Role = entity.CallRoleParticipant
+		target.Role = entity.CallRoleHost
+		s.publishParticipantEvent(ctx, event.TypeCallParticipantUpdated, call, actor)
+		s.publishParticipantEvent(ctx, event.TypeCallParticipantUpdated, call, target)
+	}
+
+	slog.InfoContext(ctx, "host transferred", "call_id", callID, "from", actorUserID, "to", targetUserID)
 	return nil
 }
 

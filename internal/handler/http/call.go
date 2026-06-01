@@ -503,6 +503,40 @@ func (h *CallHandler) UpdateParticipantRole(w http.ResponseWriter, r *http.Reque
 	writeNoContent(w)
 }
 
+type transferHostRequest struct {
+	UserID string `json:"user_id"`
+}
+
+func (h *CallHandler) TransferHost(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	var req transferHostRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	targetUserID, err := id.Parse(req.UserID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	if err := h.svc.TransferHost(r.Context(), workspaceID, callID, userID, targetUserID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
 func (h *CallHandler) TurnCredentials(w http.ResponseWriter, r *http.Request) {
 	callID, err := id.Parse(chi.URLParam(r, "callID"))
 	if err != nil {

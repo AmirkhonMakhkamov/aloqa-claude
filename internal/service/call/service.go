@@ -224,6 +224,40 @@ func (s *Service) canAccessWorkspaceContent(ctx context.Context, workspaceID, us
 	return cerrors.Forbidden("user does not have access to this workspace")
 }
 
+// isGuestUser reports whether userID is a guest in this workspace: not a member,
+// but holding an active guest access grant. Drives the forced-waiting rule and
+// the is_guest participant flag (ALK-700).
+func (s *Service) isGuestUser(ctx context.Context, workspaceID, userID uuid.UUID) bool {
+	if _, err := s.members.GetMember(ctx, workspaceID, userID); err == nil {
+		return false
+	}
+	if s.guests == nil {
+		return false
+	}
+	allowed, err := s.guests.HasWorkspaceAccess(ctx, workspaceID, userID)
+	if err != nil {
+		return false
+	}
+	return allowed
+}
+
+// AuthorizeGuestLink validates that userID may mint a guest link for the call:
+// it must be an active (non-ended) call the user can access as host/co-host.
+// Returns the call so the handler can scope the invite to its channel (ALK-700).
+func (s *Service) AuthorizeGuestLink(ctx context.Context, workspaceID, callID, userID uuid.UUID) (*entity.Call, error) {
+	call, err := s.requireCallAccess(ctx, workspaceID, callID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if call.Status == entity.CallStatusEnded {
+		return nil, cerrors.CallEnded("call has already ended")
+	}
+	if err := s.requireHostOrCoHost(ctx, callID, userID); err != nil {
+		return nil, err
+	}
+	return call, nil
+}
+
 func (s *Service) requireChannelAccess(ctx context.Context, ch *entity.Channel, userID uuid.UUID) error {
 	if ch.WorkspaceID == nil {
 		return cerrors.NotFound("channel not found")
@@ -638,6 +672,10 @@ func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid
 		return nil, cerrors.CallEnded("call has already ended")
 	}
 
+	// Guests always require host approval (ALK-700): they are forced into the
+	// waiting room on every join regardless of the call's waiting-room setting.
+	guest := s.isGuestUser(ctx, call.WorkspaceID, userID)
+
 	// Check capacity if max participants is set.
 	effectiveCap := s.effectiveParticipantCap(call)
 	if effectiveCap > 0 {
@@ -672,8 +710,24 @@ func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid
 		}
 	}
 	if existing != nil {
+		// A declined guest may not re-knock — terminal state (ALK-700).
+		if existing.Status == entity.ParticipantStatusDeclined {
+			return nil, cerrors.WaitingRoomDeclined("the host declined your request to join")
+		}
 		if existing.Status == entity.ParticipantStatusWaiting {
 			slog.InfoContext(ctx, "participant remains in waiting room", "call_id", callID, "user_id", userID)
+			return existing, nil
+		}
+		// A guest who is not already connected (e.g. left then returned with the
+		// same session) must re-knock rather than silently reconnect (ALK-700).
+		if guest && existing.Status != entity.ParticipantStatusConnected {
+			if err := s.calls.UpdateParticipantStatus(ctx, existing.ID, entity.ParticipantStatusWaiting); err != nil {
+				slog.ErrorContext(ctx, "failed to return guest to waiting room", "participant_id", existing.ID, "error", err)
+				return nil, cerrors.Internal("failed to return guest to waiting room", err)
+			}
+			existing.Status = entity.ParticipantStatusWaiting
+			s.publishParticipantEvent(ctx, event.TypeWaitingRoomJoined, call, existing)
+			slog.InfoContext(ctx, "guest returned to waiting room", "call_id", callID, "user_id", userID)
 			return existing, nil
 		}
 
@@ -710,9 +764,10 @@ func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid
 
 	now := time.Now()
 
-	// Determine initial status: if waiting room is enabled, place in waiting.
+	// Determine initial status: if waiting room is enabled, or the joiner is a
+	// guest (always gated, ALK-700), place in waiting.
 	initialStatus := entity.ParticipantStatusConnected
-	if call.Settings.WaitingRoom {
+	if call.Settings.WaitingRoom || guest {
 		initialStatus = entity.ParticipantStatusWaiting
 	}
 	role := entity.CallRoleParticipant
@@ -913,6 +968,22 @@ func (s *Service) RejectParticipant(ctx context.Context, workspaceID, callID, us
 
 	if participant.Status != entity.ParticipantStatusWaiting {
 		return cerrors.Conflict("participant is not in the waiting room")
+	}
+
+	// For a guest, reject is TERMINAL: mark 'declined' (instead of deleting the
+	// row) so a subsequent JoinCall is refused with WAITING_ROOM_DECLINED and the
+	// FE deep-link poll stops instead of re-knocking. Non-guest waiting-room
+	// rejects keep their existing remove-the-row behaviour (ALK-700).
+	if s.isGuestUser(ctx, call.WorkspaceID, targetUserID) {
+		if err := s.calls.UpdateParticipantStatus(ctx, participant.ID, entity.ParticipantStatusDeclined); err != nil {
+			slog.ErrorContext(ctx, "failed to decline guest", "call_id", callID, "target_user_id", targetUserID, "error", err)
+			return cerrors.Internal("failed to reject participant", err)
+		}
+		participant.Status = entity.ParticipantStatusDeclined
+		s.publishParticipantEvent(ctx, event.TypeWaitingRoomRejected, call, participant)
+		s.removeLiveKitParticipantBestEffort(ctx, callID, targetUserID)
+		slog.InfoContext(ctx, "guest declined from waiting room", "call_id", callID, "target_user_id", targetUserID)
+		return nil
 	}
 
 	if err := s.calls.RemoveParticipant(ctx, callID, targetUserID); err != nil {

@@ -164,7 +164,7 @@ func newCallMessageHTTPFixture() callMessageHTTPFixture {
 	messages := &fakeHTTPCallMessageRepo{messages: map[uuid.UUID]*entity.CallMessage{}}
 	svc := callsvc.NewService(calls, fakeHTTPBreakoutRepo{}, fakeHTTPChannelRepo{}, workspaces, noopHTTPPublisher{}, nil, callsvc.MediaConfig{TokenSecret: []byte("01234567890123456789012345678901")}, nil, nil)
 	svc.SetCallMessageRepo(messages)
-	handler := NewCallHandler(svc)
+	handler := NewCallHandler(svc, nil)
 
 	router := chi.NewRouter()
 	router.Use(func(next http.Handler) http.Handler {

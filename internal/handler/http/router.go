@@ -334,6 +334,7 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 			r.Get("/participants", deps.Calls.Participants)
 			r.Put("/participants/{userID}/role", deps.Calls.UpdateParticipantRole)
 			r.Post("/transfer-host", deps.Calls.TransferHost)
+			r.Post("/guest-link", deps.Calls.CreateGuestLink) // ALK-700: host mints a call-scoped guest link
 			// Screen-share controls (ALK-697).
 			r.Route("/share-requests", func(r chi.Router) {
 				r.Post("/", deps.Calls.RequestScreenShare)

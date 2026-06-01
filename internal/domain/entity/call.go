@@ -52,6 +52,10 @@ const (
 	ParticipantStatusJoining      ParticipantStatus = "joining"
 	ParticipantStatusConnected    ParticipantStatus = "connected"
 	ParticipantStatusDisconnected ParticipantStatus = "disconnected"
+	// ParticipantStatusDeclined is a terminal state for a (guest) participant the
+	// host rejected from the waiting room; a subsequent JoinCall is refused with
+	// WAITING_ROOM_DECLINED instead of re-creating a waiting row (ALK-700).
+	ParticipantStatusDeclined ParticipantStatus = "declined"
 )
 
 type ParticipantLeftReason string
@@ -154,6 +158,12 @@ type CallParticipant struct {
 	JoinedAt       *time.Time            `json:"joined_at,omitempty"`
 	LeftAt         *time.Time            `json:"left_at,omitempty"`
 	LeftReason     ParticipantLeftReason `json:"left_reason,omitempty"`
+	// DisplayName and IsGuest are denormalized, read-time-only projections (not
+	// persisted on call_participants) so the FE can render "{name} (Guest)" for
+	// participants who are not workspace members and thus absent from the
+	// workspace-members lookup (ALK-700). Populated by the participant repo reads.
+	DisplayName string `json:"display_name,omitempty"`
+	IsGuest     bool   `json:"is_guest"`
 }
 
 type LiveKitWebhookEvent struct {

@@ -246,7 +246,7 @@ func newCallInteractionHTTPRouterWithMediaConfig(workspaceID, callID, userID uui
 		Account:          &AccountHandler{},
 		Channels:         &ChannelHandler{},
 		Messages:         &MessageHandler{},
-		Calls:            NewCallHandler(svc),
+		Calls:            NewCallHandler(svc, nil),
 		Breakout:         &BreakoutHandler{},
 		Files:            &FileHandler{},
 		Presence:         &PresenceHandler{},

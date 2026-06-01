@@ -431,6 +431,7 @@ func run() error {
 	adminSvc.SetObservabilityObserver(observabilitySvc)
 	guestSvc := guest.NewService(guestInviteRepo, guestAccessRepo, userRepo, workspaceRepo, channelRepo, &authTokenIssuer{authSvc})
 	guestSvc.SetTransactionManager(txManager)
+	guestSvc.SetCallLookup(callRepo) // ALK-700: reject call-scoped guest links once the call has ended
 	chatSvc.SetAccessPolicy(channelAccessPolicy)
 	chatSvc.SetChannelAccessStates(channelAccessStateRepo)
 	fileSvc.SetAccessPolicy(channelAccessPolicy)
@@ -521,7 +522,7 @@ func run() error {
 	channelHandler := httphandler.NewChannelHandler(chatSvc)
 	savedHandler := httphandler.NewSavedHandler(savedSvc)
 	messageHandler := httphandler.NewMessageHandler(chatSvc)
-	callHandler := httphandler.NewCallHandler(callSvc)
+	callHandler := httphandler.NewCallHandler(callSvc, guestSvc)
 	livekitWebhookHandler := httphandler.NewLiveKitWebhookHandler(
 		callSvc,
 		cfg.LiveKit.APIKey,

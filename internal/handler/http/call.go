@@ -13,6 +13,7 @@ import (
 	"aloqa/internal/pkg/cerrors"
 	"aloqa/internal/pkg/id"
 	"aloqa/internal/service/call"
+	"aloqa/internal/service/guest"
 )
 
 // StartCallResponse carries the created call plus the LiveKit connection info
@@ -37,11 +38,64 @@ type JoinCallResponse struct {
 }
 
 type CallHandler struct {
-	svc *call.Service
+	svc    *call.Service
+	guests *guest.Service
 }
 
-func NewCallHandler(svc *call.Service) *CallHandler {
-	return &CallHandler{svc: svc}
+func NewCallHandler(svc *call.Service, guests *guest.Service) *CallHandler {
+	return &CallHandler{svc: svc, guests: guests}
+}
+
+// guestCallLinkMaxUses caps redeems on a single call guest link. It is set high
+// because the authoritative expiry for "reusable until the call ends" is the
+// redeem-time call-ended check, not the use count (ALK-700).
+const guestCallLinkMaxUses = 100
+
+// guestCallLinkTTL is the backstop expiry for a call guest link.
+const guestCallLinkTTL = 12 * time.Hour
+
+type guestLinkResponse struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// CreateGuestLink mints a one-time-style guest link scoped to a specific call.
+// Host/co-host only; rejected for channel-less calls so the guest grant can
+// never be an empty (all-channels) scope (ALK-700).
+func (h *CallHandler) CreateGuestLink(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	c, err := h.svc.AuthorizeGuestLink(r.Context(), workspaceID, callID, userID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if c.ChannelID == nil {
+		writeErr(w, cerrors.InvalidInput("guest links are only available for calls in a channel"))
+		return
+	}
+
+	invite, err := h.guests.CreateInvite(r.Context(), guest.CreateInviteInput{
+		WorkspaceID: workspaceID,
+		CreatedBy:   userID,
+		CallID:      &callID,
+		ChannelIDs:  []uuid.UUID{*c.ChannelID},
+		MaxUses:     guestCallLinkMaxUses,
+		TTL:         guestCallLinkTTL,
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeCreated(w, guestLinkResponse{Token: invite.Token, ExpiresAt: invite.ExpiresAt})
 }
 
 type startCallRequest struct {

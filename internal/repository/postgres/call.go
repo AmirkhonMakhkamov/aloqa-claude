@@ -768,9 +768,14 @@ func (r *CallRepo) AddParticipantIfCapacity(ctx context.Context, p *entity.CallP
 
 func (r *CallRepo) GetParticipant(ctx context.Context, callID, userID uuid.UUID) (*entity.CallParticipant, error) {
 	query := `
-		SELECT id, call_id, user_id, breakout_room_id, role, status, audio_muted, video_muted, screen_sharing, can_screen_share, joined_at, left_at, COALESCE(left_reason, '')
-		FROM call_participants
-		WHERE call_id = $1 AND user_id = $2`
+		SELECT cp.id, cp.call_id, cp.user_id, cp.breakout_room_id, cp.role, cp.status, cp.audio_muted, cp.video_muted, cp.screen_sharing, cp.can_screen_share, cp.joined_at, cp.left_at, COALESCE(cp.left_reason, ''),
+		       COALESCE(u.display_name, ''),
+		       (EXISTS (SELECT 1 FROM guest_access_grants g WHERE g.user_id = cp.user_id AND g.workspace_id = c.workspace_id AND g.expires_at > now())
+		        AND NOT EXISTS (SELECT 1 FROM workspace_members wm WHERE wm.workspace_id = c.workspace_id AND wm.user_id = cp.user_id)) AS is_guest
+		FROM call_participants cp
+		JOIN calls c ON c.id = cp.call_id
+		LEFT JOIN users u ON u.id = cp.user_id
+		WHERE cp.call_id = $1 AND cp.user_id = $2`
 
 	p := &entity.CallParticipant{}
 	err := r.db.QueryRow(ctx, query, callID, userID).Scan(
@@ -787,6 +792,8 @@ func (r *CallRepo) GetParticipant(ctx context.Context, callID, userID uuid.UUID)
 		&p.JoinedAt,
 		&p.LeftAt,
 		&p.LeftReason,
+		&p.DisplayName,
+		&p.IsGuest,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -800,10 +807,15 @@ func (r *CallRepo) GetParticipant(ctx context.Context, callID, userID uuid.UUID)
 
 func (r *CallRepo) ListParticipants(ctx context.Context, callID uuid.UUID) ([]entity.CallParticipant, error) {
 	query := `
-		SELECT id, call_id, user_id, breakout_room_id, role, status, audio_muted, video_muted, screen_sharing, can_screen_share, joined_at, left_at, COALESCE(left_reason, '')
-		FROM call_participants
-		WHERE call_id = $1
-		ORDER BY joined_at`
+		SELECT cp.id, cp.call_id, cp.user_id, cp.breakout_room_id, cp.role, cp.status, cp.audio_muted, cp.video_muted, cp.screen_sharing, cp.can_screen_share, cp.joined_at, cp.left_at, COALESCE(cp.left_reason, ''),
+		       COALESCE(u.display_name, ''),
+		       (EXISTS (SELECT 1 FROM guest_access_grants g WHERE g.user_id = cp.user_id AND g.workspace_id = c.workspace_id AND g.expires_at > now())
+		        AND NOT EXISTS (SELECT 1 FROM workspace_members wm WHERE wm.workspace_id = c.workspace_id AND wm.user_id = cp.user_id)) AS is_guest
+		FROM call_participants cp
+		JOIN calls c ON c.id = cp.call_id
+		LEFT JOIN users u ON u.id = cp.user_id
+		WHERE cp.call_id = $1
+		ORDER BY cp.joined_at`
 
 	rows, err := r.db.Query(ctx, query, callID)
 	if err != nil {
@@ -828,6 +840,8 @@ func (r *CallRepo) ListParticipants(ctx context.Context, callID uuid.UUID) ([]en
 			&p.JoinedAt,
 			&p.LeftAt,
 			&p.LeftReason,
+			&p.DisplayName,
+			&p.IsGuest,
 		); err != nil {
 			return nil, fmt.Errorf("postgres: list call participants scan: %w", err)
 		}

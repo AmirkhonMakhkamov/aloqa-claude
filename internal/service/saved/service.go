@@ -132,6 +132,7 @@ func (s *Service) SaveMessage(ctx context.Context, userID, messageID, workspaceI
 		SavedFrom:       savedFromRaw,
 		QuotedMessageID: src.QuotedMessageID,
 		QuotedSnapshot:  src.QuotedSnapshot,
+		ProfileShare:    src.ProfileShare,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}

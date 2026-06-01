@@ -251,17 +251,31 @@ func (r *WorkspaceRepo) AddMember(ctx context.Context, m *entity.WorkspaceMember
 
 func (r *WorkspaceRepo) GetMember(ctx context.Context, workspaceID, userID uuid.UUID) (*entity.WorkspaceMember, error) {
 	query := `
-		SELECT id, workspace_id, user_id, role, joined_at
-		FROM workspace_members
-		WHERE workspace_id = $1 AND user_id = $2`
+		SELECT wm.id, wm.workspace_id, wm.user_id, wm.role, wm.joined_at,
+		       u.id, u.email, u.display_name, u.avatar_url, u.position, u.department, u.status, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
+		FROM workspace_members wm
+		JOIN users u ON u.id = wm.user_id
+		WHERE wm.workspace_id = $1 AND wm.user_id = $2`
 
 	m := &entity.WorkspaceMember{}
+	u := &entity.User{}
 	err := r.db.QueryRow(ctx, query, workspaceID, userID).Scan(
 		&m.ID,
 		&m.WorkspaceID,
 		&m.UserID,
 		&m.Role,
 		&m.JoinedAt,
+		&u.ID,
+		&u.Email,
+		&u.DisplayName,
+		&u.AvatarURL,
+		&u.Position,
+		&u.Department,
+		&u.Status,
+		&u.SavedMessagesMode,
+		&u.Locale,
+		&u.CreatedAt,
+		&u.UpdatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -269,6 +283,7 @@ func (r *WorkspaceRepo) GetMember(ctx context.Context, workspaceID, userID uuid.
 		}
 		return nil, fmt.Errorf("postgres: get workspace member: %w", err)
 	}
+	m.User = u
 
 	return m, nil
 }

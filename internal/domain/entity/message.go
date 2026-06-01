@@ -23,6 +23,20 @@ type QuotedSnapshot struct {
 	ParentMessageID *uuid.UUID `json:"parent_message_id,omitempty" db:"parent_message_id,omitempty"`
 }
 
+type ProfileShareSnapshot struct {
+	DisplayName string        `json:"display_name"`
+	AvatarURL   string        `json:"avatar_url,omitempty"`
+	Role        WorkspaceRole `json:"role"`
+	Position    *string       `json:"position,omitempty"`
+	Department  *string       `json:"department,omitempty"`
+}
+
+type ProfileShare struct {
+	UserID      uuid.UUID            `json:"user_id" db:"user_id"`
+	WorkspaceID uuid.UUID            `json:"workspace_id" db:"workspace_id"`
+	Snapshot    ProfileShareSnapshot `json:"snapshot" db:"snapshot"`
+}
+
 type Message struct {
 	ID        uuid.UUID   `json:"id"`
 	ChannelID uuid.UUID   `json:"channel_id"`
@@ -40,6 +54,7 @@ type Message struct {
 	SavedFrom       json.RawMessage `json:"saved_from,omitempty" db:"saved_from"`
 	QuotedMessageID *uuid.UUID      `json:"quoted_message_id,omitempty" db:"quoted_message_id"`
 	QuotedSnapshot  *QuotedSnapshot `json:"quoted_snapshot,omitempty" db:"quoted_snapshot"`
+	ProfileShare    *ProfileShare   `json:"profile_share,omitempty" db:"profile_share"`
 	CreatedAt       time.Time       `json:"created_at"`
 	UpdatedAt       time.Time       `json:"updated_at"`
 	DeletedAt       *time.Time      `json:"deleted_at,omitempty"`

@@ -311,7 +311,14 @@ func TestReturnToMainRoomReturnsMainLiveKitJoinInfo(t *testing.T) {
 	}
 }
 
-func TestCloseAllBreakoutRoomsDeletesLiveKitRoomsByName(t *testing.T) {
+// breakoutDeleteScheduled reports whether a deferred LiveKit delete is pending
+// for the given room name.
+func breakoutDeleteScheduled(svc *Service, name string) bool {
+	_, ok := svc.breakoutDeleteTimers.Load(name)
+	return ok
+}
+
+func TestCloseAllBreakoutRoomsSchedulesDeferredLiveKitDelete(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
 	callID := uuid.New()
@@ -341,15 +348,134 @@ func TestCloseAllBreakoutRoomsDeletesLiveKitRoomsByName(t *testing.T) {
 
 	wantA := breakoutLiveKitRoomName(callID, roomA.ID)
 	wantB := breakoutLiveKitRoomName(callID, roomB.ID)
-	deleted := map[string]bool{}
-	for _, n := range roomClient.deletedRoomNames {
-		deleted[n] = true
-	}
-	if !deleted[wantA] || !deleted[wantB] {
-		t.Fatalf("deleted room names = %v, want to contain %s and %s", roomClient.deletedRoomNames, wantA, wantB)
+
+	// The LiveKit delete must NOT happen synchronously on close — deleting the
+	// room while clients are still connected would kick them with ROOM_DELETED.
+	if len(roomClient.deletedRoomNames) != 0 {
+		t.Fatalf("deleted room names = %v, want none synchronously (delete is deferred)", roomClient.deletedRoomNames)
 	}
 
+	// Both breakout rooms must have a pending deferred-delete timer recorded so
+	// the LiveKit room is reaped after the grace period.
+	if !breakoutDeleteScheduled(svc, wantA) || !breakoutDeleteScheduled(svc, wantB) {
+		t.Fatalf("deferred deletes not scheduled for %s and %s", wantA, wantB)
+	}
+
+	// Clients still receive the all-closed broadcast immediately so they begin
+	// returning to the main room.
 	if got := countBreakoutEvents(t, pub.captures, event.TypeBreakoutRoomsAllClosed); got != 1 {
 		t.Fatalf("rooms.all_closed events = %d, want 1", got)
+	}
+
+	// Tidy up the pending timers so they don't fire after the test.
+	svc.cancelBreakoutLiveKitDelete(wantA)
+	svc.cancelBreakoutLiveKitDelete(wantB)
+}
+
+func TestCloseBreakoutRoomSchedulesDeferredLiveKitDelete(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+
+	repo := newStubBreakoutRepo()
+	room := &entity.BreakoutRoom{ID: uuid.New(), CallID: callID, Name: "A", Status: entity.BreakoutRoomStatusActive}
+	repo.rooms[room.ID] = room
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: breakoutCall(callID, workspaceID, hostID)},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: connectedParticipant(callID, hostID, entity.CallRoleHost),
+		},
+	}
+	pub := &capturingPublisher{}
+	roomClient := &fakeLiveKitRoomClient{}
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
+	svc.SetLiveKit(breakoutTestLiveKit())
+	svc.SetLiveKitRoomClient(roomClient)
+
+	if err := svc.CloseBreakoutRoom(ctx, callID, hostID, room.ID); err != nil {
+		t.Fatalf("CloseBreakoutRoom returned error: %v", err)
+	}
+
+	want := breakoutLiveKitRoomName(callID, room.ID)
+
+	// No synchronous delete (would kick still-connected clients).
+	if len(roomClient.deletedRoomNames) != 0 {
+		t.Fatalf("deleted room names = %v, want none synchronously (delete is deferred)", roomClient.deletedRoomNames)
+	}
+	if !breakoutDeleteScheduled(svc, want) {
+		t.Fatalf("deferred delete not scheduled for %s", want)
+	}
+	if got := countBreakoutEvents(t, pub.captures, event.TypeBreakoutRoomClosed); got != 1 {
+		t.Fatalf("room.closed events = %d, want 1", got)
+	}
+
+	svc.cancelBreakoutLiveKitDelete(want)
+}
+
+func TestEnsureLiveKitBreakoutRoomCancelsPendingDelete(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	breakoutRoomID := uuid.New()
+
+	roomClient := &fakeLiveKitRoomClient{}
+	svc := NewService(&fakeCallRepo{}, newStubBreakoutRepo(), &fakeChannelRepo{}, &fakeWorkspaceRepo{}, &capturingPublisher{}, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
+	svc.SetLiveKit(breakoutTestLiveKit())
+	svc.SetLiveKitRoomClient(roomClient)
+
+	name := breakoutLiveKitRoomName(callID, breakoutRoomID)
+	svc.scheduleBreakoutLiveKitDelete(name)
+	if !breakoutDeleteScheduled(svc, name) {
+		t.Fatalf("expected deferred delete scheduled for %s", name)
+	}
+
+	// Re-ensuring the same breakout room must cancel the pending delete so the
+	// reused/recreated room is not deleted out from under its participants.
+	call := breakoutCall(callID, workspaceID, hostID)
+	if err := svc.EnsureLiveKitBreakoutRoom(ctx, call, breakoutRoomID); err != nil {
+		t.Fatalf("EnsureLiveKitBreakoutRoom returned error: %v", err)
+	}
+	if breakoutDeleteScheduled(svc, name) {
+		t.Fatalf("expected pending delete cancelled after re-ensure for %s", name)
+	}
+}
+
+func TestCloseAllBreakoutSFURoomsDeletesLiveKitImmediatelyOnCallEnd(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+
+	repo := newStubBreakoutRepo()
+	room := &entity.BreakoutRoom{ID: uuid.New(), CallID: callID, Name: "A", Status: entity.BreakoutRoomStatusActive}
+	repo.rooms[room.ID] = room
+
+	roomClient := &fakeLiveKitRoomClient{}
+	svc := NewService(&fakeCallRepo{calls: map[uuid.UUID]*entity.Call{callID: breakoutCall(callID, workspaceID, hostID)}}, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, &capturingPublisher{}, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
+	svc.SetLiveKit(breakoutTestLiveKit())
+	svc.SetLiveKitRoomClient(roomClient)
+
+	name := breakoutLiveKitRoomName(callID, room.ID)
+	// Pre-arm a pending grace delete (as a prior close would have).
+	svc.scheduleBreakoutLiveKitDelete(name)
+
+	// When the main call ends, breakout LiveKit rooms are deleted immediately
+	// (they are empty) and any pending grace timer is cancelled.
+	svc.closeAllBreakoutSFURooms(ctx, callID)
+
+	if breakoutDeleteScheduled(svc, name) {
+		t.Fatalf("expected pending grace delete cancelled on call end for %s", name)
+	}
+	deleted := false
+	for _, n := range roomClient.deletedRoomNames {
+		if n == name {
+			deleted = true
+		}
+	}
+	if !deleted {
+		t.Fatalf("deleted room names = %v, want to contain %s (immediate delete on call end)", roomClient.deletedRoomNames, name)
 	}
 }

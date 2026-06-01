@@ -190,6 +190,11 @@ func (s *Service) EnsureLiveKitBreakoutRoom(ctx context.Context, call *entity.Ca
 		return nil
 	}
 
+	// Cancel any pending deferred delete for this room name so a freshly
+	// (re-)created or rejoined breakout room is not deleted out from under its
+	// participants by a grace timer left over from a prior close.
+	s.cancelBreakoutLiveKitDelete(breakoutLiveKitRoomName(call.ID, breakoutRoomID))
+
 	maxParticipants := uint32(0)
 	if cap := s.effectiveParticipantCap(call); cap > 0 {
 		maxParticipants = uint32(cap)

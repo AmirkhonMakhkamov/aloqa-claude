@@ -109,6 +109,14 @@ type Service struct {
 	// breakoutTimers holds in-memory auto-close timers keyed by callID
 	// (uuid.UUID -> *time.Timer). See breakout_timer.go.
 	breakoutTimers sync.Map
+
+	// breakoutDeleteTimers holds in-memory grace-period timers for the deferred
+	// deletion of breakout-room LiveKit rooms, keyed by the LiveKit room name
+	// (string -> *time.Timer). The grace lets connected clients leave the
+	// breakout room (driven by the WS return-to-main events) before the room is
+	// deleted, so LiveKit's DeleteRoom does not kick them with ROOM_DELETED.
+	// See breakout_timer.go.
+	breakoutDeleteTimers sync.Map
 }
 
 // SetEgressSink installs the recording finalizer invoked by the egress_* webhook
@@ -1804,6 +1812,18 @@ func (s *Service) closeAllBreakoutSFURooms(ctx context.Context, callID uuid.UUID
 		sfuRoomID := fmt.Sprintf("%s:breakout:%s", callID, room.ID)
 		if s.sfu != nil {
 			s.sfu.CloseRoom(sfuRoomID)
+		}
+		// The main call is ending, so its breakout rooms are empty: cancel any
+		// pending grace-period delete and delete the LiveKit room immediately so
+		// breakout rooms do not linger after the call ends. No one is connected,
+		// so there is nobody to kick.
+		roomName := breakoutLiveKitRoomName(callID, room.ID)
+		s.cancelBreakoutLiveKitDelete(roomName)
+		if s.livekitRooms != nil {
+			if err := s.livekitRooms.DeleteRoomByName(ctx, roomName); err != nil {
+				slog.WarnContext(ctx, "failed to delete livekit breakout room on call end",
+					"call_id", callID, "breakout_room_id", room.ID, "error", err)
+			}
 		}
 	}
 

@@ -335,16 +335,16 @@ func (s *Service) CloseBreakoutRoom(ctx context.Context, callID, userID, breakou
 			"breakout_room_id", breakoutRoomID, "error", err)
 	}
 
-	// Close the breakout SFU room (legacy Pion plane).
+	// Close the breakout SFU room (legacy Pion plane). This does not kick
+	// LiveKit clients, so it stays synchronous.
 	sfuRoomID := breakoutSFURoomID(callID, breakoutRoomID)
 	s.sfu.CloseRoom(sfuRoomID)
 
-	// Delete the dedicated LiveKit breakout room (best-effort, swallows NotFound).
-	if s.livekitRooms != nil {
-		if err := s.livekitRooms.DeleteRoomByName(ctx, breakoutLiveKitRoomName(callID, breakoutRoomID)); err != nil {
-			slog.WarnContext(ctx, "failed to delete livekit breakout room", "breakout_room_id", breakoutRoomID, "error", err)
-		}
-	}
+	// Defer deletion of the dedicated LiveKit breakout room. Deleting it now
+	// would kick still-connected clients with ROOM_DELETED (ending their whole
+	// call) before the broadcast above has driven them back to the main room.
+	// The grace period lets every client leave first.
+	s.scheduleBreakoutLiveKitDelete(breakoutLiveKitRoomName(callID, breakoutRoomID))
 
 	// Close the DB record.
 	if err := s.breakoutRooms.Close(ctx, breakoutRoomID); err != nil {
@@ -408,11 +408,10 @@ func (s *Service) CloseAllBreakoutRooms(ctx context.Context, callID, userID uuid
 		}
 		sfuRoomID := breakoutSFURoomID(callID, room.ID)
 		s.sfu.CloseRoom(sfuRoomID)
-		if s.livekitRooms != nil {
-			if err := s.livekitRooms.DeleteRoomByName(ctx, breakoutLiveKitRoomName(callID, room.ID)); err != nil {
-				slog.WarnContext(ctx, "failed to delete livekit breakout room", "breakout_room_id", room.ID, "error", err)
-			}
-		}
+		// Defer the LiveKit breakout-room delete so still-connected clients are
+		// not kicked with ROOM_DELETED before the all_closed broadcast below
+		// returns them to the main room (see scheduleBreakoutLiveKitDelete).
+		s.scheduleBreakoutLiveKitDelete(breakoutLiveKitRoomName(callID, room.ID))
 	}
 
 	// Bulk-close all breakout rooms in DB.

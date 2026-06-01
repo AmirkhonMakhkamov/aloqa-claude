@@ -908,35 +908,67 @@ func (r *CallRepo) UpdateParticipantRole(ctx context.Context, id uuid.UUID, role
 }
 
 func (r *CallRepo) TransferHost(ctx context.Context, callID, fromUserID, toUserID uuid.UUID) (bool, error) {
-	// One atomic statement swaps the two roles, gated on the actor still being
-	// the host AND the target still being a participant of the call. Under
-	// concurrent transfers the contended old-host row serialises the writers;
-	// the loser re-evaluates the guard against the committed state, matches zero
-	// rows, and reports a no-op. Both rows flip together (all-or-nothing) so the
-	// call can never end up with zero or two hosts.
-	query := `
-		UPDATE call_participants
-		SET role = CASE user_id
-			WHEN $2 THEN 'participant'
-			WHEN $3 THEN 'host'
-			ELSE role
-		END
-		WHERE call_id = $1
-		  AND user_id IN ($2, $3)
-		  AND EXISTS (
-			SELECT 1 FROM call_participants
-			WHERE call_id = $1 AND user_id = $2 AND role = 'host'
-		  )
-		  AND EXISTS (
-			SELECT 1 FROM call_participants
-			WHERE call_id = $1 AND user_id = $3
-		  )`
-
-	tag, err := r.db.Exec(ctx, query, callID, fromUserID, toUserID)
+	// Lock both participant rows up front (FOR UPDATE) so concurrent transfers
+	// serialise on them and each observes the other's committed state, then
+	// validate and swap inside the same transaction. This is all-or-nothing — the
+	// call can never end up with zero or two hosts — and the loser of a race sees
+	// the actor is no longer host (or the target no longer eligible) and reports a
+	// no-op the caller turns into a retryable conflict. (ALK-696)
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return false, fmt.Errorf("postgres: transfer host: %w", err)
+		return false, fmt.Errorf("postgres: transfer host begin: %w", err)
 	}
-	return tag.RowsAffected() == 2, nil
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Deterministic lock order (by user_id) avoids deadlocks between two
+	// transfers that touch the same pair of rows.
+	rows, err := tx.Query(ctx, `
+		SELECT user_id, role, status
+		FROM call_participants
+		WHERE call_id = $1 AND user_id IN ($2, $3)
+		ORDER BY user_id
+		FOR UPDATE`, callID, fromUserID, toUserID)
+	if err != nil {
+		return false, fmt.Errorf("postgres: transfer host lock: %w", err)
+	}
+	var fromIsHost, targetEligible bool
+	for rows.Next() {
+		var uid uuid.UUID
+		var role, status string
+		if err := rows.Scan(&uid, &role, &status); err != nil {
+			rows.Close()
+			return false, fmt.Errorf("postgres: transfer host scan: %w", err)
+		}
+		switch uid {
+		case fromUserID:
+			fromIsHost = role == string(entity.CallRoleHost)
+		case toUserID:
+			targetEligible = role != string(entity.CallRoleHost) &&
+				status == string(entity.ParticipantStatusConnected)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("postgres: transfer host rows: %w", err)
+	}
+	if !fromIsHost || !targetEligible {
+		return false, nil
+	}
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE call_participants SET role = $3 WHERE call_id = $1 AND user_id = $2`,
+		callID, fromUserID, entity.CallRoleParticipant); err != nil {
+		return false, fmt.Errorf("postgres: transfer host demote: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE call_participants SET role = $3 WHERE call_id = $1 AND user_id = $2`,
+		callID, toUserID, entity.CallRoleHost); err != nil {
+		return false, fmt.Errorf("postgres: transfer host promote: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("postgres: transfer host commit: %w", err)
+	}
+	return true, nil
 }
 
 func (r *CallRepo) UpdateParticipantMedia(ctx context.Context, id uuid.UUID, audioMuted, videoMuted, screenSharing bool) error {

@@ -87,6 +87,15 @@ func TestResolveShareRequestHTTP(t *testing.T) {
 		}
 	})
 
+	t.Run("missing approved field returns 400", func(t *testing.T) {
+		router := newShareControlHTTPRouter(workspaceID, callID, hostID, targetID, entity.CallRoleHost)
+		res := performCallInteractionRequest(router, http.MethodPost, workspaceID, callID,
+			"/share-requests/"+targetID.String()+"/resolve", `{}`, true)
+		if res.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400, body=%s", res.Code, res.Body.String())
+		}
+	})
+
 	t.Run("unauthenticated returns 401", func(t *testing.T) {
 		router := newShareControlHTTPRouter(workspaceID, callID, hostID, targetID, entity.CallRoleHost)
 		res := performCallInteractionRequest(router, http.MethodPost, workspaceID, callID,

@@ -560,7 +560,7 @@ func (h *CallHandler) RequestScreenShare(w http.ResponseWriter, r *http.Request)
 }
 
 type resolveShareRequest struct {
-	Approved bool `json:"approved"`
+	Approved *bool `json:"approved"`
 }
 
 // ResolveShareRequest lets a host approve or deny a screen-share request.
@@ -582,11 +582,15 @@ func (h *CallHandler) ResolveShareRequest(w http.ResponseWriter, r *http.Request
 		writeErr(w, err)
 		return
 	}
+	if req.Approved == nil {
+		writeErr(w, cerrors.InvalidInput("approved is required"))
+		return
+	}
 
 	userID := middleware.UserIDFromContext(r.Context())
 	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
 
-	if err := h.svc.ResolveShareRequest(r.Context(), workspaceID, callID, userID, requesterID, req.Approved); err != nil {
+	if err := h.svc.ResolveShareRequest(r.Context(), workspaceID, callID, userID, requesterID, *req.Approved); err != nil {
 		writeErr(w, err)
 		return
 	}

@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"strings"
@@ -38,10 +39,20 @@ type JoinCallResponse struct {
 	RefreshAfter   *time.Time              `json:"refresh_after,omitempty"`
 }
 
+// SessionUserResolver resolves the owning user of a session cookie value with a
+// strictly read-only lookup (no token refresh / rotation). It lets the public
+// resolve endpoint identify a signed-in member from the `aloqa_session` cookie
+// when no Bearer token is present (Next.js server components forward cookies but
+// no Authorization header). (unified guest link)
+type SessionUserResolver interface {
+	UserIDForSession(ctx context.Context, sessionID string) (uuid.UUID, error)
+}
+
 type CallHandler struct {
-	svc       *call.Service
-	guests    *guest.Service
-	validator middleware.TokenValidator // optional: enables optional-auth resolve
+	svc             *call.Service
+	guests          *guest.Service
+	validator       middleware.TokenValidator // optional: enables optional-auth resolve
+	sessionResolver SessionUserResolver       // optional: session-cookie fallback for resolve
 }
 
 func NewCallHandler(svc *call.Service, guests *guest.Service) *CallHandler {
@@ -54,6 +65,18 @@ func NewCallHandler(svc *call.Service, guests *guest.Service) *CallHandler {
 func (h *CallHandler) SetTokenValidator(validator middleware.TokenValidator) {
 	h.validator = validator
 }
+
+// SetSessionResolver wires the optional session-cookie resolver used by the
+// public resolve endpoint when no Bearer token is present. When nil, the cookie
+// fallback is skipped and the visitor stays anonymous. (unified guest link)
+func (h *CallHandler) SetSessionResolver(resolver SessionUserResolver) {
+	h.sessionResolver = resolver
+}
+
+// sessionCookieName is the cookie carrying the server-side session ID. It MUST
+// match the frontend's AUTH_COOKIES.session so the unified /join/<token> server
+// page can forward it to this public resolve endpoint. (unified guest link)
+const sessionCookieName = "aloqa_session"
 
 // guestCallLinkMaxUses caps redeems on a single call guest link. It is set high
 // because the authoritative expiry for "reusable until the call ends" is the
@@ -137,7 +160,7 @@ func (h *CallHandler) ResolveGuestLink(w http.ResponseWriter, r *http.Request) {
 
 	token := chi.URLParam(r, "token")
 
-	// Best-effort optional auth: only a Bearer header is honoured, and any parse
+	// Best-effort optional auth: a Bearer header is honoured first, and any parse
 	// or validation failure is silently ignored (the visitor is anonymous).
 	optionalUserID := uuid.Nil
 	if h.validator != nil {
@@ -146,6 +169,19 @@ func (h *CallHandler) ResolveGuestLink(w http.ResponseWriter, r *http.Request) {
 				if userID, _, err := h.validator.ValidateToken(raw); err == nil {
 					optionalUserID = userID
 				}
+			}
+		}
+	}
+
+	// Session-cookie fallback: a Next.js server component forwards the visitor's
+	// cookies (including `aloqa_session`) but holds no Authorization header, so
+	// without this a logged-in member is wrongly treated as anonymous. The lookup
+	// is strictly read-only (no refresh / rotation); any error stays anonymous.
+	// (unified guest link)
+	if optionalUserID == uuid.Nil && h.sessionResolver != nil {
+		if cookie, err := r.Cookie(sessionCookieName); err == nil && cookie.Value != "" {
+			if userID, err := h.sessionResolver.UserIDForSession(r.Context(), cookie.Value); err == nil {
+				optionalUserID = userID
 			}
 		}
 	}

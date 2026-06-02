@@ -737,6 +737,19 @@ func (s *Service) ValidateToken(tokenString string) (uuid.UUID, string, error) {
 	return claims.UserID, claims.SessionID, nil
 }
 
+// UserIDForSession resolves the owning user of a session cookie value with a
+// strictly READ-ONLY Redis lookup (no refresh, no rotation, no touch). An
+// unknown / expired session ID yields uuid.Nil with no error (anonymous). Used
+// by the public unified guest-link resolve endpoint to detect a signed-in
+// member from the `aloqa_session` cookie without a Bearer token. (unified guest
+// link)
+func (s *Service) UserIDForSession(ctx context.Context, sessionID string) (uuid.UUID, error) {
+	if s == nil || s.sessions == nil {
+		return uuid.Nil, nil
+	}
+	return s.sessions.UserIDForSession(ctx, sessionID)
+}
+
 // LogoutSessionForUser revokes a session by id, but only if it belongs to
 // userID. Returns NotFound if the target session does not exist or belongs
 // to a different user — UUID unpredictability is not an authorization

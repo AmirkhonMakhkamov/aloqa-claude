@@ -242,7 +242,25 @@ func (l resolveCallLookup) GetByID(_ context.Context, id uuid.UUID) (*entity.Cal
 	return nil, cerrors.NotFound("call not found")
 }
 
+// fakeSessionResolver maps session-cookie values to a user ID, mirroring the
+// read-only Redis session lookup the real auth.Service performs. An unknown
+// session resolves to uuid.Nil (anonymous), matching the redis.Nil branch.
+type fakeSessionResolver struct {
+	bySession map[string]uuid.UUID
+}
+
+func (f fakeSessionResolver) UserIDForSession(_ context.Context, sessionID string) (uuid.UUID, error) {
+	return f.bySession[sessionID], nil
+}
+
 func newResolveRouter(workspaceID, callID, memberID uuid.UUID) http.Handler {
+	return newResolveRouterWithSessions(workspaceID, callID, memberID, nil)
+}
+
+// newResolveRouterWithSessions builds the resolve router with an optional
+// session-cookie resolver wired, so cookie-based member detection (no Bearer)
+// can be exercised end to end through the public /api/v1/invites/{token} route.
+func newResolveRouterWithSessions(workspaceID, callID, memberID uuid.UUID, sessions SessionUserResolver) http.Handler {
 	invites := &resolveInviteRepo{byToken: map[string]*entity.GuestInvite{
 		"valid-token": {
 			ID:          uuid.New(),
@@ -288,13 +306,24 @@ func newResolveRouter(workspaceID, callID, memberID uuid.UUID) http.Handler {
 		WS:               &wshandler.Handler{},
 		Validator:        fakeTokenValidator{userID: memberID},
 		PersonalResolver: fakePersonalResolver{workspaceID: workspaceID},
+		SessionResolver:  sessions,
 	})
 }
 
 func performResolveRequest(router http.Handler, token string, bearer bool) *httptest.ResponseRecorder {
+	return performResolveRequestWithCookie(router, token, bearer, "")
+}
+
+// performResolveRequestWithCookie issues the resolve request optionally carrying
+// a Bearer header and/or an `aloqa_session` cookie, exercising both
+// optional-auth paths of the public endpoint.
+func performResolveRequestWithCookie(router http.Handler, token string, bearer bool, sessionCookie string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/invites/"+token, nil)
 	if bearer {
 		req.Header.Set("Authorization", "Bearer member-token")
+	}
+	if sessionCookie != "" {
+		req.AddCookie(&http.Cookie{Name: "aloqa_session", Value: sessionCookie})
 	}
 	res := httptest.NewRecorder()
 	router.ServeHTTP(res, req)
@@ -348,6 +377,63 @@ func TestResolveGuestLinkHTTP(t *testing.T) {
 		body := decodeResolve(t, res)
 		if !body.Valid || !body.IsWorkspaceMember {
 			t.Fatalf("expected valid + member, got %+v", body)
+		}
+	})
+
+	t.Run("session cookie for member sets is_workspace_member", func(t *testing.T) {
+		sessions := fakeSessionResolver{bySession: map[string]uuid.UUID{"sess-member": memberID}}
+		router := newResolveRouterWithSessions(workspaceID, callID, memberID, sessions)
+		// No Bearer header — only the session cookie, like a Next.js server page.
+		res := performResolveRequestWithCookie(router, "valid-token", false, "sess-member")
+		if res.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body=%s", res.Code, res.Body.String())
+		}
+		body := decodeResolve(t, res)
+		if !body.Valid || !body.IsWorkspaceMember {
+			t.Fatalf("expected valid + member from cookie, got %+v", body)
+		}
+	})
+
+	t.Run("session cookie for non-member stays not a member", func(t *testing.T) {
+		nonMemberID := uuid.New()
+		sessions := fakeSessionResolver{bySession: map[string]uuid.UUID{"sess-guest": nonMemberID}}
+		router := newResolveRouterWithSessions(workspaceID, callID, memberID, sessions)
+		res := performResolveRequestWithCookie(router, "valid-token", false, "sess-guest")
+		if res.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body=%s", res.Code, res.Body.String())
+		}
+		body := decodeResolve(t, res)
+		if !body.Valid {
+			t.Fatalf("valid = false, want true")
+		}
+		if body.IsWorkspaceMember {
+			t.Fatalf("is_workspace_member = true for non-member session, want false")
+		}
+	})
+
+	t.Run("unknown session cookie stays anonymous", func(t *testing.T) {
+		sessions := fakeSessionResolver{bySession: map[string]uuid.UUID{}}
+		router := newResolveRouterWithSessions(workspaceID, callID, memberID, sessions)
+		res := performResolveRequestWithCookie(router, "valid-token", false, "sess-unknown")
+		if res.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body=%s", res.Code, res.Body.String())
+		}
+		body := decodeResolve(t, res)
+		if body.IsWorkspaceMember {
+			t.Fatalf("is_workspace_member = true for unknown session, want false")
+		}
+	})
+
+	t.Run("no cookie and no bearer stays anonymous", func(t *testing.T) {
+		sessions := fakeSessionResolver{bySession: map[string]uuid.UUID{"sess-member": memberID}}
+		router := newResolveRouterWithSessions(workspaceID, callID, memberID, sessions)
+		res := performResolveRequestWithCookie(router, "valid-token", false, "")
+		if res.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body=%s", res.Code, res.Body.String())
+		}
+		body := decodeResolve(t, res)
+		if body.IsWorkspaceMember {
+			t.Fatalf("is_workspace_member = true with no cookie/bearer, want false")
 		}
 	})
 

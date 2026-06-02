@@ -566,6 +566,7 @@ func run() error {
 		WS:               wsHandler,
 		Validator:        authSvc,
 		PersonalResolver: authSvc,
+		SessionResolver:  authSvc,
 		Idempotency: middleware.Idempotency(rdb, middleware.IdempotencyConfig{
 			TTL:          cfg.Realtime.IdempotencyTTL,
 			MaxBodyBytes: cfg.Realtime.IdempotencyMaxBody,

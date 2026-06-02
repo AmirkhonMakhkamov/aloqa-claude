@@ -398,6 +398,34 @@ func (sm *SessionManager) SessionBelongsToUser(ctx context.Context, userID, sess
 	return storable.UserID == userID, nil
 }
 
+// UserIDForSession resolves the user that owns a session by reading the session
+// record from Redis. It is strictly READ-ONLY: no refresh-token rotation, no
+// touch, no write of any kind — a server-side refresh would not persist the
+// rotated (one-time-use) refresh token and would log the member out. An unknown
+// or expired session ID (redis.Nil) is treated as anonymous (uuid.Nil, nil),
+// not an error. Used by the public unified guest-link resolve endpoint to detect
+// a signed-in member from the session cookie. (unified guest link)
+func (sm *SessionManager) UserIDForSession(ctx context.Context, sessionID string) (uuid.UUID, error) {
+	ctx, cancel := sm.operationCtx(ctx)
+	defer cancel()
+	data, err := sm.rdb.Get(ctx, sessionKey(sessionID)).Result()
+	if err == redis.Nil {
+		return uuid.Nil, nil
+	}
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("lookup session for user resolution: %w", err)
+	}
+	var storable sessionStorable
+	if err := json.Unmarshal([]byte(data), &storable); err != nil {
+		return uuid.Nil, fmt.Errorf("unmarshal session: %w", err)
+	}
+	userID, err := uuid.Parse(storable.UserID)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("parse session user id: %w", err)
+	}
+	return userID, nil
+}
+
 // RevokeAllUserSessions revokes every session for a given user.
 func (sm *SessionManager) RevokeAllUserSessions(ctx context.Context, userID string) error {
 	ctx, cancel := sm.operationCtx(ctx)

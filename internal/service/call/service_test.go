@@ -2163,6 +2163,7 @@ type fakeCallRepo struct {
 	participants                      map[[2]uuid.UUID]*entity.CallParticipant
 	liveKitWebhookEvents              map[string]*entity.LiveKitWebhookEvent
 	liveKitWebhookClaimAttempts       map[string]int
+	settingsUpdates                   int
 	markLiveKitWebhookBeforeProcessed func(event *entity.LiveKitWebhookEvent)
 	cancelBeforeUpdate                func(call *entity.Call)
 	disconnectBeforeUpdate            func(participant *entity.CallParticipant)
@@ -2228,6 +2229,15 @@ func (r *fakeCallRepo) UpdateStatus(_ context.Context, id uuid.UUID, status enti
 		return cerrors.NotFound("call not found")
 	}
 	call.Status = status
+	return nil
+}
+func (r *fakeCallRepo) UpdateSettings(_ context.Context, id uuid.UUID, settings entity.CallSettings) error {
+	call := r.calls[id]
+	if call == nil {
+		return cerrors.NotFound("call not found")
+	}
+	r.settingsUpdates++
+	call.Settings = settings
 	return nil
 }
 func (r *fakeCallRepo) ActivateRinging(_ context.Context, id uuid.UUID) (bool, error) {

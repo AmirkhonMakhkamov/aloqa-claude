@@ -609,6 +609,28 @@ func (r *CallRepo) UpdateStatus(ctx context.Context, id uuid.UUID, status entity
 	return nil
 }
 
+func (r *CallRepo) UpdateSettings(ctx context.Context, id uuid.UUID, settings entity.CallSettings) error {
+	settingsJSON, err := json.Marshal(settings)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal call settings: %w", err)
+	}
+
+	query := `
+		UPDATE calls
+		SET settings = $2
+		WHERE id = $1`
+
+	tag, err := r.db.Exec(ctx, query, id, settingsJSON)
+	if err != nil {
+		return fmt.Errorf("postgres: update call settings: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return cerrors.NotFound("call not found")
+	}
+
+	return nil
+}
+
 func (r *CallRepo) ActivateRinging(ctx context.Context, id uuid.UUID) (bool, error) {
 	query := `
 		UPDATE calls

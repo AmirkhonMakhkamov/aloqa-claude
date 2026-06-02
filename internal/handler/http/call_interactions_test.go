@@ -368,6 +368,13 @@ func (r *httpCallRepo) ListActiveByWorkspace(context.Context, uuid.UUID) ([]enti
 func (r *httpCallRepo) UpdateStatus(context.Context, uuid.UUID, entity.CallStatus) error {
 	return nil
 }
+func (r *httpCallRepo) UpdateSettings(_ context.Context, id uuid.UUID, settings entity.CallSettings) error {
+	if c := r.calls[id]; c != nil {
+		c.Settings = settings
+		return nil
+	}
+	return cerrors.NotFound("call not found")
+}
 func (r *httpCallRepo) End(context.Context, uuid.UUID) error { return nil }
 func (r *httpCallRepo) EndWithReason(_ context.Context, id uuid.UUID, reason entity.CallEndReason) error {
 	_, err := r.EndWithReasonIfNotEnded(context.Background(), id, reason)

@@ -354,6 +354,7 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 			})
 			r.Post("/participants/{userID}/revoke-screen-share", deps.Calls.RevokeScreenShare)
 			r.Put("/featured-share", deps.Calls.SetFeaturedShare)
+			r.Patch("/settings", deps.Calls.UpdateSettings)
 			r.Put("/media", deps.Calls.UpdateMedia)
 			r.Put("/quality", deps.Calls.SetQuality)
 			r.Route("/messages", func(r chi.Router) {

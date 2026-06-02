@@ -19,8 +19,10 @@ import (
 // stateless (GetByID always NotFound), which is unsuitable for asserting
 // assignment / lifecycle behavior.
 type stubBreakoutRepo struct {
-	rooms       map[uuid.UUID]*entity.BreakoutRoom
-	assignments []breakoutAssignment
+	rooms                  map[uuid.UUID]*entity.BreakoutRoom
+	assignments            []breakoutAssignment
+	closeAllByCallCount    int
+	unassignAllByRoomCount int
 }
 
 type breakoutAssignment struct {
@@ -63,6 +65,7 @@ func (r *stubBreakoutRepo) Close(_ context.Context, id uuid.UUID) error {
 }
 
 func (r *stubBreakoutRepo) CloseAllByCall(_ context.Context, callID uuid.UUID) error {
+	r.closeAllByCallCount++
 	for _, room := range r.rooms {
 		if room.CallID == callID {
 			room.Status = entity.BreakoutRoomStatusClosed
@@ -81,7 +84,10 @@ func (r *stubBreakoutRepo) UnassignParticipant(_ context.Context, callID, userID
 	return nil
 }
 
-func (r *stubBreakoutRepo) UnassignAllByRoom(context.Context, uuid.UUID) error { return nil }
+func (r *stubBreakoutRepo) UnassignAllByRoom(context.Context, uuid.UUID) error {
+	r.unassignAllByRoomCount++
+	return nil
+}
 
 func (r *stubBreakoutRepo) ListParticipants(context.Context, uuid.UUID) ([]entity.CallParticipant, error) {
 	return nil, nil

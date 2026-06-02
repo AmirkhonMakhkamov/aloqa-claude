@@ -1977,6 +1977,15 @@ func (r *txCallRepo) UpdateStatus(_ context.Context, id uuid.UUID, status entity
 	return nil
 }
 
+func (r *txCallRepo) UpdateSettings(_ context.Context, id uuid.UUID, settings entity.CallSettings) error {
+	call := r.calls[id]
+	if call == nil {
+		return cerrors.NotFound("call not found")
+	}
+	call.Settings = settings
+	return nil
+}
+
 func (r *txCallRepo) End(_ context.Context, id uuid.UUID) error {
 	call := r.calls[id]
 	if call == nil {

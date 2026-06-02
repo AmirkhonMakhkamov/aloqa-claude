@@ -219,6 +219,7 @@ type CallRepository interface {
 	GetByID(ctx context.Context, id uuid.UUID) (*entity.Call, error)
 	ListActiveByWorkspace(ctx context.Context, workspaceID uuid.UUID) ([]entity.Call, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status entity.CallStatus) error
+	UpdateSettings(ctx context.Context, id uuid.UUID, settings entity.CallSettings) error
 	End(ctx context.Context, id uuid.UUID) error
 
 	AddParticipant(ctx context.Context, p *entity.CallParticipant) error

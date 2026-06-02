@@ -109,6 +109,13 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 	r.Group(func(r chi.Router) {
 		r.Use(authLimiter)
 		r.Post("/api/v1/invites/{token}/redeem", deps.Guests.RedeemInvite)
+		// Public resolve for the unified /join/<token> link. Optional-auth: a
+		// member session (if attached) yields is_workspace_member so the FE can
+		// route a member straight to the call. (unified guest link)
+		if deps.Calls != nil {
+			deps.Calls.SetTokenValidator(deps.Validator)
+			r.Get("/api/v1/invites/{token}", deps.Calls.ResolveGuestLink)
+		}
 	})
 
 	// LiveKit webhook (public). LiveKit Server posts signed events here;

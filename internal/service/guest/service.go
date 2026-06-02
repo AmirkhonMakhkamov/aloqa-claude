@@ -358,6 +358,64 @@ func (s *Service) RedeemInvite(ctx context.Context, input RedeemInviteInput) (*R
 	}, nil
 }
 
+// ResolveInviteResult is the public, read-only projection of a guest invite for
+// the unified /join/<token> link. It NEVER returns an error for an invalid /
+// expired / used / revoked token — Valid is false instead — so the FE can show
+// a friendly state. IsWorkspaceMember is reported only when an authenticated
+// member user is supplied. (unified guest link)
+type ResolveInviteResult struct {
+	Valid             bool
+	WorkspaceID       uuid.UUID
+	CallID            *uuid.UUID
+	CallTitle         string
+	ExpiresAt         time.Time
+	IsWorkspaceMember bool
+}
+
+// ResolveInvite looks up an invite token for the unified link page. optionalUserID
+// may be uuid.Nil for an anonymous visitor; when it is a real user, the result
+// reports whether that user is already a member of the invite's workspace (so
+// the FE can route a member straight to the call deep-link instead of the guest
+// name-entry form).
+func (s *Service) ResolveInvite(ctx context.Context, token string, optionalUserID uuid.UUID) (*ResolveInviteResult, error) {
+	if token == "" {
+		return &ResolveInviteResult{Valid: false}, nil
+	}
+
+	invite, err := s.invites.GetByToken(ctx, token)
+	if err != nil {
+		// Unknown token: invalid, not an error.
+		return &ResolveInviteResult{Valid: false}, nil
+	}
+	if !invite.IsValid() {
+		return &ResolveInviteResult{Valid: false}, nil
+	}
+
+	result := &ResolveInviteResult{
+		Valid:       true,
+		WorkspaceID: invite.WorkspaceID,
+		CallID:      invite.CallID,
+		ExpiresAt:   invite.ExpiresAt,
+	}
+
+	// Resolve the call title (best effort: a missing call must not fail resolve).
+	if invite.CallID != nil && s.calls != nil {
+		if call, callErr := s.calls.GetByID(ctx, *invite.CallID); callErr == nil && call != nil {
+			result.CallTitle = call.Title
+		}
+	}
+
+	// Membership is only meaningful (and only disclosed) for an authenticated
+	// user — anonymous visitors never get is_workspace_member: true.
+	if optionalUserID != uuid.Nil {
+		if _, mErr := s.workspaces.GetMember(ctx, invite.WorkspaceID, optionalUserID); mErr == nil {
+			result.IsWorkspaceMember = true
+		}
+	}
+
+	return result, nil
+}
+
 // RevokeInvite revokes an active invite.
 func (s *Service) RevokeInvite(ctx context.Context, inviteID, actorID uuid.UUID) error {
 	invite, err := s.invites.GetByID(ctx, inviteID)

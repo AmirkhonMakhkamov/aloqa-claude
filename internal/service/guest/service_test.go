@@ -340,6 +340,101 @@ func TestRedeemCallScopedInviteCreatesCallScopedGrant(t *testing.T) {
 	}
 }
 
+// ResolveInvite returns call info for a valid token, an invalid result (not an
+// error) for an expired/used/revoked token, and reports workspace membership
+// only when an authenticated member user is supplied. (unified guest link)
+func TestResolveInvite(t *testing.T) {
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	memberID := uuid.New()
+	expiresAt := time.Now().Add(time.Hour)
+
+	invites := &fakeInviteRepo{byToken: map[string]*entity.GuestInvite{
+		"valid-token": {
+			ID:          uuid.New(),
+			WorkspaceID: workspaceID,
+			Token:       "valid-token",
+			CallID:      &callID,
+			MaxUses:     100,
+			Status:      entity.GuestInviteStatusActive,
+			ExpiresAt:   expiresAt,
+		},
+		"revoked-token": {
+			ID:          uuid.New(),
+			WorkspaceID: workspaceID,
+			Token:       "revoked-token",
+			CallID:      &callID,
+			MaxUses:     100,
+			Status:      entity.GuestInviteStatusRevoked,
+			ExpiresAt:   expiresAt,
+		},
+	}}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, memberID}: {WorkspaceID: workspaceID, UserID: memberID, Role: entity.WorkspaceRoleMember},
+	}}
+	svc := NewService(invites, &fakeGuestAccessRepo{}, &fakeUserRepo{}, workspaces, &fakeChannelRepo{}, nil)
+	svc.SetCallLookup(&fakeCallLookup{call: &entity.Call{ID: callID, WorkspaceID: workspaceID, Status: entity.CallStatusActive, Title: "Standup"}})
+
+	t.Run("valid anonymous", func(t *testing.T) {
+		res, err := svc.ResolveInvite(context.Background(), "valid-token", uuid.Nil)
+		if err != nil {
+			t.Fatalf("ResolveInvite returned error: %v", err)
+		}
+		if !res.Valid {
+			t.Fatalf("Valid = false, want true")
+		}
+		if res.WorkspaceID != workspaceID || res.CallID == nil || *res.CallID != callID {
+			t.Fatalf("workspace/call mismatch: %+v", res)
+		}
+		if res.CallTitle != "Standup" {
+			t.Fatalf("CallTitle = %q, want Standup", res.CallTitle)
+		}
+		if res.IsWorkspaceMember {
+			t.Fatalf("IsWorkspaceMember = true for anonymous, want false")
+		}
+	})
+
+	t.Run("valid member", func(t *testing.T) {
+		res, err := svc.ResolveInvite(context.Background(), "valid-token", memberID)
+		if err != nil {
+			t.Fatalf("ResolveInvite returned error: %v", err)
+		}
+		if !res.Valid || !res.IsWorkspaceMember {
+			t.Fatalf("expected valid + member, got %+v", res)
+		}
+	})
+
+	t.Run("valid non-member", func(t *testing.T) {
+		res, err := svc.ResolveInvite(context.Background(), "valid-token", uuid.New())
+		if err != nil {
+			t.Fatalf("ResolveInvite returned error: %v", err)
+		}
+		if res.IsWorkspaceMember {
+			t.Fatalf("IsWorkspaceMember = true for non-member, want false")
+		}
+	})
+
+	t.Run("revoked token is invalid not error", func(t *testing.T) {
+		res, err := svc.ResolveInvite(context.Background(), "revoked-token", uuid.Nil)
+		if err != nil {
+			t.Fatalf("ResolveInvite returned error for revoked token: %v", err)
+		}
+		if res.Valid {
+			t.Fatalf("Valid = true for revoked token, want false")
+		}
+	})
+
+	t.Run("unknown token is invalid not error", func(t *testing.T) {
+		res, err := svc.ResolveInvite(context.Background(), "does-not-exist", uuid.Nil)
+		if err != nil {
+			t.Fatalf("ResolveInvite returned error for unknown token: %v", err)
+		}
+		if res.Valid {
+			t.Fatalf("Valid = true for unknown token, want false")
+		}
+	})
+}
+
 type fakeCallLookup struct {
 	call *entity.Call
 }

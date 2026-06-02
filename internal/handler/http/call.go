@@ -3,6 +3,7 @@ package http
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -38,12 +39,20 @@ type JoinCallResponse struct {
 }
 
 type CallHandler struct {
-	svc    *call.Service
-	guests *guest.Service
+	svc       *call.Service
+	guests    *guest.Service
+	validator middleware.TokenValidator // optional: enables optional-auth resolve
 }
 
 func NewCallHandler(svc *call.Service, guests *guest.Service) *CallHandler {
 	return &CallHandler{svc: svc, guests: guests}
+}
+
+// SetTokenValidator wires the optional token validator used by the public
+// resolve endpoint to best-effort identify a signed-in visitor. When nil, the
+// resolve endpoint treats every visitor as anonymous. (unified guest link)
+func (h *CallHandler) SetTokenValidator(validator middleware.TokenValidator) {
+	h.validator = validator
 }
 
 // guestCallLinkMaxUses caps redeems on a single call guest link. It is set high
@@ -95,6 +104,62 @@ func (h *CallHandler) CreateGuestLink(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeCreated(w, guestLinkResponse{Token: invite.Token, ExpiresAt: invite.ExpiresAt})
+}
+
+// resolveInviteResponse is the public, read-only projection returned by the
+// unified-link resolve endpoint. valid is false (HTTP 200) for an invalid /
+// expired / used / revoked token so the FE renders a friendly state rather than
+// handling a 4xx/5xx. is_workspace_member is only true when a valid member
+// session is attached. (unified guest link)
+type resolveInviteResponse struct {
+	Valid             bool       `json:"valid"`
+	WorkspaceID       *uuid.UUID `json:"workspace_id,omitempty"`
+	CallID            *uuid.UUID `json:"call_id,omitempty"`
+	CallTitle         string     `json:"call_title,omitempty"`
+	ExpiresAt         *time.Time `json:"expires_at,omitempty"`
+	IsWorkspaceMember bool       `json:"is_workspace_member"`
+}
+
+// ResolveGuestLink resolves a guest invite token for the unified /join/<token>
+// link. PUBLIC (no auth middleware): it reads an OPTIONAL bearer session
+// best-effort to report is_workspace_member, but a missing or invalid token is
+// fine (anonymous). An invalid / expired / used / revoked invite token returns
+// 200 with {"valid": false}, never an error. (unified guest link)
+func (h *CallHandler) ResolveGuestLink(w http.ResponseWriter, r *http.Request) {
+	token := chi.URLParam(r, "token")
+
+	// Best-effort optional auth: only a Bearer header is honoured, and any parse
+	// or validation failure is silently ignored (the visitor is anonymous).
+	optionalUserID := uuid.Nil
+	if h.validator != nil {
+		if header := r.Header.Get("Authorization"); header != "" {
+			if raw, ok := strings.CutPrefix(header, "Bearer "); ok && raw != "" {
+				if userID, _, err := h.validator.ValidateToken(raw); err == nil {
+					optionalUserID = userID
+				}
+			}
+		}
+	}
+
+	result, err := h.guests.ResolveInvite(r.Context(), token, optionalUserID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	resp := resolveInviteResponse{
+		Valid:             result.Valid,
+		CallTitle:         result.CallTitle,
+		IsWorkspaceMember: result.IsWorkspaceMember,
+	}
+	if result.Valid {
+		workspaceID := result.WorkspaceID
+		resp.WorkspaceID = &workspaceID
+		resp.CallID = result.CallID
+		expiresAt := result.ExpiresAt
+		resp.ExpiresAt = &expiresAt
+	}
+	writeOK(w, resp)
 }
 
 type startCallRequest struct {

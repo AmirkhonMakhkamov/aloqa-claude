@@ -210,6 +210,172 @@ func TestCreateGuestLinkChannelLessCallReturns201(t *testing.T) {
 	}
 }
 
+// resolveInviteRepo serves a fixed set of invites by token for resolve tests.
+type resolveInviteRepo struct {
+	byToken map[string]*entity.GuestInvite
+}
+
+func (r *resolveInviteRepo) Create(context.Context, *entity.GuestInvite) error { return nil }
+func (r *resolveInviteRepo) GetByToken(_ context.Context, token string) (*entity.GuestInvite, error) {
+	if inv := r.byToken[token]; inv != nil {
+		return inv, nil
+	}
+	return nil, cerrors.NotFound("invite not found")
+}
+func (r *resolveInviteRepo) GetByID(context.Context, uuid.UUID) (*entity.GuestInvite, error) {
+	return nil, cerrors.NotFound("invite not found")
+}
+func (r *resolveInviteRepo) IncrementUseCount(context.Context, uuid.UUID) error { return nil }
+func (r *resolveInviteRepo) Revoke(context.Context, uuid.UUID) error            { return nil }
+func (r *resolveInviteRepo) ListByWorkspace(context.Context, uuid.UUID) ([]entity.GuestInvite, error) {
+	return nil, nil
+}
+
+type resolveCallLookup struct {
+	call *entity.Call
+}
+
+func (l resolveCallLookup) GetByID(_ context.Context, id uuid.UUID) (*entity.Call, error) {
+	if l.call != nil && l.call.ID == id {
+		return l.call, nil
+	}
+	return nil, cerrors.NotFound("call not found")
+}
+
+func newResolveRouter(workspaceID, callID, memberID uuid.UUID) http.Handler {
+	invites := &resolveInviteRepo{byToken: map[string]*entity.GuestInvite{
+		"valid-token": {
+			ID:          uuid.New(),
+			WorkspaceID: workspaceID,
+			Token:       "valid-token",
+			CallID:      &callID,
+			MaxUses:     100,
+			Status:      entity.GuestInviteStatusActive,
+			ExpiresAt:   time.Now().Add(time.Hour),
+		},
+		"revoked-token": {
+			ID:          uuid.New(),
+			WorkspaceID: workspaceID,
+			Token:       "revoked-token",
+			CallID:      &callID,
+			MaxUses:     100,
+			Status:      entity.GuestInviteStatusRevoked,
+			ExpiresAt:   time.Now().Add(time.Hour),
+		},
+	}}
+	workspaces := &httpWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, memberID}: {WorkspaceID: workspaceID, UserID: memberID, Role: entity.WorkspaceRoleMember},
+	}}
+	guestService := guestsvc.NewService(invites, guestLinkGrantRepo{}, guestLinkUserRepo{}, workspaces, newGuestLinkChannelRepo(nil, workspaceID), nil)
+	guestService.SetCallLookup(resolveCallLookup{call: &entity.Call{ID: callID, WorkspaceID: workspaceID, Status: entity.CallStatusActive, Title: "Standup"}})
+
+	callService := callsvc.NewService(&httpCallRepo{calls: map[uuid.UUID]*entity.Call{}, participants: map[[2]uuid.UUID]*entity.CallParticipant{}}, httpBreakoutRepo{}, httpChannelRepo{}, workspaces, httpNoopPublisher{}, nil, callsvc.MediaConfig{}, nil, nil)
+
+	return NewRouter(RouterDeps{
+		Auth:             &AuthHandler{},
+		Account:          &AccountHandler{},
+		Channels:         &ChannelHandler{},
+		Messages:         &MessageHandler{},
+		Calls:            NewCallHandler(callService, guestService),
+		Breakout:         &BreakoutHandler{},
+		Files:            &FileHandler{},
+		Presence:         &PresenceHandler{},
+		Recordings:       &RecordingHandler{},
+		Notifications:    &NotificationHandler{},
+		Search:           &SearchHandler{},
+		Admin:            &AdminHandler{},
+		Guests:           NewGuestHandler(guestService),
+		WS:               &wshandler.Handler{},
+		Validator:        fakeTokenValidator{userID: memberID},
+		PersonalResolver: fakePersonalResolver{workspaceID: workspaceID},
+	})
+}
+
+func performResolveRequest(router http.Handler, token string, bearer bool) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/invites/"+token, nil)
+	if bearer {
+		req.Header.Set("Authorization", "Bearer member-token")
+	}
+	res := httptest.NewRecorder()
+	router.ServeHTTP(res, req)
+	return res
+}
+
+func decodeResolve(t *testing.T, res *httptest.ResponseRecorder) resolveInviteResponse {
+	t.Helper()
+	var body resolveInviteResponse
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode resolve response: %v (body=%s)", err, res.Body.String())
+	}
+	return body
+}
+
+func TestResolveGuestLinkHTTP(t *testing.T) {
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	memberID := uuid.New()
+
+	t.Run("valid token anonymous returns call info", func(t *testing.T) {
+		router := newResolveRouter(workspaceID, callID, memberID)
+		res := performResolveRequest(router, "valid-token", false)
+		if res.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body=%s", res.Code, res.Body.String())
+		}
+		body := decodeResolve(t, res)
+		if !body.Valid {
+			t.Fatalf("valid = false, want true")
+		}
+		if body.WorkspaceID == nil || *body.WorkspaceID != workspaceID {
+			t.Fatalf("workspace_id = %v, want %s", body.WorkspaceID, workspaceID)
+		}
+		if body.CallID == nil || *body.CallID != callID {
+			t.Fatalf("call_id = %v, want %s", body.CallID, callID)
+		}
+		if body.CallTitle != "Standup" {
+			t.Fatalf("call_title = %q, want Standup", body.CallTitle)
+		}
+		if body.IsWorkspaceMember {
+			t.Fatalf("is_workspace_member = true for anonymous, want false")
+		}
+	})
+
+	t.Run("valid token with member session", func(t *testing.T) {
+		router := newResolveRouter(workspaceID, callID, memberID)
+		res := performResolveRequest(router, "valid-token", true)
+		if res.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body=%s", res.Code, res.Body.String())
+		}
+		body := decodeResolve(t, res)
+		if !body.Valid || !body.IsWorkspaceMember {
+			t.Fatalf("expected valid + member, got %+v", body)
+		}
+	})
+
+	t.Run("revoked token returns valid false at 200", func(t *testing.T) {
+		router := newResolveRouter(workspaceID, callID, memberID)
+		res := performResolveRequest(router, "revoked-token", false)
+		if res.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body=%s", res.Code, res.Body.String())
+		}
+		body := decodeResolve(t, res)
+		if body.Valid {
+			t.Fatalf("valid = true for revoked token, want false")
+		}
+	})
+
+	t.Run("unknown token returns valid false at 200", func(t *testing.T) {
+		router := newResolveRouter(workspaceID, callID, memberID)
+		res := performResolveRequest(router, "no-such-token", false)
+		if res.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body=%s", res.Code, res.Body.String())
+		}
+		body := decodeResolve(t, res)
+		if body.Valid {
+			t.Fatalf("valid = true for unknown token, want false")
+		}
+	})
+}
+
 // A channel call is also minted call-scoped (no channel grant) per the unified
 // guest-link decision #3.
 func TestCreateGuestLinkChannelCallIsCallScoped(t *testing.T) {

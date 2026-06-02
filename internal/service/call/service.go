@@ -1609,6 +1609,56 @@ func (s *Service) TransferHost(ctx context.Context, workspaceID, callID, actorUs
 	return nil
 }
 
+// RemoveParticipant lets the host evict another participant from the call. The
+// target is disconnected exactly as if they had left (CallParticipantLeft event
+// + LiveKit RemoveParticipant); a removed guest must re-knock to return. Only
+// the host may remove participants.
+func (s *Service) RemoveParticipant(ctx context.Context, workspaceID, callID, actorUserID, targetUserID uuid.UUID) error {
+	call, err := s.requireCallAccess(ctx, workspaceID, callID, actorUserID)
+	if err != nil {
+		return err
+	}
+	if call.Status == entity.CallStatusEnded {
+		return cerrors.Forbidden("call has already ended")
+	}
+	if actorUserID == targetUserID {
+		return cerrors.InvalidInput("cannot remove yourself; leave the call instead")
+	}
+
+	actor, err := s.calls.GetParticipant(ctx, callID, actorUserID)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return cerrors.Forbidden("actor is not a participant")
+		}
+		return cerrors.Internal("failed to get actor participant", err)
+	}
+	if actor.Role != entity.CallRoleHost {
+		return cerrors.Forbidden("only the host can remove participants")
+	}
+
+	target, err := s.calls.GetParticipant(ctx, callID, targetUserID)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return cerrors.NotFound("target participant not found")
+		}
+		return cerrors.Internal("failed to get target participant", err)
+	}
+
+	disconnected, err := disconnectParticipantIfConnected(ctx, s.calls, target.ID, entity.ParticipantLeftReasonLeft)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to remove participant", "call_id", callID, "target_user_id", targetUserID, "error", err)
+		return cerrors.Internal("failed to remove participant", err)
+	}
+	if disconnected {
+		markParticipantDisconnected(target, entity.ParticipantLeftReasonLeft)
+		s.publishParticipantEvent(ctx, event.TypeCallParticipantLeft, call, target)
+	}
+	s.removeLiveKitParticipantBestEffort(ctx, callID, targetUserID)
+
+	slog.InfoContext(ctx, "participant removed by host", "call_id", callID, "actor_user_id", actorUserID, "target_user_id", targetUserID)
+	return nil
+}
+
 func validateAssignableRole(callType entity.CallType, role entity.CallRole) error {
 	switch role {
 	case entity.CallRoleHost, entity.CallRoleCoHost, entity.CallRolePresenter, entity.CallRoleParticipant:

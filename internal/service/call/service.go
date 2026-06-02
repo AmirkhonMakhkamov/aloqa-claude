@@ -107,10 +107,6 @@ type Service struct {
 	egressSink       EgressWebhookSink // ALK-701: recording finalizer for egress_* webhooks
 	recordingEnabled bool              // ALK-701: egress configured → calls advertise settings.recording
 
-	// breakoutTimers holds in-memory auto-close timers keyed by callID
-	// (uuid.UUID -> *time.Timer). See breakout_timer.go.
-	breakoutTimers sync.Map
-
 	// breakoutDeleteTimers holds in-memory grace-period timers for the deferred
 	// deletion of breakout-room LiveKit rooms, keyed by the LiveKit room name
 	// (string -> *time.Timer). The grace lets connected clients leave the
@@ -660,6 +656,9 @@ func (s *Service) StartCall(
 	channelID *uuid.UUID,
 	settings entity.CallSettings,
 ) (*entity.Call, error) {
+	if callType == entity.CallTypeGroup || callType == entity.CallTypeMeeting {
+		settings.BreakoutRooms = true
+	}
 	if err := validateCallSettings(callType, settings); err != nil {
 		return nil, err
 	}
@@ -1148,7 +1147,7 @@ func (s *Service) ListWaiting(ctx context.Context, workspaceID, callID, userID u
 		return nil, cerrors.Internal("failed to list participants", err)
 	}
 
-	var waiting []entity.CallParticipant
+	waiting := make([]entity.CallParticipant, 0)
 	for _, p := range participants {
 		if p.Status == entity.ParticipantStatusWaiting {
 			waiting = append(waiting, p)
@@ -1990,7 +1989,7 @@ func (s *Service) enqueueCallEventTx(ctx context.Context, scope txscope.Scope, e
 	if call != nil && call.ChannelID != nil {
 		channelID = *call.ChannelID
 	}
-	return s.enqueueRealtimeTx(ctx, scope, evtType, fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID), call.WorkspaceID, channelID, userID, event.CallPayload{Call: call})
+	return s.enqueueDurableEventTx(ctx, scope, evtType, fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID), call.WorkspaceID, channelID, userID, event.CallPayload{Call: call})
 }
 
 func (s *Service) enqueueParticipantEventTx(ctx context.Context, scope txscope.Scope, evtType event.Type, call *entity.Call, p *entity.CallParticipant) error {
@@ -1998,7 +1997,7 @@ func (s *Service) enqueueParticipantEventTx(ctx context.Context, scope txscope.S
 	if call != nil && call.ChannelID != nil {
 		channelID = *call.ChannelID
 	}
-	return s.enqueueRealtimeTx(ctx, scope, evtType, fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID), call.WorkspaceID, channelID, p.UserID, event.CallParticipantPayload{
+	return s.enqueueDurableEventTx(ctx, scope, evtType, fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID), call.WorkspaceID, channelID, p.UserID, event.CallParticipantPayload{
 		CallID:      call.ID,
 		Participant: p,
 	})
@@ -2011,7 +2010,7 @@ func (s *Service) enqueueCallMessageEventTx(ctx context.Context, scope txscope.S
 	}
 	subject := fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID)
 	payload := callMessagePayloadFor(evtType, call, msg)
-	return s.enqueueRealtimeTx(ctx, scope, evtType, subject, call.WorkspaceID, channelID, msg.SenderID, payload)
+	return s.enqueueDurableEventTx(ctx, scope, evtType, subject, call.WorkspaceID, channelID, msg.SenderID, payload)
 }
 
 func callMessagePayloadFor(evtType event.Type, call *entity.Call, msg *entity.CallMessage) any {
@@ -2021,7 +2020,7 @@ func callMessagePayloadFor(evtType event.Type, call *entity.Call, msg *entity.Ca
 	return event.CallMessagePayload{CallID: call.ID, Message: *msg}
 }
 
-func (s *Service) enqueueRealtimeTx(ctx context.Context, scope txscope.Scope, evtType event.Type, subject string, workspaceID, channelID, userID uuid.UUID, payload any) error {
+func (s *Service) enqueueDurableEventTx(ctx context.Context, scope txscope.Scope, evtType event.Type, subject string, workspaceID, channelID, userID uuid.UUID, payload any) error {
 	if scope == nil {
 		return cerrors.Unavailable("transaction scope is not configured")
 	}
@@ -2037,7 +2036,7 @@ func (s *Service) enqueueRealtimeTx(ctx context.Context, scope txscope.Scope, ev
 		return err
 	}
 	if !durable {
-		slog.WarnContext(ctx, "enqueueRealtimeTx invoked for non-durable event; skipping outbox enqueue",
+		slog.WarnContext(ctx, "enqueueDurableEventTx invoked for non-durable event; skipping outbox enqueue",
 			"type", evtType, "subject", subject)
 		return nil
 	}

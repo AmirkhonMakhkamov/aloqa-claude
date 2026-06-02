@@ -488,6 +488,9 @@ func run() error {
 	reliability.Supervise(ctx, "call_stale_cleanup", func(c context.Context) {
 		callSvc.RunStaleCallCleanupWorker(c, cfg.WebRTC.CallCleanupInterval, cfg.WebRTC.CallEmptyGrace, cfg.WebRTC.CallCleanupBatchSize)
 	})
+	reliability.Supervise(ctx, "breakout_auto_close", func(c context.Context) {
+		callSvc.RunBreakoutAutoCloseWorker(c, cfg.WebRTC.CallCleanupInterval, cfg.WebRTC.CallCleanupBatchSize)
+	})
 	reliability.Supervise(ctx, "recording_processor", func(c context.Context) {
 		recordingSvc.RunProcessingWorker(c, recordingProcessor, cfg.Media.RecordingProcessingInterval, 20)
 	})

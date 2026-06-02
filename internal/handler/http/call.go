@@ -610,6 +610,42 @@ type updateMediaRequest struct {
 	ScreenSharing *bool `json:"screen_sharing,omitempty"`
 }
 
+type updateSettingsRequest struct {
+	BreakoutRooms *bool `json:"breakout_rooms,omitempty"`
+}
+
+func (h *CallHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	var req updateSettingsRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	if err := h.svc.CanAccessCall(r.Context(), workspaceID, callID, userID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	updated, err := h.svc.UpdateCallSettings(r.Context(), callID, userID, call.CallSettingsPatch{
+		BreakoutRooms: req.BreakoutRooms,
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, updated)
+}
+
 func (h *CallHandler) UpdateMedia(w http.ResponseWriter, r *http.Request) {
 	callID, err := id.Parse(chi.URLParam(r, "callID"))
 	if err != nil {

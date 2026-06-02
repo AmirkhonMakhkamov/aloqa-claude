@@ -301,6 +301,13 @@ func (r *fakeHTTPCallRepo) ListActiveByWorkspace(context.Context, uuid.UUID) ([]
 func (r *fakeHTTPCallRepo) UpdateStatus(context.Context, uuid.UUID, entity.CallStatus) error {
 	return nil
 }
+func (r *fakeHTTPCallRepo) UpdateSettings(_ context.Context, id uuid.UUID, settings entity.CallSettings) error {
+	if c := r.calls[id]; c != nil {
+		c.Settings = settings
+		return nil
+	}
+	return cerrors.NotFound("call not found")
+}
 func (r *fakeHTTPCallRepo) End(context.Context, uuid.UUID) error { return nil }
 func (r *fakeHTTPCallRepo) AddParticipant(_ context.Context, p *entity.CallParticipant) error {
 	r.participants[[2]uuid.UUID{p.CallID, p.UserID}] = p
@@ -408,6 +415,9 @@ func (fakeHTTPBreakoutRepo) GetByID(context.Context, uuid.UUID) (*entity.Breakou
 }
 
 func (fakeHTTPBreakoutRepo) ListByCall(context.Context, uuid.UUID) ([]entity.BreakoutRoom, error) {
+	return nil, nil
+}
+func (fakeHTTPBreakoutRepo) ListCallsWithExpiredActiveBreakouts(context.Context, time.Time, int) ([]uuid.UUID, error) {
 	return nil, nil
 }
 func (fakeHTTPBreakoutRepo) Close(context.Context, uuid.UUID) error { return nil }

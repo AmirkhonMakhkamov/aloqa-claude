@@ -313,6 +313,9 @@ func (r *fakeCallRepo) ListActiveByWorkspace(context.Context, uuid.UUID) ([]enti
 	return nil, nil
 }
 func (r *fakeCallRepo) UpdateStatus(context.Context, uuid.UUID, entity.CallStatus) error { return nil }
+func (r *fakeCallRepo) UpdateSettings(context.Context, uuid.UUID, entity.CallSettings) error {
+	return nil
+}
 func (r *fakeCallRepo) End(context.Context, uuid.UUID) error                             { return nil }
 func (r *fakeCallRepo) AddParticipant(context.Context, *entity.CallParticipant) error    { return nil }
 func (r *fakeCallRepo) AddParticipantIfCapacity(context.Context, *entity.CallParticipant, int) error {

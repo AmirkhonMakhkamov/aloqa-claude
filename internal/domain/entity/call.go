@@ -203,6 +203,7 @@ type BreakoutRoom struct {
 	Name      string             `json:"name"`
 	CreatedBy uuid.UUID          `json:"created_by"`
 	TimeLimit *int               `json:"time_limit,omitempty"` // seconds; nil = no limit
+	ClosesAt  *time.Time         `json:"closes_at"`
 	Status    BreakoutRoomStatus `json:"status"`
 	CreatedAt time.Time          `json:"created_at"`
 	ClosedAt  *time.Time         `json:"closed_at,omitempty"`

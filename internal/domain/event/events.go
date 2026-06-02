@@ -49,6 +49,7 @@ const (
 	TypeCallMessageCreated     Type = "call.message.created"
 	TypeCallMessageDeleted     Type = "call.message.deleted"
 	TypeCallTypingStarted      Type = "call.typing.started"
+	TypeCallSettingsChanged    Type = "call.settings.changed"
 	TypeCallHandRaised         Type = "call.participant.hand_raised"
 	TypeCallHandLowered        Type = "call.participant.hand_lowered"
 	TypeCallReaction           Type = "call.reaction.added"
@@ -120,7 +121,8 @@ func DefinitionForType(t Type) Definition {
 	switch t {
 	case TypeTypingStarted, TypeCallTypingStarted, TypeSignalOffer, TypeSignalAnswer, TypeSignalCandidate,
 		TypeCallHandRaised, TypeCallHandLowered, TypeCallReaction,
-		TypeCallShareRequestCreated, TypeCallShareRequestResolved, TypeCallFeaturedShareUpdated:
+		TypeCallShareRequestCreated, TypeCallShareRequestResolved, TypeCallFeaturedShareUpdated,
+		TypeBreakoutBroadcast:
 		return Definition{
 			Version:          CurrentVersion,
 			DeliverySemantic: DeliveryEphemeral,
@@ -263,6 +265,11 @@ type PresencePayload struct {
 
 type CallPayload struct {
 	Call *entity.Call `json:"call"`
+}
+
+type CallSettingsChangedPayload struct {
+	CallID   uuid.UUID           `json:"call_id"`
+	Settings entity.CallSettings `json:"settings"`
 }
 
 type CallMessagePayload struct {

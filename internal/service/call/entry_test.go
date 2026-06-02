@@ -2,6 +2,7 @@ package call
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,14 +59,14 @@ func TestJoinCallEntryModes(t *testing.T) {
 			settings: entity.CallSettings{EntryMode: entity.EntryModePassword},
 			hash:     string(hash),
 			password: "nope",
-			wantCode: cerrors.CodeUnauthorized,
+			wantCode: cerrors.CodeCallPasswordRequired,
 		},
 		{
-			name:     "password missing unauthorized",
+			name:     "password missing rejected",
 			settings: entity.CallSettings{EntryMode: entity.EntryModePassword},
 			hash:     string(hash),
 			password: "",
-			wantCode: cerrors.CodeUnauthorized,
+			wantCode: cerrors.CodeCallPasswordRequired,
 		},
 	}
 
@@ -231,6 +232,14 @@ func TestStartCallNormalisesEntryMode(t *testing.T) {
 		_, err := newSvc().StartCall(ctx, workspaceID, hostID, entity.CallTypeGroup, "g", nil, entity.CallSettings{EntryMode: entity.EntryModePassword}, "")
 		if !hasCode(err, cerrors.CodeInvalidInput) {
 			t.Fatalf("StartCall password-without-password error = %v, want INVALID_INPUT", err)
+		}
+	})
+
+	t.Run("password longer than 72 bytes is rejected as invalid input", func(t *testing.T) {
+		longPassword := strings.Repeat("a", 73)
+		_, err := newSvc().StartCall(ctx, workspaceID, hostID, entity.CallTypeGroup, "g", nil, entity.CallSettings{EntryMode: entity.EntryModePassword}, longPassword)
+		if !hasCode(err, cerrors.CodeInvalidInput) {
+			t.Fatalf("StartCall over-long password error = %v, want INVALID_INPUT", err)
 		}
 	})
 }

@@ -39,6 +39,11 @@ const (
 	// already declined (ALK-700 guest flow). Maps to 403 so the FE deep-link
 	// classifier can render a terminal "declined" state and stop re-polling.
 	CodeWaitingRoomDeclined Code = "WAITING_ROOM_DECLINED"
+	// CodeCallPasswordRequired marks a join rejected because the call's password
+	// entry mode requires a password that was missing or incorrect (#4). Maps to
+	// 401 with a distinct code so the FE can show a password prompt without
+	// conflating it with a session-auth 401.
+	CodeCallPasswordRequired Code = "CALL_PASSWORD_REQUIRED"
 )
 
 // AppError is the standard application error type.
@@ -68,7 +73,7 @@ func (e *AppError) HTTPStatus() int {
 		return http.StatusConflict
 	case CodeInvalidInput:
 		return http.StatusBadRequest
-	case CodeUnauthorized:
+	case CodeUnauthorized, CodeCallPasswordRequired:
 		return http.StatusUnauthorized
 	case CodeForbidden, CodeAccountDeactivated, CodeAccountSuspended, CodeNotDeactivated, CodeWaitingRoomDeclined:
 		return http.StatusForbidden
@@ -101,6 +106,10 @@ func InvalidInput(msg string) *AppError {
 
 func Unauthorized(msg string) *AppError {
 	return &AppError{Code: CodeUnauthorized, Message: msg}
+}
+
+func CallPasswordRequired(msg string) *AppError {
+	return &AppError{Code: CodeCallPasswordRequired, Message: msg}
 }
 
 func Forbidden(msg string) *AppError {

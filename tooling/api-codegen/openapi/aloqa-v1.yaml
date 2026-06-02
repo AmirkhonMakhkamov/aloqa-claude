@@ -2038,7 +2038,7 @@ components:
           $ref: '#/components/schemas/CallEntryMode'
         password:
           type: string
-          maxLength: 128
+          maxLength: 72
           writeOnly: true
           description: |
             Join password for password entry mode (write-only, hashed
@@ -2226,7 +2226,7 @@ components:
       properties:
         password:
           type: string
-          maxLength: 128
+          maxLength: 72
           writeOnly: true
           description: The call's join password (verified server-side).
 

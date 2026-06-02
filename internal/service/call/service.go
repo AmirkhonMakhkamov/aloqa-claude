@@ -378,6 +378,10 @@ func (s *Service) ensureCollaborationChannelAccess(ctx context.Context, ch *enti
 	return decision.Allowed, nil
 }
 
+// maxJoinPasswordBytes is bcrypt's hard input limit; longer host-supplied
+// passwords are rejected as invalid input rather than failing to hash. #4.
+const maxJoinPasswordBytes = 72
+
 func validateCallSettings(callType entity.CallType, settings entity.CallSettings) error {
 	switch callType {
 	case entity.CallTypeOneToOne, entity.CallTypeGroup, entity.CallTypeMeeting, entity.CallTypeWebinar, entity.CallTypeSelector:
@@ -394,19 +398,21 @@ func validateCallSettings(callType entity.CallType, settings entity.CallSettings
 }
 
 // verifyJoinPassword checks a password-mode join password against the stored
-// bcrypt hash. Both a missing and an incorrect password return UNAUTHORIZED so
-// the client uniformly re-prompts (the message distinguishes the two). A call
-// in password mode without a stored hash is a misconfiguration -> FORBIDDEN. #4.
+// bcrypt hash. Both a missing and an incorrect password return the dedicated
+// CALL_PASSWORD_REQUIRED code (HTTP 401) so the client uniformly re-prompts for
+// the password without conflating it with a session-auth 401 (the message still
+// distinguishes the two). A call in password mode without a stored hash is a
+// misconfiguration -> FORBIDDEN. #4.
 func verifyJoinPassword(hash, password string) error {
 	if hash == "" {
 		// Password mode with no stored hash is a misconfiguration — refuse safely.
 		return cerrors.Forbidden("this call is not configured with a password")
 	}
 	if password == "" {
-		return cerrors.Unauthorized("a password is required to join this call")
+		return cerrors.CallPasswordRequired("a password is required to join this call")
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {
-		return cerrors.Unauthorized("incorrect call password")
+		return cerrors.CallPasswordRequired("incorrect call password")
 	}
 	return nil
 }
@@ -603,6 +609,12 @@ func (s *Service) StartCall(
 	if entryMode == entity.EntryModePassword {
 		if joinPassword == "" {
 			return nil, cerrors.InvalidInput("a password is required for password entry mode")
+		}
+		// bcrypt rejects inputs longer than 72 bytes (golang.org/x/crypto >= v0.50
+		// errors instead of truncating); validate at the boundary so an over-long
+		// host-supplied password is a 400, not a 500. #4.
+		if len(joinPassword) > maxJoinPasswordBytes {
+			return nil, cerrors.InvalidInput("call password must be at most 72 bytes")
 		}
 		hashed, err := bcrypt.GenerateFromPassword([]byte(joinPassword), bcrypt.DefaultCost)
 		if err != nil {

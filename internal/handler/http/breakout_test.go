@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -109,7 +110,7 @@ func newBreakoutHTTPHandler(workspaceID, callID, userID uuid.UUID, repo *breakou
 	workspaces := &httpWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
 		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
 	}}
-	svc := callsvc.NewService(calls, repo, httpChannelRepo{}, workspaces, httpNoopPublisher{}, nil, callsvc.MediaConfig{}, nil, nil)
+	svc := callsvc.NewService(calls, repo, httpChannelRepo{}, workspaces, httpNoopPublisher{}, nil, callsvc.MediaConfig{}, nil, nil, nil)
 	return NewBreakoutHandler(svc)
 }
 
@@ -158,6 +159,10 @@ func (r *breakoutHTTPRepo) ListByCall(_ context.Context, callID uuid.UUID) ([]en
 		}
 	}
 	return rooms, nil
+}
+
+func (r *breakoutHTTPRepo) ListCallsWithExpiredActiveBreakouts(context.Context, time.Time, int) ([]uuid.UUID, error) {
+	return nil, nil
 }
 
 func (r *breakoutHTTPRepo) Close(context.Context, uuid.UUID) error { return nil }

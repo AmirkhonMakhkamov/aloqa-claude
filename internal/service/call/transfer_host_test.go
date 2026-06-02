@@ -32,7 +32,7 @@ func transferHostFixture(t *testing.T) (*Service, *fakeCallRepo, uuid.UUID, uuid
 			{callID, targetID}: {ID: uuid.New(), CallID: callID, UserID: targetID, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
 	return svc, calls, workspaceID, callID, hostID, targetID
 }
 
@@ -129,7 +129,7 @@ func TestRequireCallAccess_ConnectedParticipantBypassesDMChannelGate(t *testing.
 			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypeDM},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, channels, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, channels, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
 
 	if err := svc.CanAccessCall(ctx, workspaceID, callID, userID); err != nil {
 		t.Fatalf("CanAccessCall connected participant error = %v, want nil (connected participant bypasses DM channel gate)", err)
@@ -161,7 +161,7 @@ func TestRequireCallAccess_DisconnectedParticipantStillGatedByChannel(t *testing
 			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypeDM},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, channels, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, channels, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
 
 	if err := svc.CanAccessCall(ctx, workspaceID, callID, userID); !hasCode(err, cerrors.CodeForbidden) {
 		t.Fatalf("CanAccessCall disconnected non-member error = %v, want FORBIDDEN", err)

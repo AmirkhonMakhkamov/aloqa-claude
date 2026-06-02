@@ -216,7 +216,7 @@ func newCallInteractionTestService(
 			{callID, disconnectedID}: {ID: uuid.New(), CallID: callID, UserID: disconnectedID, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusDisconnected},
 		},
 	}
-	return NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, pub, nil, mediaTestConfig(), nil, nil), pub
+	return NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, pub, nil, mediaTestConfig(), nil, nil, nil), pub
 }
 
 func assertHandPublish(t *testing.T, captures []capturedPublish, workspaceID, callID, actorID uuid.UUID, recipients []uuid.UUID, evtType event.Type) {

@@ -62,13 +62,30 @@ func (s *Service) CreateBreakoutRooms(
 		return nil, err
 	}
 
-	now := time.Now()
-	rooms := make([]entity.BreakoutRoom, 0, len(inputs))
+	now := time.Now().UTC()
 	maxTimeLimit := 0
-
 	for _, input := range inputs {
 		if input.Name == "" {
 			return nil, cerrors.InvalidInput("breakout room name is required")
+		}
+		if input.TimeLimit != nil && *input.TimeLimit > maxTimeLimit {
+			maxTimeLimit = *input.TimeLimit
+		}
+	}
+
+	var closesAt *time.Time
+	if maxTimeLimit > 0 {
+		// Preserve the old call-scoped timer behavior: close all rooms at the
+		// largest positive room limit, not when the first shorter room expires.
+		t := now.Add(time.Duration(maxTimeLimit) * time.Second)
+		closesAt = &t
+	}
+
+	rooms := make([]entity.BreakoutRoom, 0, len(inputs))
+	for _, input := range inputs {
+		roomClosesAt := (*time.Time)(nil)
+		if input.TimeLimit != nil && *input.TimeLimit > 0 {
+			roomClosesAt = closesAt
 		}
 
 		room := entity.BreakoutRoom{
@@ -77,6 +94,7 @@ func (s *Service) CreateBreakoutRooms(
 			Name:      input.Name,
 			CreatedBy: userID,
 			TimeLimit: input.TimeLimit,
+			ClosesAt:  roomClosesAt,
 			Status:    entity.BreakoutRoomStatusActive,
 			CreatedAt: now,
 		}
@@ -128,13 +146,7 @@ func (s *Service) CreateBreakoutRooms(
 			})
 		}
 
-		if input.TimeLimit != nil && *input.TimeLimit > maxTimeLimit {
-			maxTimeLimit = *input.TimeLimit
-		}
 	}
-
-	// Schedule a best-effort auto-close if any room has a positive time limit.
-	s.scheduleBreakoutAutoClose(callID, call.CreatedBy, maxTimeLimit)
 
 	slog.InfoContext(ctx, "breakout rooms created", "call_id", callID, "count", len(rooms), "user_id", userID)
 	return rooms, nil
@@ -362,11 +374,6 @@ func (s *Service) CloseBreakoutRoom(ctx context.Context, callID, userID, breakou
 		Room:   room,
 	})
 
-	// If no active breakout rooms remain, cancel any pending auto-close timer.
-	if remaining, err := s.breakoutRooms.ListByCall(ctx, callID); err == nil && !hasActiveBreakoutRoom(remaining) {
-		s.cancelBreakoutAutoClose(callID)
-	}
-
 	slog.InfoContext(ctx, "breakout room closed", "call_id", callID, "breakout_room_id", breakoutRoomID, "user_id", userID)
 	return nil
 }
@@ -399,9 +406,9 @@ func (s *Service) CloseAllBreakoutRooms(ctx context.Context, callID, userID uuid
 		return cerrors.Internal("failed to list breakout rooms", err)
 	}
 
-	// Cancel any pending auto-close timer first (CloseAll supersedes it and the
-	// timer itself ends up here — cancelling makes the operation idempotent).
-	s.cancelBreakoutAutoClose(callID)
+	if !hasActiveBreakoutRoom(rooms) {
+		return nil
+	}
 
 	// Close each breakout room media plane and unassign participants.
 	for _, room := range rooms {
@@ -528,7 +535,7 @@ func (s *Service) publishBreakoutEvent(ctx context.Context, evtType event.Type, 
 		channelID = *call.ChannelID
 	}
 	subject := fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID)
-	s.doPublish(ctx, evtType, subject, call.WorkspaceID, channelID, call.CreatedBy, payload)
+	s.enqueueRealtime(ctx, evtType, subject, call.WorkspaceID, channelID, call.CreatedBy, payload)
 }
 
 // breakoutRoomNameSeparator delimits the call and breakout-room UUIDs in a

@@ -26,6 +26,10 @@ type EventPublisher interface {
 	Publish(ctx context.Context, subject string, data []byte) error
 }
 
+type RealtimeOutbox interface {
+	Enqueue(ctx context.Context, evt event.Event, body []byte, maxAttempts int) error
+}
+
 type CollaborationAccessAuthorizer interface {
 	AuthorizeCall(ctx context.Context, channelID, userID uuid.UUID) (collabaccess.Decision, error)
 }
@@ -96,6 +100,7 @@ type Service struct {
 	channels         repository.ChannelRepository
 	members          repository.WorkspaceRepository
 	pubsub           EventPublisher
+	realtimeOutbox   RealtimeOutbox
 	sfu              *sfu.SFU
 	media            MediaConfig
 	livekit          LiveKitSettings
@@ -106,10 +111,6 @@ type Service struct {
 	tx               txscope.Manager
 	egressSink       EgressWebhookSink // ALK-701: recording finalizer for egress_* webhooks
 	recordingEnabled bool              // ALK-701: egress configured → calls advertise settings.recording
-
-	// breakoutTimers holds in-memory auto-close timers keyed by callID
-	// (uuid.UUID -> *time.Timer). See breakout_timer.go.
-	breakoutTimers sync.Map
 
 	// breakoutDeleteTimers holds in-memory grace-period timers for the deferred
 	// deletion of breakout-room LiveKit rooms, keyed by the LiveKit room name
@@ -166,6 +167,7 @@ func NewService(
 	media MediaConfig,
 	guests *guestaccess.Checker,
 	collab CollaborationAccessAuthorizer,
+	realtimeOutbox RealtimeOutbox,
 ) *Service {
 	if media.TokenTTL <= 0 {
 		media.TokenTTL = 5 * time.Minute
@@ -174,15 +176,16 @@ func NewService(
 		media.DefaultWebinarPresenters = sfu.DefaultMaxPresenters
 	}
 	return &Service{
-		calls:         calls,
-		breakoutRooms: breakoutRooms,
-		channels:      channels,
-		members:       members,
-		pubsub:        pubsub,
-		sfu:           sfuServer,
-		media:         media,
-		guests:        guests,
-		collab:        collab,
+		calls:          calls,
+		breakoutRooms:  breakoutRooms,
+		channels:       channels,
+		members:        members,
+		pubsub:         pubsub,
+		realtimeOutbox: realtimeOutbox,
+		sfu:            sfuServer,
+		media:          media,
+		guests:         guests,
+		collab:         collab,
 	}
 }
 
@@ -2045,6 +2048,33 @@ func (s *Service) enqueueRealtimeTx(ctx context.Context, scope txscope.Scope, ev
 		return nil
 	}
 	return scope.EnqueueRealtime(ctx, evt, body)
+}
+
+func (s *Service) enqueueRealtime(ctx context.Context, evtType event.Type, subject string, workspaceID, channelID, userID uuid.UUID, payload any) {
+	evt, body, durable, err := event.Prepare(subject, event.Event{
+		Type:        evtType,
+		WorkspaceID: workspaceID,
+		ChannelID:   channelID,
+		UserID:      userID,
+		Timestamp:   time.Now(),
+		Payload:     payload,
+	})
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to prepare realtime event", "type", evtType, "subject", subject, "error", err)
+		return
+	}
+	if !durable {
+		slog.WarnContext(ctx, "enqueueRealtime invoked for non-durable event; skipping outbox enqueue",
+			"type", evtType, "subject", subject)
+		return
+	}
+	if s.realtimeOutbox == nil {
+		s.doPublish(ctx, evtType, subject, workspaceID, channelID, userID, payload)
+		return
+	}
+	if err := s.realtimeOutbox.Enqueue(ctx, evt, body, 0); err != nil {
+		slog.ErrorContext(ctx, "failed to enqueue realtime event", "type", evtType, "subject", subject, "error", err)
+	}
 }
 
 func (s *Service) doPublish(ctx context.Context, evtType event.Type, subject string, workspaceID, channelID, userID uuid.UUID, payload any) {

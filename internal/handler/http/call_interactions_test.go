@@ -240,7 +240,7 @@ func newCallInteractionHTTPRouterWithMediaConfig(workspaceID, callID, userID uui
 	workspaces := &httpWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
 		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
 	}}
-	svc := callsvc.NewService(calls, httpBreakoutRepo{}, httpChannelRepo{}, workspaces, httpNoopPublisher{}, nil, media, nil, nil)
+	svc := callsvc.NewService(calls, httpBreakoutRepo{}, httpChannelRepo{}, workspaces, httpNoopPublisher{}, nil, media, nil, nil, nil)
 	router := NewRouter(RouterDeps{
 		Auth:             &AuthHandler{},
 		Account:          &AccountHandler{},
@@ -497,6 +497,9 @@ func (httpBreakoutRepo) GetByID(context.Context, uuid.UUID) (*entity.BreakoutRoo
 	return nil, cerrors.NotFound("breakout room not found")
 }
 func (httpBreakoutRepo) ListByCall(context.Context, uuid.UUID) ([]entity.BreakoutRoom, error) {
+	return nil, nil
+}
+func (httpBreakoutRepo) ListCallsWithExpiredActiveBreakouts(context.Context, time.Time, int) ([]uuid.UUID, error) {
 	return nil, nil
 }
 func (httpBreakoutRepo) Close(context.Context, uuid.UUID) error { return nil }

@@ -84,7 +84,7 @@ func newGuestLinkRouter(
 	}}
 
 	channelRepo := newGuestLinkChannelRepo(channelID, workspaceID)
-	callService := callsvc.NewService(calls, httpBreakoutRepo{}, channelRepo, workspaces, httpNoopPublisher{}, nil, callsvc.MediaConfig{}, nil, nil)
+	callService := callsvc.NewService(calls, httpBreakoutRepo{}, channelRepo, workspaces, httpNoopPublisher{}, nil, callsvc.MediaConfig{}, nil, nil, nil)
 
 	inviteRepo := &captureInviteRepo{}
 	guestService := guestsvc.NewService(
@@ -287,7 +287,7 @@ func newResolveRouterWithSessions(workspaceID, callID, memberID uuid.UUID, sessi
 	guestService := guestsvc.NewService(invites, guestLinkGrantRepo{}, guestLinkUserRepo{}, workspaces, newGuestLinkChannelRepo(nil, workspaceID), nil)
 	guestService.SetCallLookup(resolveCallLookup{call: &entity.Call{ID: callID, WorkspaceID: workspaceID, Status: entity.CallStatusActive, Title: "Standup"}})
 
-	callService := callsvc.NewService(&httpCallRepo{calls: map[uuid.UUID]*entity.Call{}, participants: map[[2]uuid.UUID]*entity.CallParticipant{}}, httpBreakoutRepo{}, httpChannelRepo{}, workspaces, httpNoopPublisher{}, nil, callsvc.MediaConfig{}, nil, nil)
+	callService := callsvc.NewService(&httpCallRepo{calls: map[uuid.UUID]*entity.Call{}, participants: map[[2]uuid.UUID]*entity.CallParticipant{}}, httpBreakoutRepo{}, httpChannelRepo{}, workspaces, httpNoopPublisher{}, nil, callsvc.MediaConfig{}, nil, nil, nil)
 
 	return NewRouter(RouterDeps{
 		Auth:             &AuthHandler{},

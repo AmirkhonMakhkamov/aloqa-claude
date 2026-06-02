@@ -26,7 +26,7 @@ func (r *fakeMessageRepo) Create(_ context.Context, msg *entity.Message) error {
 }
 
 func newEmitTestService(calls *fakeCallRepo, msgs *fakeMessageRepo) *Service {
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
 	svc.SetMessageRepo(msgs)
 	return svc
 }
@@ -185,7 +185,7 @@ func TestCancelCallWritesMissedCallEventToHistory(t *testing.T) {
 		channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypeDM},
 	}}
 	msgs := &fakeMessageRepo{}
-	svc := NewService(calls, &fakeBreakoutRepo{}, channels, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, channels, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
 	svc.SetMessageRepo(msgs)
 
 	if _, err := svc.CancelCall(ctx, workspaceID, callID, caller); err != nil {
@@ -281,7 +281,7 @@ func TestLeaveCallAutoEndWritesCallEventToHistory(t *testing.T) {
 		channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypeDM},
 	}}
 	msgs := &fakeMessageRepo{}
-	svc := NewService(calls, &fakeBreakoutRepo{}, channels, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, channels, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
 	svc.SetMessageRepo(msgs)
 
 	if _, err := svc.LeaveCall(ctx, workspaceID, callID, userID); err != nil {

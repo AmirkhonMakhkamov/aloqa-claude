@@ -68,7 +68,7 @@ func (s *Service) publishCallSettingsChanged(ctx context.Context, call *entity.C
 	}
 
 	subject := fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID)
-	s.doPublish(ctx, event.TypeCallSettingsChanged, subject, call.WorkspaceID, channelID, call.CreatedBy, event.CallSettingsChangedPayload{
+	s.enqueueRealtime(ctx, event.TypeCallSettingsChanged, subject, call.WorkspaceID, channelID, call.CreatedBy, event.CallSettingsChangedPayload{
 		CallID:   call.ID,
 		Settings: call.Settings,
 	})

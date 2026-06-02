@@ -177,6 +177,7 @@ type BreakoutRoomRepository interface {
 	Create(ctx context.Context, room *entity.BreakoutRoom) error
 	GetByID(ctx context.Context, id uuid.UUID) (*entity.BreakoutRoom, error)
 	ListByCall(ctx context.Context, callID uuid.UUID) ([]entity.BreakoutRoom, error)
+	ListCallsWithExpiredActiveBreakouts(ctx context.Context, before time.Time, limit int) ([]uuid.UUID, error)
 	Close(ctx context.Context, id uuid.UUID) error
 	CloseAllByCall(ctx context.Context, callID uuid.UUID) error
 

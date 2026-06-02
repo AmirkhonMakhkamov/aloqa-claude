@@ -32,7 +32,7 @@ func newShareControlHTTPRouter(
 		{workspaceID, actorID}:  {WorkspaceID: workspaceID, UserID: actorID, Role: entity.WorkspaceRoleMember},
 		{workspaceID, targetID}: {WorkspaceID: workspaceID, UserID: targetID, Role: entity.WorkspaceRoleMember},
 	}}
-	svc := callsvc.NewService(calls, httpBreakoutRepo{}, httpChannelRepo{}, workspaces, httpNoopPublisher{}, nil, callsvc.MediaConfig{}, nil, nil)
+	svc := callsvc.NewService(calls, httpBreakoutRepo{}, httpChannelRepo{}, workspaces, httpNoopPublisher{}, nil, callsvc.MediaConfig{}, nil, nil, nil)
 	return NewRouter(RouterDeps{
 		Auth:             &AuthHandler{},
 		Account:          &AccountHandler{},

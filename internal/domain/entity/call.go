@@ -80,13 +80,13 @@ type CallSettings struct {
 }
 
 // TopParticipant is a thin user projection used by ActiveCallSummary to
-// render avatar stacks on the Calls Home Live Now section. ColorSeed is
-// optional and reserved for the FE to derive deterministic avatar fallback
-// colors (kept nullable so the BE can omit it without breaking the schema).
+// render avatar stacks on the Calls Home Live Now section. AvatarColor is the
+// persisted fallback color; ColorSeed is kept for older clients.
 type TopParticipant struct {
 	UserID      uuid.UUID `json:"user_id"`
 	DisplayName string    `json:"display_name"`
 	AvatarURL   *string   `json:"avatar_url"`
+	AvatarColor string    `json:"avatar_color"`
 	ColorSeed   *int      `json:"color_seed"`
 }
 

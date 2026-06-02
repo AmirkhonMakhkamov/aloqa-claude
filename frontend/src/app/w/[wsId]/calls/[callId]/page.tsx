@@ -1018,7 +1018,7 @@ function ParticipantTile({
         />
       ) : (
         <div className="absolute inset-0 grid place-items-center">
-          <Avatar name={name} src={user?.avatar_url ?? null} size={80} />
+          <Avatar name={name} src={user?.avatar_url ?? null} color={user?.avatar_color} size={80} />
         </div>
       )}
 

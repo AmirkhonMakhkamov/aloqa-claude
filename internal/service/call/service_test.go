@@ -409,6 +409,78 @@ func TestJoinCallKeepsExistingWaitingParticipantWaiting(t *testing.T) {
 	}
 }
 
+// guestReconnectFixture builds a service where `guestID` is a guest with an
+// existing disconnected participant that left `leftAgo` ago, ready to rejoin.
+func guestReconnectFixture(
+	workspaceID, callID, channelID, guestID, participantID uuid.UUID,
+	leftAgo time.Duration,
+	pub EventPublisher,
+) *Service {
+	leftAt := time.Now().Add(-leftAgo)
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {ID: callID, WorkspaceID: workspaceID, ChannelID: &channelID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive, Settings: entity.CallSettings{WaitingRoom: true}},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, guestID}: {
+				ID:         participantID,
+				CallID:     callID,
+				UserID:     guestID,
+				Role:       entity.CallRoleParticipant,
+				Status:     entity.ParticipantStatusDisconnected,
+				LeftAt:     &leftAt,
+				LeftReason: entity.ParticipantLeftReasonLeft,
+			},
+		},
+	}
+	channels := &fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
+		channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePrivate},
+	}}
+	guests := guestaccess.NewChecker(&fakeGuestAccessRepo{grants: []entity.GuestAccessGrant{{
+		ID:          uuid.New(),
+		WorkspaceID: workspaceID,
+		UserID:      guestID,
+		ChannelIDs:  []uuid.UUID{channelID},
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}}})
+	return NewService(calls, &fakeBreakoutRepo{}, channels, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), guests, nil)
+}
+
+// A guest dropped moments ago (a transient disconnect or the stray /leave from
+// the admit→kick race) reconnects silently instead of re-knocking (ALK-700 +
+// guest admit→kick loop hardening).
+func TestJoinCallGuestSilentReconnectWithinGrace(t *testing.T) {
+	ctx := context.Background()
+	workspaceID, callID, channelID := uuid.New(), uuid.New(), uuid.New()
+	guestID, participantID := uuid.New(), uuid.New()
+	svc := guestReconnectFixture(workspaceID, callID, channelID, guestID, participantID, 5*time.Second, noopPublisher{})
+
+	participant, err := svc.JoinCall(ctx, workspaceID, callID, guestID)
+	if err != nil {
+		t.Fatalf("JoinCall returned error: %v", err)
+	}
+	if participant.Status != entity.ParticipantStatusConnected {
+		t.Fatalf("participant status = %q, want %q (silent reconnect within grace)", participant.Status, entity.ParticipantStatusConnected)
+	}
+}
+
+// A guest who left earlier than the grace window still re-knocks for host
+// approval (preserves the ALK-700 forced-waiting rule).
+func TestJoinCallGuestReKnocksAfterGraceExpires(t *testing.T) {
+	ctx := context.Background()
+	workspaceID, callID, channelID := uuid.New(), uuid.New(), uuid.New()
+	guestID, participantID := uuid.New(), uuid.New()
+	svc := guestReconnectFixture(workspaceID, callID, channelID, guestID, participantID, 5*time.Minute, noopPublisher{})
+
+	participant, err := svc.JoinCall(ctx, workspaceID, callID, guestID)
+	if err != nil {
+		t.Fatalf("JoinCall returned error: %v", err)
+	}
+	if participant.Status != entity.ParticipantStatusWaiting {
+		t.Fatalf("participant status = %q, want %q (re-knock after grace)", participant.Status, entity.ParticipantStatusWaiting)
+	}
+}
+
 func TestJoinCall_OnEndedCall_ReturnsCallEndedNot403(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()

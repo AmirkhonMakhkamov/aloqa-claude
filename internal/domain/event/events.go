@@ -48,6 +48,7 @@ const (
 	TypeCallQualityAdapted     Type = "call.quality.adapted"
 	TypeCallMessageCreated     Type = "call.message.created"
 	TypeCallMessageDeleted     Type = "call.message.deleted"
+	TypeCallTypingStarted      Type = "call.typing.started"
 	TypeCallHandRaised         Type = "call.participant.hand_raised"
 	TypeCallHandLowered        Type = "call.participant.hand_lowered"
 	TypeCallReaction           Type = "call.reaction.added"
@@ -117,7 +118,7 @@ type Definition struct {
 
 func DefinitionForType(t Type) Definition {
 	switch t {
-	case TypeTypingStarted, TypeSignalOffer, TypeSignalAnswer, TypeSignalCandidate,
+	case TypeTypingStarted, TypeCallTypingStarted, TypeSignalOffer, TypeSignalAnswer, TypeSignalCandidate,
 		TypeCallHandRaised, TypeCallHandLowered, TypeCallReaction,
 		TypeCallShareRequestCreated, TypeCallShareRequestResolved, TypeCallFeaturedShareUpdated:
 		return Definition{
@@ -272,6 +273,11 @@ type CallMessagePayload struct {
 type CallMessageDeletedPayload struct {
 	CallID    uuid.UUID `json:"call_id"`
 	MessageID uuid.UUID `json:"message_id"`
+}
+
+type CallTypingPayload struct {
+	CallID uuid.UUID `json:"call_id"`
+	UserID uuid.UUID `json:"user_id"`
 }
 
 type CallParticipantPayload struct {

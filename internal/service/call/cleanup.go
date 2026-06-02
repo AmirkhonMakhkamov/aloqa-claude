@@ -168,6 +168,8 @@ func (s *Service) endStaleOpenCallTx(ctx context.Context, callID uuid.UUID) (boo
 		return false, err
 	}
 
+	// Record the call in its channel/DM chat history (best-effort).
+	s.emitCallEndedChatMessage(ctx, endedCall)
 	s.cleanupEndedMediaRooms(ctx, endedCall.ID)
 	return true, nil
 }
@@ -204,6 +206,8 @@ func (s *Service) endStaleOpenCallDirect(ctx context.Context, callID uuid.UUID) 
 
 	markCallEnded(call, callReason)
 	s.publishCallEvent(ctx, event.TypeCallEnded, call, call.CreatedBy)
+	// Record the call in its channel/DM chat history (best-effort).
+	s.emitCallEndedChatMessage(ctx, call)
 	s.cleanupEndedMediaRooms(ctx, call.ID)
 	return true, nil
 }

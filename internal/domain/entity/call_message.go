@@ -12,5 +12,5 @@ type CallMessage struct {
 	SenderID  uuid.UUID  `json:"sender_id"`
 	Body      string     `json:"body"`
 	CreatedAt time.Time  `json:"created_at"`
-	DeletedAt *time.Time `json:"deleted_at,omitempty"`
+	DeletedAt *time.Time `json:"deleted_at"`
 }

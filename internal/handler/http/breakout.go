@@ -7,6 +7,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"aloqa/internal/middleware"
+	"aloqa/internal/pkg/cerrors"
 	"aloqa/internal/pkg/id"
 	"aloqa/internal/service/call"
 )
@@ -130,6 +131,10 @@ func (h *BreakoutHandler) Join(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	if info == nil {
+		writeErr(w, cerrors.Unavailable("livekit is not configured"))
+		return
+	}
 
 	writeOK(w, breakoutJoinResponse(info))
 }
@@ -151,6 +156,10 @@ func (h *BreakoutHandler) Return(w http.ResponseWriter, r *http.Request) {
 	info, err := h.svc.ReturnToMainRoom(r.Context(), callID, userID)
 	if err != nil {
 		writeErr(w, err)
+		return
+	}
+	if info == nil {
+		writeErr(w, cerrors.Unavailable("livekit is not configured"))
 		return
 	}
 

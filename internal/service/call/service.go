@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 
 	"aloqa/internal/domain/entity"
 	"aloqa/internal/domain/event"
@@ -91,6 +92,7 @@ type CancelCallResult struct {
 type Service struct {
 	calls            repository.CallRepository
 	callMessages     repository.CallMessageRepository
+	messages         repository.MessageRepository
 	breakoutRooms    repository.BreakoutRoomRepository
 	channels         repository.ChannelRepository
 	members          repository.WorkspaceRepository
@@ -105,10 +107,6 @@ type Service struct {
 	tx               txscope.Manager
 	egressSink       EgressWebhookSink // ALK-701: recording finalizer for egress_* webhooks
 	recordingEnabled bool              // ALK-701: egress configured → calls advertise settings.recording
-
-	// breakoutTimers holds in-memory auto-close timers keyed by callID
-	// (uuid.UUID -> *time.Timer). See breakout_timer.go.
-	breakoutTimers sync.Map
 
 	// breakoutDeleteTimers holds in-memory grace-period timers for the deferred
 	// deletion of breakout-room LiveKit rooms, keyed by the LiveKit room name
@@ -193,6 +191,13 @@ func (s *Service) SetCallMessageRepo(repo repository.CallMessageRepository) {
 	s.callMessages = repo
 }
 
+// SetMessageRepo injects the chat message repository used to write a call-event
+// system message into the call's channel/DM timeline on the non-transactional
+// end path. The transactional path uses scope.Messages() instead.
+func (s *Service) SetMessageRepo(repo repository.MessageRepository) {
+	s.messages = repo
+}
+
 func (s *Service) SetTransactionManager(manager txscope.Manager) {
 	s.tx = manager
 }
@@ -234,7 +239,9 @@ func (s *Service) isGuestUser(ctx context.Context, workspaceID, userID uuid.UUID
 	if s.guests == nil {
 		return false
 	}
-	allowed, err := s.guests.HasWorkspaceAccess(ctx, workspaceID, userID)
+	// Any active guest grant (channel OR call scoped) marks a guest, so the
+	// forced-waiting rule applies to call-scoped guests too (unified guest link).
+	allowed, err := s.guests.IsGuest(ctx, workspaceID, userID)
 	if err != nil {
 		return false
 	}
@@ -243,7 +250,10 @@ func (s *Service) isGuestUser(ctx context.Context, workspaceID, userID uuid.UUID
 
 // AuthorizeGuestLink validates that userID may mint a guest link for the call:
 // it must be an active (non-ended) call the user can access as host/co-host.
-// Returns the call so the handler can scope the invite to its channel (ALK-700).
+// Returns the call for the host/co-host + active-call authorization only; guest
+// links are now call-scoped for ANY call type, so the invite is no longer scoped
+// to the call's channel (the returned call's ChannelID is not consulted by the
+// caller). (unified guest link)
 func (s *Service) AuthorizeGuestLink(ctx context.Context, workspaceID, callID, userID uuid.UUID) (*entity.Call, error) {
 	call, err := s.requireCallAccess(ctx, workspaceID, callID, userID)
 	if err != nil {
@@ -322,6 +332,48 @@ func (s *Service) requireCallAccess(ctx context.Context, workspaceID, callID, us
 	if err != nil {
 		return nil, err
 	}
+	// Guest branch: only entered when the user actually holds a guest grant, so
+	// a workspace member never pays for the extra checks (member latency is
+	// unchanged — for a member isGuestUser short-circuits on GetMember). A
+	// call-scoped guest reaches exactly the call they were invited to (and its
+	// in-call chat, gated by this same check), regardless of the call's channel,
+	// with no channel/workspace-content access. A legacy channel-scoped guest
+	// (CallID == nil) keeps a non-call workspace grant, so falls through to the
+	// channel/workspace member logic below which honours it via HasChannelAccess.
+	// (unified guest link)
+	// Members never enter the guest branch (member latency is unchanged): a
+	// member short-circuits here on GetMember exactly as isGuestUser does.
+	isMember := false
+	if _, merr := s.members.GetMember(ctx, call.WorkspaceID, userID); merr == nil {
+		isMember = true
+	}
+	if !isMember && s.guests != nil {
+		// One grants query derives BOTH the is-guest flag and per-call access,
+		// instead of separate IsGuest + HasCallAccess round-trips on this hot path.
+		isGuest, hasCall, gerr := s.guests.EvaluateCallAccess(ctx, call.WorkspaceID, callID, userID)
+		if gerr != nil {
+			return nil, gerr
+		}
+		if isGuest {
+			if hasCall {
+				return call, nil
+			}
+			// A call-scoped guest holds only call grants; a legacy channel guest
+			// holds at least one non-call workspace grant. Re-use HasWorkspaceAccess
+			// (a cached/cheap second derivation) only to distinguish the two — a
+			// legacy guest falls through to the channel/workspace branch, while a
+			// pure call-scoped guest on a call they were NOT invited to is hard-denied
+			// so they can never see any other call or channel.
+			hasLegacy, werr := s.guests.HasWorkspaceAccess(ctx, call.WorkspaceID, userID)
+			if werr != nil {
+				return nil, werr
+			}
+			if !hasLegacy {
+				return nil, cerrors.Forbidden("you do not have access to this call")
+			}
+			// Legacy channel guest: continue to the channel/workspace branches.
+		}
+	}
 	if call.ChannelID != nil {
 		ch, err := s.channels.GetByID(ctx, *call.ChannelID)
 		if err != nil {
@@ -377,6 +429,10 @@ func (s *Service) ensureCollaborationChannelAccess(ctx context.Context, ch *enti
 	return decision.Allowed, nil
 }
 
+// maxJoinPasswordBytes is bcrypt's hard input limit; longer host-supplied
+// passwords are rejected as invalid input rather than failing to hash. #4.
+const maxJoinPasswordBytes = 72
+
 func validateCallSettings(callType entity.CallType, settings entity.CallSettings) error {
 	switch callType {
 	case entity.CallTypeOneToOne, entity.CallTypeGroup, entity.CallTypeMeeting, entity.CallTypeWebinar, entity.CallTypeSelector:
@@ -385,6 +441,29 @@ func validateCallSettings(callType entity.CallType, settings entity.CallSettings
 	}
 	if settings.MaxParticipants < 0 {
 		return cerrors.InvalidInput("max_participants cannot be negative")
+	}
+	if settings.EntryMode != "" && !settings.EntryMode.Valid() {
+		return cerrors.InvalidInput("invalid entry_mode")
+	}
+	return nil
+}
+
+// verifyJoinPassword checks a password-mode join password against the stored
+// bcrypt hash. Both a missing and an incorrect password return the dedicated
+// CALL_PASSWORD_REQUIRED code (HTTP 401) so the client uniformly re-prompts for
+// the password without conflating it with a session-auth 401 (the message still
+// distinguishes the two). A call in password mode without a stored hash is a
+// misconfiguration -> FORBIDDEN. #4.
+func verifyJoinPassword(hash, password string) error {
+	if hash == "" {
+		// Password mode with no stored hash is a misconfiguration — refuse safely.
+		return cerrors.Forbidden("this call is not configured with a password")
+	}
+	if password == "" {
+		return cerrors.CallPasswordRequired("a password is required to join this call")
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {
+		return cerrors.CallPasswordRequired("incorrect call password")
 	}
 	return nil
 }
@@ -604,7 +683,11 @@ func (s *Service) StartCall(
 	title string,
 	channelID *uuid.UUID,
 	settings entity.CallSettings,
+	joinPassword string,
 ) (*entity.Call, error) {
+	if callType == entity.CallTypeGroup || callType == entity.CallTypeMeeting {
+		settings.BreakoutRooms = true
+	}
 	if err := validateCallSettings(callType, settings); err != nil {
 		return nil, err
 	}
@@ -618,6 +701,37 @@ func (s *Service) StartCall(
 	// There is no API to toggle chat per call today; if one is added, this becomes
 	// the default rather than an unconditional override.
 	settings.Chat = true
+
+	// Resolve the entry mode at creation so the persisted row (and every API read)
+	// carries a concrete value. When the caller omits entry_mode we derive it from
+	// the legacy waiting_room flag (backwards-compatible: existing/programmatic
+	// callers keep their behaviour). The "waiting room by default" UX for new
+	// calls is expressed by the client sending entry_mode=manual_admit explicitly
+	// (CreateCallModal), not by a server-side type default. The legacy WaitingRoom
+	// flag is kept in sync so existing read paths (is_open summaries, etc.) stay
+	// correct. #4.
+	entryMode := settings.ResolvedEntryMode()
+	settings.EntryMode = entryMode
+	settings.WaitingRoom = entryMode == entity.EntryModeManualAdmit
+
+	var joinPasswordHash string
+	if entryMode == entity.EntryModePassword {
+		if joinPassword == "" {
+			return nil, cerrors.InvalidInput("a password is required for password entry mode")
+		}
+		// bcrypt rejects inputs longer than 72 bytes (golang.org/x/crypto >= v0.50
+		// errors instead of truncating); validate at the boundary so an over-long
+		// host-supplied password is a 400, not a 500. #4.
+		if len(joinPassword) > maxJoinPasswordBytes {
+			return nil, cerrors.InvalidInput("call password must be at most 72 bytes")
+		}
+		hashed, err := bcrypt.GenerateFromPassword([]byte(joinPassword), bcrypt.DefaultCost)
+		if err != nil {
+			return nil, cerrors.Internal("failed to hash call password", err)
+		}
+		joinPasswordHash = string(hashed)
+	}
+
 	if err := s.requireWorkspaceMember(ctx, workspaceID, userID); err != nil {
 		return nil, err
 	}
@@ -663,16 +777,17 @@ func (s *Service) StartCall(
 
 	now := time.Now()
 	call := &entity.Call{
-		ID:          id.New(),
-		WorkspaceID: workspaceID,
-		ChannelID:   channelID,
-		Type:        callType,
-		Status:      entity.CallStatusRinging,
-		Title:       title,
-		CreatedBy:   userID,
-		Settings:    settings,
-		StartedAt:   &now,
-		CreatedAt:   now,
+		ID:               id.New(),
+		WorkspaceID:      workspaceID,
+		ChannelID:        channelID,
+		Type:             callType,
+		Status:           entity.CallStatusRinging,
+		Title:            title,
+		CreatedBy:        userID,
+		Settings:         settings,
+		JoinPasswordHash: joinPasswordHash,
+		StartedAt:        &now,
+		CreatedAt:        now,
 	}
 
 	// Add creator as host participant.
@@ -738,7 +853,7 @@ func (s *Service) StartCall(
 }
 
 // JoinCall adds a user as a participant to an active call.
-func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid.UUID) (*entity.CallParticipant, error) {
+func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid.UUID, joinPassword string) (*entity.CallParticipant, error) {
 	call, err := s.requireCallAccess(ctx, workspaceID, callID, userID)
 	if err != nil {
 		return nil, err
@@ -844,11 +959,22 @@ func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid
 
 	now := time.Now()
 
-	// Determine initial status: if waiting room is enabled, or the joiner is a
-	// guest (always gated, ALK-700), place in waiting.
+	// Determine initial status from the call's entry mode (#4). Guests always
+	// pass through the waiting room (ALK-700) and bypass the password — the
+	// one-time link is the host's approval. For non-guest members: manual_admit
+	// holds them in the waiting room, password requires the correct password
+	// before admission, and open lets them join directly.
+	entryMode := call.Settings.ResolvedEntryMode()
 	initialStatus := entity.ParticipantStatusConnected
-	if call.Settings.WaitingRoom || guest {
+	switch {
+	case guest:
 		initialStatus = entity.ParticipantStatusWaiting
+	case entryMode == entity.EntryModeManualAdmit:
+		initialStatus = entity.ParticipantStatusWaiting
+	case entryMode == entity.EntryModePassword:
+		if err := verifyJoinPassword(call.JoinPasswordHash, joinPassword); err != nil {
+			return nil, err
+		}
 	}
 	role := entity.CallRoleParticipant
 	if call.Type == entity.CallTypeWebinar || call.Type == entity.CallTypeSelector {
@@ -1093,7 +1219,7 @@ func (s *Service) ListWaiting(ctx context.Context, workspaceID, callID, userID u
 		return nil, cerrors.Internal("failed to list participants", err)
 	}
 
-	var waiting []entity.CallParticipant
+	waiting := make([]entity.CallParticipant, 0)
 	for _, p := range participants {
 		if p.Status == entity.ParticipantStatusWaiting {
 			waiting = append(waiting, p)
@@ -1209,6 +1335,8 @@ func (s *Service) LeaveCall(ctx context.Context, workspaceID, callID, userID uui
 		return &LeaveCallResult{AlreadyLeft: true}, nil
 	}
 	if autoEnded {
+		// Record the call in its channel/DM chat history (best-effort).
+		s.emitCallEndedChatMessage(ctx, call)
 		s.closeAllBreakoutSFURooms(ctx, callID)
 		s.deleteLiveKitRoomBestEffort(ctx, callID)
 		if s.sfu != nil {
@@ -1276,6 +1404,9 @@ func (s *Service) EndCall(ctx context.Context, workspaceID, callID, userID uuid.
 		markCallEnded(call, entity.CallEndReasonHostEnded)
 		s.publishCallEvent(ctx, event.TypeCallEnded, call, userID)
 	}
+
+	// Record the call in its channel/DM chat history (best-effort).
+	s.emitCallEndedChatMessage(ctx, call)
 
 	// Close all breakout rooms and their SFU rooms.
 	s.closeAllBreakoutSFURooms(ctx, callID)
@@ -1360,6 +1491,9 @@ func (s *Service) CancelCall(ctx context.Context, workspaceID, callID, userID uu
 	if !cancelled {
 		return &CancelCallResult{Ended: false}, nil
 	}
+
+	// Record the cancelled call in its channel/DM chat history (best-effort).
+	s.emitCallEndedChatMessage(ctx, call)
 
 	s.closeAllBreakoutSFURooms(ctx, callID)
 	s.deleteLiveKitRoomBestEffort(ctx, callID)
@@ -1927,7 +2061,7 @@ func (s *Service) enqueueCallEventTx(ctx context.Context, scope txscope.Scope, e
 	if call != nil && call.ChannelID != nil {
 		channelID = *call.ChannelID
 	}
-	return s.enqueueRealtimeTx(ctx, scope, evtType, fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID), call.WorkspaceID, channelID, userID, event.CallPayload{Call: call})
+	return s.enqueueDurableEventTx(ctx, scope, evtType, fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID), call.WorkspaceID, channelID, userID, event.CallPayload{Call: call})
 }
 
 func (s *Service) enqueueParticipantEventTx(ctx context.Context, scope txscope.Scope, evtType event.Type, call *entity.Call, p *entity.CallParticipant) error {
@@ -1935,7 +2069,7 @@ func (s *Service) enqueueParticipantEventTx(ctx context.Context, scope txscope.S
 	if call != nil && call.ChannelID != nil {
 		channelID = *call.ChannelID
 	}
-	return s.enqueueRealtimeTx(ctx, scope, evtType, fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID), call.WorkspaceID, channelID, p.UserID, event.CallParticipantPayload{
+	return s.enqueueDurableEventTx(ctx, scope, evtType, fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID), call.WorkspaceID, channelID, p.UserID, event.CallParticipantPayload{
 		CallID:      call.ID,
 		Participant: p,
 	})
@@ -1948,7 +2082,7 @@ func (s *Service) enqueueCallMessageEventTx(ctx context.Context, scope txscope.S
 	}
 	subject := fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID)
 	payload := callMessagePayloadFor(evtType, call, msg)
-	return s.enqueueRealtimeTx(ctx, scope, evtType, subject, call.WorkspaceID, channelID, msg.SenderID, payload)
+	return s.enqueueDurableEventTx(ctx, scope, evtType, subject, call.WorkspaceID, channelID, msg.SenderID, payload)
 }
 
 func callMessagePayloadFor(evtType event.Type, call *entity.Call, msg *entity.CallMessage) any {
@@ -1958,7 +2092,7 @@ func callMessagePayloadFor(evtType event.Type, call *entity.Call, msg *entity.Ca
 	return event.CallMessagePayload{CallID: call.ID, Message: *msg}
 }
 
-func (s *Service) enqueueRealtimeTx(ctx context.Context, scope txscope.Scope, evtType event.Type, subject string, workspaceID, channelID, userID uuid.UUID, payload any) error {
+func (s *Service) enqueueDurableEventTx(ctx context.Context, scope txscope.Scope, evtType event.Type, subject string, workspaceID, channelID, userID uuid.UUID, payload any) error {
 	if scope == nil {
 		return cerrors.Unavailable("transaction scope is not configured")
 	}
@@ -1974,7 +2108,7 @@ func (s *Service) enqueueRealtimeTx(ctx context.Context, scope txscope.Scope, ev
 		return err
 	}
 	if !durable {
-		slog.WarnContext(ctx, "enqueueRealtimeTx invoked for non-durable event; skipping outbox enqueue",
+		slog.WarnContext(ctx, "enqueueDurableEventTx invoked for non-durable event; skipping outbox enqueue",
 			"type", evtType, "subject", subject)
 		return nil
 	}

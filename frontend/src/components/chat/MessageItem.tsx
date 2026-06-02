@@ -81,7 +81,12 @@ export function MessageItem({ wsId, chId, message, compact, onOpenThread }: Prop
           })}
         </div>
       ) : (
-        <Avatar name={name} src={authorUser?.avatar_url ?? undefined} size={36} />
+        <Avatar
+          name={name}
+          src={authorUser?.avatar_url ?? undefined}
+          color={authorUser?.avatar_color}
+          size={36}
+        />
       )}
 
       <div className="min-w-0 flex-1">

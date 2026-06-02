@@ -9,6 +9,7 @@ export interface User {
   email: string;
   display_name: string;
   avatar_url?: string;
+  avatar_color: string;
   status: "active" | "suspended" | "deactivated";
   locale: string;
   created_at: ISODate;

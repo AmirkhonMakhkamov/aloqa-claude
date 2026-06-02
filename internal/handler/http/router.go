@@ -33,6 +33,7 @@ type RouterDeps struct {
 	WS               *wshandler.Handler
 	Validator        middleware.TokenValidator
 	PersonalResolver middleware.PersonalWorkspaceResolver
+	SessionResolver  SessionUserResolver // optional: session-cookie fallback for the public resolve endpoint
 	Idempotency      func(http.Handler) http.Handler
 	CORSOrigins      []string // Allowed CORS origins from config
 	RequestMetrics   *middleware.RequestMetricsCollector
@@ -109,6 +110,16 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 	r.Group(func(r chi.Router) {
 		r.Use(authLimiter)
 		r.Post("/api/v1/invites/{token}/redeem", deps.Guests.RedeemInvite)
+		// Public resolve for the unified /join/<token> link. Optional-auth: a
+		// member session (if attached) yields is_workspace_member so the FE can
+		// route a member straight to the call. (unified guest link)
+		if deps.Calls != nil {
+			deps.Calls.SetTokenValidator(deps.Validator)
+			// Session-cookie fallback so a member following the unified
+			// /join/<token> link (cookies forwarded, no Bearer) is detected.
+			deps.Calls.SetSessionResolver(deps.SessionResolver)
+			r.Get("/api/v1/invites/{token}", deps.Calls.ResolveGuestLink)
+		}
 	})
 
 	// LiveKit webhook (public). LiveKit Server posts signed events here;
@@ -343,6 +354,7 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 			})
 			r.Post("/participants/{userID}/revoke-screen-share", deps.Calls.RevokeScreenShare)
 			r.Put("/featured-share", deps.Calls.SetFeaturedShare)
+			r.Patch("/settings", deps.Calls.UpdateSettings)
 			r.Put("/media", deps.Calls.UpdateMedia)
 			r.Put("/quality", deps.Calls.SetQuality)
 			r.Route("/messages", func(r chi.Router) {

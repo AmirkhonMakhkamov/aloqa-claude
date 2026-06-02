@@ -28,8 +28,8 @@ func NewBreakoutRoomRepo(pool *pgxpool.Pool) repository.BreakoutRoomRepository {
 
 func (r *BreakoutRoomRepo) Create(ctx context.Context, room *entity.BreakoutRoom) error {
 	query := `
-		INSERT INTO breakout_rooms (id, call_id, name, created_by, time_limit, status, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`
+		INSERT INTO breakout_rooms (id, call_id, name, created_by, time_limit, closes_at, status, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
 
 	_, err := r.pool.Exec(ctx, query,
 		room.ID,
@@ -37,6 +37,7 @@ func (r *BreakoutRoomRepo) Create(ctx context.Context, room *entity.BreakoutRoom
 		room.Name,
 		room.CreatedBy,
 		room.TimeLimit,
+		room.ClosesAt,
 		room.Status,
 		room.CreatedAt,
 	)
@@ -49,7 +50,7 @@ func (r *BreakoutRoomRepo) Create(ctx context.Context, room *entity.BreakoutRoom
 
 func (r *BreakoutRoomRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.BreakoutRoom, error) {
 	query := `
-		SELECT id, call_id, name, created_by, time_limit, status, created_at, closed_at
+		SELECT id, call_id, name, created_by, time_limit, closes_at, status, created_at, closed_at
 		FROM breakout_rooms
 		WHERE id = $1`
 
@@ -60,6 +61,7 @@ func (r *BreakoutRoomRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.B
 		&room.Name,
 		&room.CreatedBy,
 		&room.TimeLimit,
+		&room.ClosesAt,
 		&room.Status,
 		&room.CreatedAt,
 		&room.ClosedAt,
@@ -76,7 +78,7 @@ func (r *BreakoutRoomRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.B
 
 func (r *BreakoutRoomRepo) ListByCall(ctx context.Context, callID uuid.UUID) ([]entity.BreakoutRoom, error) {
 	query := `
-		SELECT id, call_id, name, created_by, time_limit, status, created_at, closed_at
+		SELECT id, call_id, name, created_by, time_limit, closes_at, status, created_at, closed_at
 		FROM breakout_rooms
 		WHERE call_id = $1
 		ORDER BY created_at`
@@ -87,7 +89,7 @@ func (r *BreakoutRoomRepo) ListByCall(ctx context.Context, callID uuid.UUID) ([]
 	}
 	defer rows.Close()
 
-	var rooms []entity.BreakoutRoom
+	rooms := make([]entity.BreakoutRoom, 0)
 	for rows.Next() {
 		var room entity.BreakoutRoom
 		if err := rows.Scan(
@@ -96,6 +98,7 @@ func (r *BreakoutRoomRepo) ListByCall(ctx context.Context, callID uuid.UUID) ([]
 			&room.Name,
 			&room.CreatedBy,
 			&room.TimeLimit,
+			&room.ClosesAt,
 			&room.Status,
 			&room.CreatedAt,
 			&room.ClosedAt,
@@ -109,6 +112,34 @@ func (r *BreakoutRoomRepo) ListByCall(ctx context.Context, callID uuid.UUID) ([]
 	}
 
 	return rooms, nil
+}
+
+func (r *BreakoutRoomRepo) ListCallsWithExpiredActiveBreakouts(ctx context.Context, before time.Time, limit int) ([]uuid.UUID, error) {
+	query := `
+		SELECT DISTINCT call_id
+		FROM breakout_rooms
+		WHERE status = 'active' AND closes_at IS NOT NULL AND closes_at <= $1
+		LIMIT $2`
+
+	rows, err := r.pool.Query(ctx, query, before, limit)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list calls with expired active breakouts: %w", err)
+	}
+	defer rows.Close()
+
+	callIDs := make([]uuid.UUID, 0)
+	for rows.Next() {
+		var callID uuid.UUID
+		if err := rows.Scan(&callID); err != nil {
+			return nil, fmt.Errorf("postgres: list calls with expired active breakouts scan: %w", err)
+		}
+		callIDs = append(callIDs, callID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list calls with expired active breakouts rows: %w", err)
+	}
+
+	return callIDs, nil
 }
 
 func (r *BreakoutRoomRepo) Close(ctx context.Context, id uuid.UUID) error {
@@ -205,7 +236,7 @@ func (r *BreakoutRoomRepo) ListParticipants(ctx context.Context, breakoutRoomID 
 	}
 	defer rows.Close()
 
-	var participants []entity.CallParticipant
+	participants := make([]entity.CallParticipant, 0)
 	for rows.Next() {
 		var p entity.CallParticipant
 		if err := rows.Scan(

@@ -1801,7 +1801,7 @@ type fakeCallService struct {
 	calls       map[uuid.UUID]*entity.Call
 }
 
-func (s *fakeCallService) StartCall(_ context.Context, workspaceID, userID uuid.UUID, callType entity.CallType, title string, channelID *uuid.UUID, settings entity.CallSettings) (*entity.Call, error) {
+func (s *fakeCallService) StartCall(_ context.Context, workspaceID, userID uuid.UUID, callType entity.CallType, title string, channelID *uuid.UUID, settings entity.CallSettings, _ string) (*entity.Call, error) {
 	s.starts++
 	call := &entity.Call{
 		ID:          id.New(),
@@ -1974,6 +1974,15 @@ func (r *txCallRepo) UpdateStatus(_ context.Context, id uuid.UUID, status entity
 		return cerrors.NotFound("call not found")
 	}
 	call.Status = status
+	return nil
+}
+
+func (r *txCallRepo) UpdateSettings(_ context.Context, id uuid.UUID, settings entity.CallSettings) error {
+	call := r.calls[id]
+	if call == nil {
+		return cerrors.NotFound("call not found")
+	}
+	call.Settings = settings
 	return nil
 }
 

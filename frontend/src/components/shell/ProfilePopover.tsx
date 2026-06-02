@@ -64,6 +64,7 @@ export function ProfilePopover({ onClose, anchor, wsId }: Props) {
         <Avatar
           name={user?.display_name}
           src={user?.avatar_url ?? undefined}
+          color={user?.avatar_color}
           size={40}
         />
         <div className="min-w-0 flex-1">

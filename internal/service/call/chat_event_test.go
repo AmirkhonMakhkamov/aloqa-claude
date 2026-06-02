@@ -114,11 +114,14 @@ func TestEmitCallEndedChatMessage_MissedHasZeroDurationAndCount(t *testing.T) {
 	callee := uuid.New()
 	channelID := uuid.New()
 
+	// The call rang for 45s and the caller "joined" at ring-start, but a missed
+	// call is "never connected": the contract forces duration and participants
+	// to zero regardless of this ring-time data.
+	ringStart := time.Now().Add(-45 * time.Second)
 	calls := &fakeCallRepo{
 		calls: map[uuid.UUID]*entity.Call{},
-		// Nobody joined: JoinedAt is nil for both (ringing -> missed).
 		participants: map[[2]uuid.UUID]*entity.CallParticipant{
-			{callID, caller}: {ID: uuid.New(), CallID: callID, UserID: caller, Status: entity.ParticipantStatusInvited},
+			{callID, caller}: {ID: uuid.New(), CallID: callID, UserID: caller, Status: entity.ParticipantStatusConnected, JoinedAt: &ringStart},
 			{callID, callee}: {ID: uuid.New(), CallID: callID, UserID: callee, Status: entity.ParticipantStatusInvited},
 		},
 	}
@@ -133,7 +136,7 @@ func TestEmitCallEndedChatMessage_MissedHasZeroDurationAndCount(t *testing.T) {
 		Type:        entity.CallTypeOneToOne,
 		Status:      entity.CallStatusEnded,
 		CreatedBy:   caller,
-		StartedAt:   nil,
+		StartedAt:   &ringStart,
 		EndedAt:     &ended,
 		EndReason:   entity.CallEndReasonMissed,
 	}
@@ -152,10 +155,58 @@ func TestEmitCallEndedChatMessage_MissedHasZeroDurationAndCount(t *testing.T) {
 		t.Fatalf("call_event invalid json: %v", err)
 	}
 	if p.ParticipantCount != 0 || len(p.ParticipantUserIDs) != 0 {
-		t.Fatalf("participants = %d, want 0 (nobody joined)", p.ParticipantCount)
+		t.Fatalf("participants = %d, want 0 for missed (never connected)", p.ParticipantCount)
 	}
 	if p.DurationSeconds != 0 {
-		t.Fatalf("duration_seconds = %d, want 0", p.DurationSeconds)
+		t.Fatalf("duration_seconds = %d, want 0 for missed (never connected)", p.DurationSeconds)
+	}
+}
+
+func TestCancelCallWritesMissedCallEventToHistory(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	channelID := uuid.New()
+	caller := uuid.New()
+	ringStart := time.Now().Add(-10 * time.Second)
+
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, caller}: {WorkspaceID: workspaceID, UserID: caller, Role: entity.WorkspaceRoleMember},
+	}}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {ID: callID, WorkspaceID: workspaceID, ChannelID: &channelID, Type: entity.CallTypeOneToOne, Status: entity.CallStatusRinging, CreatedBy: caller, StartedAt: &ringStart},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, caller}: {ID: uuid.New(), CallID: callID, UserID: caller, Role: entity.CallRoleHost, Status: entity.ParticipantStatusConnected, JoinedAt: &ringStart},
+		},
+	}
+	channels := &fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
+		channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypeDM},
+	}}
+	msgs := &fakeMessageRepo{}
+	svc := NewService(calls, &fakeBreakoutRepo{}, channels, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+	svc.SetMessageRepo(msgs)
+
+	if _, err := svc.CancelCall(ctx, workspaceID, callID, caller); err != nil {
+		t.Fatalf("CancelCall returned error: %v", err)
+	}
+
+	if len(msgs.created) != 1 {
+		t.Fatalf("created messages = %d, want exactly 1 call-event message", len(msgs.created))
+	}
+	if msgs.created[0].Content != "Missed call" {
+		t.Fatalf("content = %q, want Missed call", msgs.created[0].Content)
+	}
+	var p callEventPayload
+	if err := json.Unmarshal(msgs.created[0].CallEvent, &p); err != nil {
+		t.Fatalf("call_event invalid json: %v", err)
+	}
+	if p.EndReason != string(entity.CallEndReasonCancelled) {
+		t.Fatalf("end_reason = %q, want cancelled", p.EndReason)
+	}
+	if p.DurationSeconds != 0 || p.ParticipantCount != 0 {
+		t.Fatalf("cancelled call payload = duration %d count %d, want 0/0", p.DurationSeconds, p.ParticipantCount)
 	}
 }
 

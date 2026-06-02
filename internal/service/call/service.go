@@ -1374,6 +1374,9 @@ func (s *Service) CancelCall(ctx context.Context, workspaceID, callID, userID uu
 		return &CancelCallResult{Ended: false}, nil
 	}
 
+	// Record the cancelled call in its channel/DM chat history (best-effort).
+	s.emitCallEndedChatMessage(ctx, call)
+
 	s.closeAllBreakoutSFURooms(ctx, callID)
 	s.deleteLiveKitRoomBestEffort(ctx, callID)
 	if s.sfu != nil {

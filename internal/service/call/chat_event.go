@@ -127,6 +127,15 @@ func buildCallEventPayload(call *entity.Call, participants []entity.CallParticip
 		}
 	}
 
+	// "Never connected" reasons: the call rang (StartedAt is set at ring-start
+	// and the initiator joins immediately) but no conversation took place, so the
+	// contract reports zero duration and no participants.
+	if call.EndReason == entity.CallEndReasonMissed || call.EndReason == entity.CallEndReasonCancelled {
+		duration = 0
+		userIDs = []uuid.UUID{}
+		count = 0
+	}
+
 	return callEventPayload{
 		CallID:             call.ID,
 		CallType:           string(call.Type),

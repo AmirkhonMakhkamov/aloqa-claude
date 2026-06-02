@@ -1,4 +1,4 @@
--- #4 (calls): host-configurable entry mode + optional join password.
+-- 051: host-configurable call entry mode + optional join password.
 --
 -- entry_mode ('manual_admit' | 'password' | 'open') lives in the calls.settings
 -- JSONB and is set at creation. Existing rows have no entry_mode key; the

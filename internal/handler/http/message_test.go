@@ -95,6 +95,7 @@ func TestMessagePostProfileShareBuildsCardPayload(t *testing.T) {
 			ID:          targetID,
 			DisplayName: "Madina Karimova",
 			AvatarURL:   "https://cdn.test/madina.png",
+			AvatarColor: "#0EA5E9",
 			Position:    &position,
 			Department:  &department,
 			Status:      entity.UserStatusActive,
@@ -122,6 +123,7 @@ func TestMessagePostProfileShareBuildsCardPayload(t *testing.T) {
 	}
 	if msg.ProfileShare.Snapshot.DisplayName != "Madina Karimova" ||
 		msg.ProfileShare.Snapshot.AvatarURL != "https://cdn.test/madina.png" ||
+		msg.ProfileShare.Snapshot.AvatarColor != "#0EA5E9" ||
 		msg.ProfileShare.Snapshot.Role != entity.WorkspaceRoleAdmin {
 		t.Fatalf("profile_share snapshot = %+v, want hydrated target profile", msg.ProfileShare.Snapshot)
 	}

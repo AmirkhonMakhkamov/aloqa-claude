@@ -1392,12 +1392,13 @@ components:
 
     User:
       type: object
-      required: [id, email, display_name, status, locale, created_at, updated_at]
+      required: [id, email, display_name, avatar_color, status, locale, created_at, updated_at]
       properties:
         id: { $ref: '#/components/schemas/UUID' }
         email: { type: string }
         display_name: { type: string }
         avatar_url: { type: string, nullable: true }
+        avatar_color: { type: string, pattern: '^#[0-9A-Fa-f]{6}$' }
         position: { type: string, nullable: true }
         department: { type: string, nullable: true }
         status:
@@ -1609,10 +1610,11 @@ components:
     ProfileShareSnapshot:
       type: object
       description: Backend-generated profile details rendered by clients as a profile card.
-      required: [display_name, role]
+      required: [display_name, avatar_color, role]
       properties:
         display_name: { type: string }
         avatar_url: { type: string, nullable: true }
+        avatar_color: { type: string, pattern: '^#[0-9A-Fa-f]{6}$' }
         role:
           type: string
           enum: [owner, admin, member, guest]

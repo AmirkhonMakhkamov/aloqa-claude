@@ -237,7 +237,7 @@ func (r *CallRepo) ListActiveByWorkspace(ctx context.Context, workspaceID uuid.U
 	}
 	defer rows.Close()
 
-	var calls []entity.Call
+	calls := make([]entity.Call, 0)
 	for rows.Next() {
 		var call entity.Call
 		var settingsJSON []byte
@@ -300,7 +300,7 @@ func (r *CallRepo) ListStaleOpen(ctx context.Context, before time.Time, limit in
 	}
 	defer rows.Close()
 
-	var calls []entity.Call
+	calls := make([]entity.Call, 0)
 	for rows.Next() {
 		var call entity.Call
 		var settingsJSON []byte
@@ -498,13 +498,14 @@ func (r *CallRepo) ListActiveSummariesByWorkspace(
 	}
 
 	const topQuery = `
-		SELECT call_id, user_id, display_name, avatar_url
+		SELECT call_id, user_id, display_name, avatar_url, avatar_color
 		FROM (
 			SELECT
 				cp.call_id,
 				cp.user_id,
 				u.display_name,
 				u.avatar_url,
+				u.avatar_color,
 				ROW_NUMBER() OVER (
 					PARTITION BY cp.call_id
 					ORDER BY cp.joined_at NULLS LAST, cp.user_id
@@ -527,7 +528,7 @@ func (r *CallRepo) ListActiveSummariesByWorkspace(
 	for topRows.Next() {
 		var callID uuid.UUID
 		var p entity.TopParticipant
-		if err := topRows.Scan(&callID, &p.UserID, &p.DisplayName, &p.AvatarURL); err != nil {
+		if err := topRows.Scan(&callID, &p.UserID, &p.DisplayName, &p.AvatarURL, &p.AvatarColor); err != nil {
 			return nil, fmt.Errorf("postgres: list top participants scan: %w", err)
 		}
 		byCall[callID] = append(byCall[callID], p)
@@ -574,7 +575,7 @@ func (r *CallRepo) ListRecentByWorkspace(ctx context.Context, workspaceID uuid.U
 	}
 	defer rows.Close()
 
-	var calls []entity.Call
+	calls := make([]entity.Call, 0)
 	for rows.Next() {
 		var call entity.Call
 		var settingsJSON []byte
@@ -617,6 +618,28 @@ func (r *CallRepo) UpdateStatus(ctx context.Context, id uuid.UUID, status entity
 	tag, err := r.db.Exec(ctx, query, id, status)
 	if err != nil {
 		return fmt.Errorf("postgres: update call status: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return cerrors.NotFound("call not found")
+	}
+
+	return nil
+}
+
+func (r *CallRepo) UpdateSettings(ctx context.Context, id uuid.UUID, settings entity.CallSettings) error {
+	settingsJSON, err := json.Marshal(settings)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal call settings: %w", err)
+	}
+
+	query := `
+		UPDATE calls
+		SET settings = $2
+		WHERE id = $1`
+
+	tag, err := r.db.Exec(ctx, query, id, settingsJSON)
+	if err != nil {
+		return fmt.Errorf("postgres: update call settings: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return cerrors.NotFound("call not found")
@@ -839,7 +862,7 @@ func (r *CallRepo) ListParticipants(ctx context.Context, callID uuid.UUID) ([]en
 	}
 	defer rows.Close()
 
-	var participants []entity.CallParticipant
+	participants := make([]entity.CallParticipant, 0)
 	for rows.Next() {
 		var p entity.CallParticipant
 		if err := rows.Scan(

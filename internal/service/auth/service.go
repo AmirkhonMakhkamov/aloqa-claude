@@ -257,6 +257,7 @@ func (s *Service) Register(ctx context.Context, email, password, displayName str
 		ID:           id.New(),
 		Email:        email,
 		DisplayName:  displayName,
+		AvatarColor:  entity.AvatarColorForDisplayName(displayName),
 		PasswordHash: passwordHash,
 		Status:       entity.UserStatusActive,
 		Locale:       "en",
@@ -310,6 +311,7 @@ func (s *Service) UpdateProfile(ctx context.Context, userID uuid.UUID, input Upd
 			return nil, cerrors.InvalidInput("display_name must be at most 100 characters")
 		}
 		user.DisplayName = name
+		user.AvatarColor = entity.AvatarColorForDisplayName(name)
 	}
 	if input.AvatarURL != nil {
 		avatarURL := strings.TrimSpace(*input.AvatarURL)
@@ -735,6 +737,19 @@ func (s *Service) ValidateToken(tokenString string) (uuid.UUID, string, error) {
 	s.sessions.DeferTouch(claims.SessionID)
 
 	return claims.UserID, claims.SessionID, nil
+}
+
+// UserIDForSession resolves the owning user of a session cookie value with a
+// strictly READ-ONLY Redis lookup (no refresh, no rotation, no touch). An
+// unknown / expired session ID yields uuid.Nil with no error (anonymous). Used
+// by the public unified guest-link resolve endpoint to detect a signed-in
+// member from the `aloqa_session` cookie without a Bearer token. (unified guest
+// link)
+func (s *Service) UserIDForSession(ctx context.Context, sessionID string) (uuid.UUID, error) {
+	if s == nil || s.sessions == nil {
+		return uuid.Nil, nil
+	}
+	return s.sessions.UserIDForSession(ctx, sessionID)
 }
 
 // LogoutSessionForUser revokes a session by id, but only if it belongs to

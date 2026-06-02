@@ -794,7 +794,7 @@ func (s *Service) startCallFromEventTx(ctx context.Context, workspaceID, eventID
 				Recording:       false,
 				ScreenSharing:   true,
 				Chat:            true,
-				BreakoutRooms:   false,
+				BreakoutRooms:   true, // Breakout rooms default-on for meetings; host can disable at runtime.
 				MaxParticipants: 500,
 			},
 			StartedAt: &now,

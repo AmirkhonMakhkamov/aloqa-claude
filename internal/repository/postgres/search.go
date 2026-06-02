@@ -274,6 +274,7 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 				u.email AS user_email,
 				u.display_name AS user_display_name,
 				u.avatar_url AS user_avatar_url,
+				u.avatar_color AS user_avatar_color,
 				u.position AS user_position,
 				u.department AS user_department,
 				u.status AS user_status,
@@ -361,6 +362,7 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 			user_email,
 			user_display_name,
 			user_avatar_url,
+			user_avatar_color,
 			user_position,
 			user_department,
 			user_status,
@@ -399,6 +401,7 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 			userEmail       sql.NullString
 			userDisplayName sql.NullString
 			userAvatarURL   sql.NullString
+			userAvatarColor sql.NullString
 			userPosition    sql.NullString
 			userDepartment  sql.NullString
 			userStatus      sql.NullString
@@ -420,6 +423,7 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 			&userEmail,
 			&userDisplayName,
 			&userAvatarURL,
+			&userAvatarColor,
 			&userPosition,
 			&userDepartment,
 			&userStatus,
@@ -436,10 +440,14 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 				Email:       userEmail.String,
 				DisplayName: userDisplayName.String,
 				AvatarURL:   userAvatarURL.String,
+				AvatarColor: userAvatarColor.String,
 				Status:      entity.UserStatus(userStatus.String),
 				Locale:      userLocale.String,
 				CreatedAt:   userCreatedAt.Time,
 				UpdatedAt:   userUpdatedAt.Time,
+			}
+			if !userAvatarColor.Valid || user.AvatarColor == "" {
+				user.AvatarColor = entity.AvatarColorForDisplayName(user.DisplayName)
 			}
 			if userPosition.Valid {
 				v := userPosition.String

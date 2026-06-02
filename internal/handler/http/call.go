@@ -1,8 +1,10 @@
 package http
 
 import (
+	"context"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -37,14 +39,44 @@ type JoinCallResponse struct {
 	RefreshAfter   *time.Time              `json:"refresh_after,omitempty"`
 }
 
+// SessionUserResolver resolves the owning user of a session cookie value with a
+// strictly read-only lookup (no token refresh / rotation). It lets the public
+// resolve endpoint identify a signed-in member from the `aloqa_session` cookie
+// when no Bearer token is present (Next.js server components forward cookies but
+// no Authorization header). (unified guest link)
+type SessionUserResolver interface {
+	UserIDForSession(ctx context.Context, sessionID string) (uuid.UUID, error)
+}
+
 type CallHandler struct {
-	svc    *call.Service
-	guests *guest.Service
+	svc             *call.Service
+	guests          *guest.Service
+	validator       middleware.TokenValidator // optional: enables optional-auth resolve
+	sessionResolver SessionUserResolver       // optional: session-cookie fallback for resolve
 }
 
 func NewCallHandler(svc *call.Service, guests *guest.Service) *CallHandler {
 	return &CallHandler{svc: svc, guests: guests}
 }
+
+// SetTokenValidator wires the optional token validator used by the public
+// resolve endpoint to best-effort identify a signed-in visitor. When nil, the
+// resolve endpoint treats every visitor as anonymous. (unified guest link)
+func (h *CallHandler) SetTokenValidator(validator middleware.TokenValidator) {
+	h.validator = validator
+}
+
+// SetSessionResolver wires the optional session-cookie resolver used by the
+// public resolve endpoint when no Bearer token is present. When nil, the cookie
+// fallback is skipped and the visitor stays anonymous. (unified guest link)
+func (h *CallHandler) SetSessionResolver(resolver SessionUserResolver) {
+	h.sessionResolver = resolver
+}
+
+// sessionCookieName is the cookie carrying the server-side session ID. It MUST
+// match the frontend's AUTH_COOKIES.session so the unified /join/<token> server
+// page can forward it to this public resolve endpoint. (unified guest link)
+const sessionCookieName = "aloqa_session"
 
 // guestCallLinkMaxUses caps redeems on a single call guest link. It is set high
 // because the authoritative expiry for "reusable until the call ends" is the
@@ -60,8 +92,10 @@ type guestLinkResponse struct {
 }
 
 // CreateGuestLink mints a one-time-style guest link scoped to a specific call.
-// Host/co-host only; rejected for channel-less calls so the guest grant can
-// never be an empty (all-channels) scope (ALK-700).
+// Host/co-host only. Works for ANY call type — including channel-less group /
+// meeting / 1:1 calls — because the grant is scoped to the call itself, not a
+// channel: a redeeming guest reaches exactly that call (and its in-call chat)
+// and nothing else in the workspace. (unified guest link)
 func (h *CallHandler) CreateGuestLink(w http.ResponseWriter, r *http.Request) {
 	callID, err := id.Parse(chi.URLParam(r, "callID"))
 	if err != nil {
@@ -72,13 +106,10 @@ func (h *CallHandler) CreateGuestLink(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
 
-	c, err := h.svc.AuthorizeGuestLink(r.Context(), workspaceID, callID, userID)
-	if err != nil {
+	// AuthorizeGuestLink enforces the host/co-host + active-call gate; its return
+	// value is not needed since the grant is call-scoped, not channel-scoped.
+	if _, err := h.svc.AuthorizeGuestLink(r.Context(), workspaceID, callID, userID); err != nil {
 		writeErr(w, err)
-		return
-	}
-	if c.ChannelID == nil {
-		writeErr(w, cerrors.InvalidInput("guest links are only available for calls in a channel"))
 		return
 	}
 
@@ -86,7 +117,7 @@ func (h *CallHandler) CreateGuestLink(w http.ResponseWriter, r *http.Request) {
 		WorkspaceID: workspaceID,
 		CreatedBy:   userID,
 		CallID:      &callID,
-		ChannelIDs:  []uuid.UUID{*c.ChannelID},
+		ChannelIDs:  nil, // call-scoped: no channel/workspace access
 		MaxUses:     guestCallLinkMaxUses,
 		TTL:         guestCallLinkTTL,
 	})
@@ -96,6 +127,84 @@ func (h *CallHandler) CreateGuestLink(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeCreated(w, guestLinkResponse{Token: invite.Token, ExpiresAt: invite.ExpiresAt})
+}
+
+// resolveInviteResponse is the public, read-only projection returned by the
+// unified-link resolve endpoint. valid is false (HTTP 200) for an invalid /
+// expired / used / revoked token so the FE renders a friendly state rather than
+// handling a 4xx/5xx. is_workspace_member is only true when a valid member
+// session is attached. (unified guest link)
+type resolveInviteResponse struct {
+	Valid             bool       `json:"valid"`
+	WorkspaceID       *uuid.UUID `json:"workspace_id,omitempty"`
+	CallID            *uuid.UUID `json:"call_id,omitempty"`
+	CallTitle         string     `json:"call_title,omitempty"`
+	ExpiresAt         *time.Time `json:"expires_at,omitempty"`
+	IsWorkspaceMember bool       `json:"is_workspace_member"`
+}
+
+// ResolveGuestLink resolves a guest invite token for the unified /join/<token>
+// link. PUBLIC (no auth middleware): it reads an OPTIONAL bearer session
+// best-effort to report is_workspace_member, but a missing or invalid token is
+// fine (anonymous). An invalid / expired / used / revoked invite token returns
+// 200 with {"valid": false}, never an error. (unified guest link)
+func (h *CallHandler) ResolveGuestLink(w http.ResponseWriter, r *http.Request) {
+	// The public route is mounted on deps.Calls != nil, but this handler needs the
+	// guest service. CallHandler is legitimately built with a nil guest service in
+	// several callers (NewCallHandler(svc, nil)); fail closed with valid:false
+	// rather than risk a nil-deref panic on this public route. (unified guest link)
+	if h.guests == nil {
+		writeOK(w, resolveInviteResponse{Valid: false})
+		return
+	}
+
+	token := chi.URLParam(r, "token")
+
+	// Best-effort optional auth: a Bearer header is honoured first, and any parse
+	// or validation failure is silently ignored (the visitor is anonymous).
+	optionalUserID := uuid.Nil
+	if h.validator != nil {
+		if header := r.Header.Get("Authorization"); header != "" {
+			if raw, ok := strings.CutPrefix(header, "Bearer "); ok && raw != "" {
+				if userID, _, err := h.validator.ValidateToken(raw); err == nil {
+					optionalUserID = userID
+				}
+			}
+		}
+	}
+
+	// Session-cookie fallback: a Next.js server component forwards the visitor's
+	// cookies (including `aloqa_session`) but holds no Authorization header, so
+	// without this a logged-in member is wrongly treated as anonymous. The lookup
+	// is strictly read-only (no refresh / rotation); any error stays anonymous.
+	// (unified guest link)
+	if optionalUserID == uuid.Nil && h.sessionResolver != nil {
+		if cookie, err := r.Cookie(sessionCookieName); err == nil && cookie.Value != "" {
+			if userID, err := h.sessionResolver.UserIDForSession(r.Context(), cookie.Value); err == nil {
+				optionalUserID = userID
+			}
+		}
+	}
+
+	result, err := h.guests.ResolveInvite(r.Context(), token, optionalUserID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	resp := resolveInviteResponse{
+		Valid:             result.Valid,
+		CallTitle:         result.CallTitle,
+		IsWorkspaceMember: result.IsWorkspaceMember,
+	}
+	if result.Valid {
+		workspaceID := result.WorkspaceID
+		resp.WorkspaceID = &workspaceID
+		resp.CallID = result.CallID
+		expiresAt := result.ExpiresAt
+		resp.ExpiresAt = &expiresAt
+	}
+	writeOK(w, resp)
 }
 
 // startCallSettings is the request projection of call settings: the persisted
@@ -522,6 +631,42 @@ type updateMediaRequest struct {
 	ScreenSharing *bool `json:"screen_sharing,omitempty"`
 }
 
+type updateSettingsRequest struct {
+	BreakoutRooms *bool `json:"breakout_rooms,omitempty"`
+}
+
+func (h *CallHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	var req updateSettingsRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	if err := h.svc.CanAccessCall(r.Context(), workspaceID, callID, userID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	updated, err := h.svc.UpdateCallSettings(r.Context(), callID, userID, call.CallSettingsPatch{
+		BreakoutRooms: req.BreakoutRooms,
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, updated)
+}
+
 func (h *CallHandler) UpdateMedia(w http.ResponseWriter, r *http.Request) {
 	callID, err := id.Parse(chi.URLParam(r, "callID"))
 	if err != nil {
@@ -605,6 +750,31 @@ func (h *CallHandler) TransferHost(w http.ResponseWriter, r *http.Request) {
 	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
 
 	if err := h.svc.TransferHost(r.Context(), workspaceID, callID, userID, targetUserID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
+// RemoveParticipant lets the host evict a participant from the call.
+// DELETE /calls/{callID}/participants/{userID}
+func (h *CallHandler) RemoveParticipant(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	targetID, err := id.Parse(chi.URLParam(r, "userID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	if err := h.svc.RemoveParticipant(r.Context(), workspaceID, callID, userID, targetID); err != nil {
 		writeErr(w, err)
 		return
 	}

@@ -787,6 +787,7 @@ func TestSendMessageProfileShareBuildsSnapshotAndValidatesWorkspace(t *testing.T
 					ID:          targetID,
 					DisplayName: "Madina Karimova",
 					AvatarURL:   "https://cdn.test/madina.png",
+					AvatarColor: "#0EA5E9",
 					Position:    &position,
 					Department:  &department,
 					Status:      entity.UserStatusActive,
@@ -889,7 +890,7 @@ func TestSendMessageProfileShareBuildsSnapshotAndValidatesWorkspace(t *testing.T
 				t.Fatalf("profile_share ids = %s/%s, want %s/%s", msg.ProfileShare.UserID, msg.ProfileShare.WorkspaceID, targetID, workspaceID)
 			}
 			snapshot := msg.ProfileShare.Snapshot
-			if snapshot.DisplayName != "Madina Karimova" || snapshot.AvatarURL != "https://cdn.test/madina.png" || snapshot.Role != entity.WorkspaceRoleAdmin {
+			if snapshot.DisplayName != "Madina Karimova" || snapshot.AvatarURL != "https://cdn.test/madina.png" || snapshot.AvatarColor != "#0EA5E9" || snapshot.Role != entity.WorkspaceRoleAdmin {
 				t.Fatalf("profile_share snapshot = %+v, want target user snapshot", snapshot)
 			}
 			if snapshot.Position == nil || *snapshot.Position != position {

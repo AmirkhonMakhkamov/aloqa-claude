@@ -26,6 +26,7 @@ type QuotedSnapshot struct {
 type ProfileShareSnapshot struct {
 	DisplayName string        `json:"display_name"`
 	AvatarURL   string        `json:"avatar_url,omitempty"`
+	AvatarColor string        `json:"avatar_color"`
 	Role        WorkspaceRole `json:"role"`
 	Position    *string       `json:"position,omitempty"`
 	Department  *string       `json:"department,omitempty"`
@@ -55,9 +56,13 @@ type Message struct {
 	QuotedMessageID *uuid.UUID      `json:"quoted_message_id,omitempty" db:"quoted_message_id"`
 	QuotedSnapshot  *QuotedSnapshot `json:"quoted_snapshot,omitempty" db:"quoted_snapshot"`
 	ProfileShare    *ProfileShare   `json:"profile_share,omitempty" db:"profile_share"`
-	CreatedAt       time.Time       `json:"created_at"`
-	UpdatedAt       time.Time       `json:"updated_at"`
-	DeletedAt       *time.Time      `json:"deleted_at,omitempty"`
+	// JSON-typed call-event envelope on a type='system' message written into the
+	// call's channel/DM timeline when a call ends. Persisted verbatim; the FE
+	// owns the schema (call_id, type, end_reason, duration, participants).
+	CallEvent json.RawMessage `json:"call_event,omitempty" db:"call_event"`
+	CreatedAt time.Time       `json:"created_at"`
+	UpdatedAt time.Time       `json:"updated_at"`
+	DeletedAt *time.Time      `json:"deleted_at,omitempty"`
 
 	// Aggregated fields (populated by queries, not stored directly).
 	ReplyCount  int          `json:"reply_count,omitempty"`

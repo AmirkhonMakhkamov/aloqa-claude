@@ -483,13 +483,14 @@ func (r *CallRepo) ListActiveSummariesByWorkspace(
 	}
 
 	const topQuery = `
-		SELECT call_id, user_id, display_name, avatar_url
+		SELECT call_id, user_id, display_name, avatar_url, avatar_color
 		FROM (
 			SELECT
 				cp.call_id,
 				cp.user_id,
 				u.display_name,
 				u.avatar_url,
+				u.avatar_color,
 				ROW_NUMBER() OVER (
 					PARTITION BY cp.call_id
 					ORDER BY cp.joined_at NULLS LAST, cp.user_id
@@ -512,7 +513,7 @@ func (r *CallRepo) ListActiveSummariesByWorkspace(
 	for topRows.Next() {
 		var callID uuid.UUID
 		var p entity.TopParticipant
-		if err := topRows.Scan(&callID, &p.UserID, &p.DisplayName, &p.AvatarURL); err != nil {
+		if err := topRows.Scan(&callID, &p.UserID, &p.DisplayName, &p.AvatarURL, &p.AvatarColor); err != nil {
 			return nil, fmt.Errorf("postgres: list top participants scan: %w", err)
 		}
 		byCall[callID] = append(byCall[callID], p)

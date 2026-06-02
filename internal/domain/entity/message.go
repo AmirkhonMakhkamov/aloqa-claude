@@ -26,6 +26,7 @@ type QuotedSnapshot struct {
 type ProfileShareSnapshot struct {
 	DisplayName string        `json:"display_name"`
 	AvatarURL   string        `json:"avatar_url,omitempty"`
+	AvatarColor string        `json:"avatar_color"`
 	Role        WorkspaceRole `json:"role"`
 	Position    *string       `json:"position,omitempty"`
 	Department  *string       `json:"department,omitempty"`

@@ -257,6 +257,7 @@ func (s *Service) Register(ctx context.Context, email, password, displayName str
 		ID:           id.New(),
 		Email:        email,
 		DisplayName:  displayName,
+		AvatarColor:  entity.AvatarColorForDisplayName(displayName),
 		PasswordHash: passwordHash,
 		Status:       entity.UserStatusActive,
 		Locale:       "en",
@@ -310,6 +311,7 @@ func (s *Service) UpdateProfile(ctx context.Context, userID uuid.UUID, input Upd
 			return nil, cerrors.InvalidInput("display_name must be at most 100 characters")
 		}
 		user.DisplayName = name
+		user.AvatarColor = entity.AvatarColorForDisplayName(name)
 	}
 	if input.AvatarURL != nil {
 		avatarURL := strings.TrimSpace(*input.AvatarURL)

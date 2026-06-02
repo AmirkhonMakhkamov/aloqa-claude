@@ -138,6 +138,7 @@ func TestMessageRepoPersistsProfileShare(t *testing.T) {
 		Snapshot: entity.ProfileShareSnapshot{
 			DisplayName: "Madina Karimova",
 			AvatarURL:   "https://cdn.test/madina.png",
+			AvatarColor: "#0EA5E9",
 			Role:        entity.WorkspaceRoleAdmin,
 			Position:    &position,
 			Department:  &department,
@@ -157,7 +158,7 @@ func TestMessageRepoPersistsProfileShare(t *testing.T) {
 	if got.ProfileShare.UserID != env.userID || got.ProfileShare.WorkspaceID != env.workspaceID {
 		t.Fatalf("profile_share ids = %s/%s, want %s/%s", got.ProfileShare.UserID, got.ProfileShare.WorkspaceID, env.userID, env.workspaceID)
 	}
-	if got.ProfileShare.Snapshot.DisplayName != "Madina Karimova" || got.ProfileShare.Snapshot.Role != entity.WorkspaceRoleAdmin {
+	if got.ProfileShare.Snapshot.DisplayName != "Madina Karimova" || got.ProfileShare.Snapshot.AvatarColor != "#0EA5E9" || got.ProfileShare.Snapshot.Role != entity.WorkspaceRoleAdmin {
 		t.Fatalf("profile_share snapshot = %+v, want stored snapshot", got.ProfileShare.Snapshot)
 	}
 	if got.ProfileShare.Snapshot.Position == nil || *got.ProfileShare.Snapshot.Position != position {

@@ -23,6 +23,7 @@ CREATE TABLE users (
     email       text        NOT NULL,
     display_name text       NOT NULL,
     avatar_url  text,
+    avatar_color text       NOT NULL DEFAULT '#2D7D6A',
     password_hash text      NOT NULL,
     status      text        NOT NULL DEFAULT 'active'
                             CHECK (status IN ('active', 'suspended', 'deactivated')),

@@ -26,6 +26,7 @@ type User struct {
 	Email       string    `json:"email"`
 	DisplayName string    `json:"display_name"`
 	AvatarURL   string    `json:"avatar_url,omitempty"`
+	AvatarColor string    `json:"avatar_color"`
 	// Position is the user's human-readable job title (for example
 	// "Senior Software Engineer, Platform Infrastructure"). Nullable; absent
 	// for users that haven't set one. Marshalled as `position: null` when

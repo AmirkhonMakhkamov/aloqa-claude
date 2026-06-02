@@ -251,6 +251,7 @@ func (s *Service) RedeemInvite(ctx context.Context, input RedeemInviteInput) (*R
 			ID:          id.New(),
 			Email:       input.Email,
 			DisplayName: input.DisplayName,
+			AvatarColor: entity.AvatarColorForDisplayName(input.DisplayName),
 			Status:      entity.UserStatusActive,
 			Locale:      "en",
 			CreatedAt:   now,

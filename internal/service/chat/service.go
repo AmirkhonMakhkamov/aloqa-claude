@@ -58,6 +58,7 @@ type DirectoryPerson struct {
 	DisplayName string               `json:"display_name"`
 	Email       string               `json:"email"`
 	AvatarURL   string               `json:"avatar_url,omitempty"`
+	AvatarColor string               `json:"avatar_color"`
 	Role        entity.WorkspaceRole `json:"role"`
 	Position    *string              `json:"position"`
 	Department  *string              `json:"department"`
@@ -711,6 +712,7 @@ func (s *Service) ListDirectory(ctx context.Context, workspaceID, userID uuid.UU
 			DisplayName: member.User.DisplayName,
 			Email:       member.User.Email,
 			AvatarURL:   member.User.AvatarURL,
+			AvatarColor: member.User.AvatarColor,
 			Role:        member.Role,
 			Position:    member.User.Position,
 			Department:  member.User.Department,
@@ -1217,6 +1219,7 @@ func (s *Service) buildProfileShare(
 		Snapshot: entity.ProfileShareSnapshot{
 			DisplayName: member.User.DisplayName,
 			AvatarURL:   member.User.AvatarURL,
+			AvatarColor: member.User.AvatarColor,
 			Role:        member.Role,
 			Position:    member.User.Position,
 			Department:  member.User.Department,

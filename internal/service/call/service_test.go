@@ -409,6 +409,59 @@ func TestJoinCallKeepsExistingWaitingParticipantWaiting(t *testing.T) {
 	}
 }
 
+func removeParticipantFixture(workspaceID, callID, hostID, targetID uuid.UUID, actorRole entity.CallRole) (*Service, *fakeCallRepo) {
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, hostID}: {WorkspaceID: workspaceID, UserID: hostID, Role: entity.WorkspaceRoleMember},
+	}}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}:   {ID: uuid.New(), CallID: callID, UserID: hostID, Role: actorRole, Status: entity.ParticipantStatusConnected},
+			{callID, targetID}: {ID: uuid.New(), CallID: callID, UserID: targetID, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected},
+		},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+	return svc, calls
+}
+
+func TestRemoveParticipantHostEvictsConnectedTarget(t *testing.T) {
+	ctx := context.Background()
+	workspaceID, callID := uuid.New(), uuid.New()
+	hostID, targetID := uuid.New(), uuid.New()
+	svc, calls := removeParticipantFixture(workspaceID, callID, hostID, targetID, entity.CallRoleHost)
+
+	if err := svc.RemoveParticipant(ctx, workspaceID, callID, hostID, targetID); err != nil {
+		t.Fatalf("RemoveParticipant returned error: %v", err)
+	}
+	if got := calls.participants[[2]uuid.UUID{callID, targetID}].Status; got != entity.ParticipantStatusDisconnected {
+		t.Fatalf("target status = %q, want %q", got, entity.ParticipantStatusDisconnected)
+	}
+}
+
+func TestRemoveParticipantRejectsNonHostActor(t *testing.T) {
+	ctx := context.Background()
+	workspaceID, callID := uuid.New(), uuid.New()
+	actorID, targetID := uuid.New(), uuid.New()
+	svc, _ := removeParticipantFixture(workspaceID, callID, actorID, targetID, entity.CallRoleParticipant)
+
+	if err := svc.RemoveParticipant(ctx, workspaceID, callID, actorID, targetID); !hasCode(err, cerrors.CodeForbidden) {
+		t.Fatalf("RemoveParticipant by non-host = %v, want Forbidden", err)
+	}
+}
+
+func TestRemoveParticipantRejectsSelf(t *testing.T) {
+	ctx := context.Background()
+	workspaceID, callID := uuid.New(), uuid.New()
+	hostID, targetID := uuid.New(), uuid.New()
+	svc, _ := removeParticipantFixture(workspaceID, callID, hostID, targetID, entity.CallRoleHost)
+
+	if err := svc.RemoveParticipant(ctx, workspaceID, callID, hostID, hostID); !hasCode(err, cerrors.CodeInvalidInput) {
+		t.Fatalf("RemoveParticipant of self = %v, want InvalidInput", err)
+	}
+}
+
 func TestJoinCall_OnEndedCall_ReturnsCallEndedNot403(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()

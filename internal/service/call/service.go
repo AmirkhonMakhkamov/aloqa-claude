@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 
 	"aloqa/internal/domain/entity"
 	"aloqa/internal/domain/event"
@@ -428,6 +429,10 @@ func (s *Service) ensureCollaborationChannelAccess(ctx context.Context, ch *enti
 	return decision.Allowed, nil
 }
 
+// maxJoinPasswordBytes is bcrypt's hard input limit; longer host-supplied
+// passwords are rejected as invalid input rather than failing to hash. #4.
+const maxJoinPasswordBytes = 72
+
 func validateCallSettings(callType entity.CallType, settings entity.CallSettings) error {
 	switch callType {
 	case entity.CallTypeOneToOne, entity.CallTypeGroup, entity.CallTypeMeeting, entity.CallTypeWebinar, entity.CallTypeSelector:
@@ -436,6 +441,29 @@ func validateCallSettings(callType entity.CallType, settings entity.CallSettings
 	}
 	if settings.MaxParticipants < 0 {
 		return cerrors.InvalidInput("max_participants cannot be negative")
+	}
+	if settings.EntryMode != "" && !settings.EntryMode.Valid() {
+		return cerrors.InvalidInput("invalid entry_mode")
+	}
+	return nil
+}
+
+// verifyJoinPassword checks a password-mode join password against the stored
+// bcrypt hash. Both a missing and an incorrect password return the dedicated
+// CALL_PASSWORD_REQUIRED code (HTTP 401) so the client uniformly re-prompts for
+// the password without conflating it with a session-auth 401 (the message still
+// distinguishes the two). A call in password mode without a stored hash is a
+// misconfiguration -> FORBIDDEN. #4.
+func verifyJoinPassword(hash, password string) error {
+	if hash == "" {
+		// Password mode with no stored hash is a misconfiguration — refuse safely.
+		return cerrors.Forbidden("this call is not configured with a password")
+	}
+	if password == "" {
+		return cerrors.CallPasswordRequired("a password is required to join this call")
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {
+		return cerrors.CallPasswordRequired("incorrect call password")
 	}
 	return nil
 }
@@ -655,6 +683,7 @@ func (s *Service) StartCall(
 	title string,
 	channelID *uuid.UUID,
 	settings entity.CallSettings,
+	joinPassword string,
 ) (*entity.Call, error) {
 	if callType == entity.CallTypeGroup || callType == entity.CallTypeMeeting {
 		settings.BreakoutRooms = true
@@ -672,6 +701,37 @@ func (s *Service) StartCall(
 	// There is no API to toggle chat per call today; if one is added, this becomes
 	// the default rather than an unconditional override.
 	settings.Chat = true
+
+	// Resolve the entry mode at creation so the persisted row (and every API read)
+	// carries a concrete value. When the caller omits entry_mode we derive it from
+	// the legacy waiting_room flag (backwards-compatible: existing/programmatic
+	// callers keep their behaviour). The "waiting room by default" UX for new
+	// calls is expressed by the client sending entry_mode=manual_admit explicitly
+	// (CreateCallModal), not by a server-side type default. The legacy WaitingRoom
+	// flag is kept in sync so existing read paths (is_open summaries, etc.) stay
+	// correct. #4.
+	entryMode := settings.ResolvedEntryMode()
+	settings.EntryMode = entryMode
+	settings.WaitingRoom = entryMode == entity.EntryModeManualAdmit
+
+	var joinPasswordHash string
+	if entryMode == entity.EntryModePassword {
+		if joinPassword == "" {
+			return nil, cerrors.InvalidInput("a password is required for password entry mode")
+		}
+		// bcrypt rejects inputs longer than 72 bytes (golang.org/x/crypto >= v0.50
+		// errors instead of truncating); validate at the boundary so an over-long
+		// host-supplied password is a 400, not a 500. #4.
+		if len(joinPassword) > maxJoinPasswordBytes {
+			return nil, cerrors.InvalidInput("call password must be at most 72 bytes")
+		}
+		hashed, err := bcrypt.GenerateFromPassword([]byte(joinPassword), bcrypt.DefaultCost)
+		if err != nil {
+			return nil, cerrors.Internal("failed to hash call password", err)
+		}
+		joinPasswordHash = string(hashed)
+	}
+
 	if err := s.requireWorkspaceMember(ctx, workspaceID, userID); err != nil {
 		return nil, err
 	}
@@ -717,16 +777,17 @@ func (s *Service) StartCall(
 
 	now := time.Now()
 	call := &entity.Call{
-		ID:          id.New(),
-		WorkspaceID: workspaceID,
-		ChannelID:   channelID,
-		Type:        callType,
-		Status:      entity.CallStatusRinging,
-		Title:       title,
-		CreatedBy:   userID,
-		Settings:    settings,
-		StartedAt:   &now,
-		CreatedAt:   now,
+		ID:               id.New(),
+		WorkspaceID:      workspaceID,
+		ChannelID:        channelID,
+		Type:             callType,
+		Status:           entity.CallStatusRinging,
+		Title:            title,
+		CreatedBy:        userID,
+		Settings:         settings,
+		JoinPasswordHash: joinPasswordHash,
+		StartedAt:        &now,
+		CreatedAt:        now,
 	}
 
 	// Add creator as host participant.
@@ -792,7 +853,7 @@ func (s *Service) StartCall(
 }
 
 // JoinCall adds a user as a participant to an active call.
-func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid.UUID) (*entity.CallParticipant, error) {
+func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid.UUID, joinPassword string) (*entity.CallParticipant, error) {
 	call, err := s.requireCallAccess(ctx, workspaceID, callID, userID)
 	if err != nil {
 		return nil, err
@@ -898,11 +959,22 @@ func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid
 
 	now := time.Now()
 
-	// Determine initial status: if waiting room is enabled, or the joiner is a
-	// guest (always gated, ALK-700), place in waiting.
+	// Determine initial status from the call's entry mode (#4). Guests always
+	// pass through the waiting room (ALK-700) and bypass the password — the
+	// one-time link is the host's approval. For non-guest members: manual_admit
+	// holds them in the waiting room, password requires the correct password
+	// before admission, and open lets them join directly.
+	entryMode := call.Settings.ResolvedEntryMode()
 	initialStatus := entity.ParticipantStatusConnected
-	if call.Settings.WaitingRoom || guest {
+	switch {
+	case guest:
 		initialStatus = entity.ParticipantStatusWaiting
+	case entryMode == entity.EntryModeManualAdmit:
+		initialStatus = entity.ParticipantStatusWaiting
+	case entryMode == entity.EntryModePassword:
+		if err := verifyJoinPassword(call.JoinPasswordHash, joinPassword); err != nil {
+			return nil, err
+		}
 	}
 	role := entity.CallRoleParticipant
 	if call.Type == entity.CallTypeWebinar || call.Type == entity.CallTypeSelector {

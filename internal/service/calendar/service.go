@@ -24,7 +24,7 @@ type EventPublisher interface {
 }
 
 type CallService interface {
-	StartCall(ctx context.Context, workspaceID, userID uuid.UUID, callType entity.CallType, title string, channelID *uuid.UUID, settings entity.CallSettings) (*entity.Call, error)
+	StartCall(ctx context.Context, workspaceID, userID uuid.UUID, callType entity.CallType, title string, channelID *uuid.UUID, settings entity.CallSettings, joinPassword string) (*entity.Call, error)
 	GetCall(ctx context.Context, workspaceID, callID, userID uuid.UUID) (*entity.Call, error)
 	EnsureLiveKitRoomRequired(ctx context.Context, call *entity.Call) error
 	DeleteLiveKitRoom(ctx context.Context, callID uuid.UUID) error
@@ -726,7 +726,7 @@ func (s *Service) StartCallFromEvent(ctx context.Context, workspaceID, eventID, 
 		Chat:            true,
 		BreakoutRooms:   false,
 		MaxParticipants: 500,
-	})
+	}, "")
 	if err != nil {
 		return nil, err
 	}

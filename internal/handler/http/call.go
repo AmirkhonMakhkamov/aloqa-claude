@@ -207,11 +207,26 @@ func (h *CallHandler) ResolveGuestLink(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, resp)
 }
 
+// startCallSettings is the request projection of call settings: the persisted
+// entity.CallSettings (feature toggles + entry_mode) plus the write-only join
+// Password (plaintext, hashed server-side, never persisted in this struct or
+// returned by the API). #4.
+type startCallSettings struct {
+	entity.CallSettings
+	Password string `json:"password,omitempty"`
+}
+
 type startCallRequest struct {
-	Type      entity.CallType     `json:"type"`
-	Title     string              `json:"title"`
-	ChannelID *string             `json:"channel_id,omitempty"`
-	Settings  entity.CallSettings `json:"settings"`
+	Type      entity.CallType   `json:"type"`
+	Title     string            `json:"title"`
+	ChannelID *string           `json:"channel_id,omitempty"`
+	Settings  startCallSettings `json:"settings"`
+}
+
+type joinCallRequest struct {
+	// Password is supplied only for password entry-mode calls; it is optional so
+	// joins to manual_admit/open calls send no body. #4.
+	Password string `json:"password,omitempty"`
 }
 
 func (h *CallHandler) Start(w http.ResponseWriter, r *http.Request) {
@@ -234,7 +249,7 @@ func (h *CallHandler) Start(w http.ResponseWriter, r *http.Request) {
 		channelID = &parsed
 	}
 
-	c, err := h.svc.StartCall(r.Context(), wsID, userID, req.Type, req.Title, channelID, req.Settings)
+	c, err := h.svc.StartCall(r.Context(), wsID, userID, req.Type, req.Title, channelID, req.Settings.CallSettings, req.Settings.Password)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -338,7 +353,13 @@ func (h *CallHandler) Join(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
 
-	participant, err := h.svc.JoinCall(r.Context(), workspaceID, callID, userID)
+	var body joinCallRequest
+	if err := decodeOptionalJSON(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	participant, err := h.svc.JoinCall(r.Context(), workspaceID, callID, userID, body.Password)
 	if err != nil {
 		writeErr(w, err)
 		return

@@ -1801,7 +1801,7 @@ type fakeCallService struct {
 	calls       map[uuid.UUID]*entity.Call
 }
 
-func (s *fakeCallService) StartCall(_ context.Context, workspaceID, userID uuid.UUID, callType entity.CallType, title string, channelID *uuid.UUID, settings entity.CallSettings) (*entity.Call, error) {
+func (s *fakeCallService) StartCall(_ context.Context, workspaceID, userID uuid.UUID, callType entity.CallType, title string, channelID *uuid.UUID, settings entity.CallSettings, _ string) (*entity.Call, error) {
 	s.starts++
 	call := &entity.Call{
 		ID:          id.New(),

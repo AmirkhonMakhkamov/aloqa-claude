@@ -139,6 +139,13 @@ func nullableParticipantLeftReason(reason entity.ParticipantLeftReason) any {
 	return string(reason)
 }
 
+func nullableString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
 func (r *CallRepo) Create(ctx context.Context, call *entity.Call) error {
 	settingsJSON, err := json.Marshal(call.Settings)
 	if err != nil {
@@ -146,8 +153,8 @@ func (r *CallRepo) Create(ctx context.Context, call *entity.Call) error {
 	}
 
 	query := `
-		INSERT INTO calls (id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, end_reason, featured_share_user_id, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`
+		INSERT INTO calls (id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, end_reason, featured_share_user_id, created_at, join_password_hash)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`
 
 	_, err = r.db.Exec(ctx, query,
 		call.ID,
@@ -164,6 +171,7 @@ func (r *CallRepo) Create(ctx context.Context, call *entity.Call) error {
 		nullableCallEndReason(call.EndReason),
 		call.FeaturedShareUserID,
 		call.CreatedAt,
+		nullableString(call.JoinPasswordHash),
 	)
 	if err != nil {
 		return fmt.Errorf("postgres: create call: %w", err)
@@ -173,8 +181,11 @@ func (r *CallRepo) Create(ctx context.Context, call *entity.Call) error {
 }
 
 func (r *CallRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Call, error) {
+	// join_password_hash is loaded only here (the GetByID path that JoinCall and
+	// GetCall use) because it is the sole consumer; the list/recents projections
+	// never verify a password and never expose the hash (#4).
 	query := `
-		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, created_at
+		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, created_at, COALESCE(join_password_hash, '')
 		FROM calls
 		WHERE id = $1`
 
@@ -196,6 +207,7 @@ func (r *CallRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Call, err
 		&call.EndReason,
 		&call.FeaturedShareUserID,
 		&call.CreatedAt,
+		&call.JoinPasswordHash,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -207,6 +219,7 @@ func (r *CallRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Call, err
 	if err := json.Unmarshal(settingsJSON, &call.Settings); err != nil {
 		return nil, fmt.Errorf("postgres: unmarshal call settings: %w", err)
 	}
+	call.Settings.EntryMode = call.Settings.ResolvedEntryMode()
 
 	return call, nil
 }
@@ -251,6 +264,7 @@ func (r *CallRepo) ListActiveByWorkspace(ctx context.Context, workspaceID uuid.U
 		if err := json.Unmarshal(settingsJSON, &call.Settings); err != nil {
 			return nil, fmt.Errorf("postgres: unmarshal call settings: %w", err)
 		}
+		call.Settings.EntryMode = call.Settings.ResolvedEntryMode()
 
 		calls = append(calls, call)
 	}
@@ -313,6 +327,7 @@ func (r *CallRepo) ListStaleOpen(ctx context.Context, before time.Time, limit in
 		if err := json.Unmarshal(settingsJSON, &call.Settings); err != nil {
 			return nil, fmt.Errorf("postgres: unmarshal stale call settings: %w", err)
 		}
+		call.Settings.EntryMode = call.Settings.ResolvedEntryMode()
 
 		calls = append(calls, call)
 	}
@@ -585,6 +600,7 @@ func (r *CallRepo) ListRecentByWorkspace(ctx context.Context, workspaceID uuid.U
 		if err := json.Unmarshal(settingsJSON, &call.Settings); err != nil {
 			return nil, fmt.Errorf("postgres: unmarshal recent call settings: %w", err)
 		}
+		call.Settings.EntryMode = call.Settings.ResolvedEntryMode()
 		calls = append(calls, call)
 	}
 	if err := rows.Err(); err != nil {

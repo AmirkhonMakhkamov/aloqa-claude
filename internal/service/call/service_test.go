@@ -38,11 +38,11 @@ func TestCallTenantBoundaries(t *testing.T) {
 	}, participants: map[[2]uuid.UUID]*entity.CallParticipant{}}
 	svc := NewService(calls, &fakeBreakoutRepo{}, channels, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 
-	if _, err := svc.StartCall(ctx, workspaceA, userID, entity.CallTypeMeeting, "", &channelID, entity.CallSettings{}); !hasCode(err, cerrors.CodeNotFound) {
+	if _, err := svc.StartCall(ctx, workspaceA, userID, entity.CallTypeMeeting, "", &channelID, entity.CallSettings{}, ""); !hasCode(err, cerrors.CodeNotFound) {
 		t.Fatalf("StartCall with cross-workspace channel error = %v, want NOT_FOUND", err)
 	}
 
-	if _, err := svc.JoinCall(ctx, workspaceA, callID, userID); !hasCode(err, cerrors.CodeNotFound) {
+	if _, err := svc.JoinCall(ctx, workspaceA, callID, userID, ""); !hasCode(err, cerrors.CodeNotFound) {
 		t.Fatalf("JoinCall with cross-workspace call error = %v, want NOT_FOUND", err)
 	}
 }
@@ -209,7 +209,7 @@ func TestGuestGrantAllowsJoiningChannelScopedCall(t *testing.T) {
 	}}})
 	svc := NewService(calls, &fakeBreakoutRepo{}, channels, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), guests, nil)
 
-	participant, err := svc.JoinCall(ctx, workspaceID, callID, guestID)
+	participant, err := svc.JoinCall(ctx, workspaceID, callID, guestID, "")
 	if err != nil {
 		t.Fatalf("JoinCall guest returned error: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestStartCallRejectsSecondCallInChannel(t *testing.T) {
 	}
 	svc := NewService(calls, &fakeBreakoutRepo{}, channels, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 
-	if _, err := svc.StartCall(ctx, workspaceID, hostID, entity.CallTypeMeeting, "", &channelID, entity.CallSettings{}); !hasCode(err, cerrors.CodeChannelCallExists) {
+	if _, err := svc.StartCall(ctx, workspaceID, hostID, entity.CallTypeMeeting, "", &channelID, entity.CallSettings{}, ""); !hasCode(err, cerrors.CodeChannelCallExists) {
 		t.Fatalf("StartCall in a busy channel = %v, want CHANNEL_ALREADY_HAS_ACTIVE_CALL", err)
 	}
 }
@@ -262,7 +262,7 @@ func TestStartCallRejectsUserAlreadyInAnotherCall(t *testing.T) {
 	}
 	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 
-	if _, err := svc.StartCall(ctx, workspaceID, userID, entity.CallTypeMeeting, "", nil, entity.CallSettings{}); !hasCode(err, cerrors.CodeUserInCall) {
+	if _, err := svc.StartCall(ctx, workspaceID, userID, entity.CallTypeMeeting, "", nil, entity.CallSettings{}, ""); !hasCode(err, cerrors.CodeUserInCall) {
 		t.Fatalf("StartCall while already in another call = %v, want USER_ALREADY_IN_CALL", err)
 	}
 }
@@ -299,7 +299,7 @@ func TestCrossWorkspaceDMMemberCanJoinSharedChannelCall(t *testing.T) {
 		decision: collabaccess.Decision{Managed: true, Allowed: true},
 	})
 
-	participant, err := svc.JoinCall(ctx, workspaceID, callID, remoteUserID)
+	participant, err := svc.JoinCall(ctx, workspaceID, callID, remoteUserID, "")
 	if err != nil {
 		t.Fatalf("JoinCall remote collaboration user returned error: %v", err)
 	}
@@ -340,7 +340,7 @@ func TestCrossWorkspaceDMMemberCannotJoinCallWhenSharedCallsRevoked(t *testing.T
 		decision: collabaccess.Decision{Managed: true, Allowed: false},
 	})
 
-	if _, err := svc.JoinCall(ctx, workspaceID, callID, remoteUserID); !hasCode(err, cerrors.CodeForbidden) {
+	if _, err := svc.JoinCall(ctx, workspaceID, callID, remoteUserID, ""); !hasCode(err, cerrors.CodeForbidden) {
 		t.Fatalf("JoinCall revoked collaboration error = %v, want FORBIDDEN", err)
 	}
 }
@@ -404,7 +404,7 @@ func TestJoinCallHonorsPolicyParticipantCap(t *testing.T) {
 		},
 	})
 
-	if _, err := svc.JoinCall(ctx, workspaceID, callID, userC); !hasCode(err, cerrors.CodeConflict) {
+	if _, err := svc.JoinCall(ctx, workspaceID, callID, userC, ""); !hasCode(err, cerrors.CodeConflict) {
 		t.Fatalf("JoinCall cap error = %v, want CONFLICT", err)
 	}
 }
@@ -442,7 +442,7 @@ func TestJoinCallKeepsExistingWaitingParticipantWaiting(t *testing.T) {
 	}
 	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, pub, nil, mediaTestConfig(), nil, nil)
 
-	participant, err := svc.JoinCall(ctx, workspaceID, callID, userID)
+	participant, err := svc.JoinCall(ctx, workspaceID, callID, userID, "")
 	if err != nil {
 		t.Fatalf("JoinCall returned error: %v", err)
 	}
@@ -557,7 +557,7 @@ func TestJoinCallGuestSilentReconnectWithinGrace(t *testing.T) {
 	guestID, participantID := uuid.New(), uuid.New()
 	svc := guestReconnectFixture(workspaceID, callID, channelID, guestID, participantID, 5*time.Second, noopPublisher{})
 
-	participant, err := svc.JoinCall(ctx, workspaceID, callID, guestID)
+	participant, err := svc.JoinCall(ctx, workspaceID, callID, guestID, "")
 	if err != nil {
 		t.Fatalf("JoinCall returned error: %v", err)
 	}
@@ -574,7 +574,7 @@ func TestJoinCallGuestReKnocksAfterGraceExpires(t *testing.T) {
 	guestID, participantID := uuid.New(), uuid.New()
 	svc := guestReconnectFixture(workspaceID, callID, channelID, guestID, participantID, 5*time.Minute, noopPublisher{})
 
-	participant, err := svc.JoinCall(ctx, workspaceID, callID, guestID)
+	participant, err := svc.JoinCall(ctx, workspaceID, callID, guestID, "")
 	if err != nil {
 		t.Fatalf("JoinCall returned error: %v", err)
 	}
@@ -604,7 +604,7 @@ func TestJoinCall_OnEndedCall_ReturnsCallEndedNot403(t *testing.T) {
 	}
 	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 
-	_, err := svc.JoinCall(ctx, workspaceID, callID, userID)
+	_, err := svc.JoinCall(ctx, workspaceID, callID, userID, "")
 	if err == nil {
 		t.Fatal("JoinCall on ended call returned nil error, want CALL_ENDED")
 	}
@@ -941,7 +941,7 @@ func TestStartCallRequiresLiveKitRoomBeforePersist(t *testing.T) {
 	svc.SetLiveKit(LiveKitSettings{URL: "https://livekit.example.com", APIKey: "key", APISecret: "secret", TokenTTL: time.Minute})
 	svc.SetLiveKitRoomClient(roomClient)
 
-	callEntity, err := svc.StartCall(ctx, workspaceID, userID, entity.CallTypeOneToOne, "dm", nil, entity.CallSettings{})
+	callEntity, err := svc.StartCall(ctx, workspaceID, userID, entity.CallTypeOneToOne, "dm", nil, entity.CallSettings{}, "")
 	if !hasCode(err, cerrors.CodeUnavailable) {
 		t.Fatalf("StartCall error = %v, want UNAVAILABLE", err)
 	}
@@ -970,7 +970,7 @@ func TestStartCallDefaultsChatEnabled(t *testing.T) {
 	// Empty settings → Settings.Chat is the Go zero value (false). StartCall must
 	// default it to true so the call-chat gate (message.go "call chat is disabled")
 	// never 403s for ad-hoc / channel calls. (hotfix)
-	callEntity, err := svc.StartCall(ctx, workspaceID, userID, entity.CallTypeOneToOne, "dm", nil, entity.CallSettings{})
+	callEntity, err := svc.StartCall(ctx, workspaceID, userID, entity.CallTypeOneToOne, "dm", nil, entity.CallSettings{}, "")
 	if err != nil {
 		t.Fatalf("StartCall returned error: %v", err)
 	}
@@ -1011,7 +1011,7 @@ func TestStartCallDefaultsBreakoutRoomsForGroupAndMeeting(t *testing.T) {
 			svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 			configureCleanupLiveKit(svc, nil)
 
-			callEntity, err := svc.StartCall(ctx, workspaceID, userID, tc.typ, "", nil, entity.CallSettings{})
+			callEntity, err := svc.StartCall(ctx, workspaceID, userID, tc.typ, "", nil, entity.CallSettings{}, "")
 			if err != nil {
 				t.Fatalf("StartCall returned error: %v", err)
 			}
@@ -1054,7 +1054,7 @@ func TestJoinCallRequiresLiveKitRoomBeforeParticipantInsert(t *testing.T) {
 	svc.SetLiveKit(LiveKitSettings{URL: "https://livekit.example.com", APIKey: "key", APISecret: "secret", TokenTTL: time.Minute})
 	svc.SetLiveKitRoomClient(roomClient)
 
-	participant, err := svc.JoinCall(ctx, workspaceID, callID, userID)
+	participant, err := svc.JoinCall(ctx, workspaceID, callID, userID, "")
 	if !hasCode(err, cerrors.CodeUnavailable) {
 		t.Fatalf("JoinCall error = %v, want UNAVAILABLE", err)
 	}

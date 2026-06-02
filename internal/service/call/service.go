@@ -518,6 +518,17 @@ func markParticipantDisconnected(participant *entity.CallParticipant, reason ent
 	participant.LeftReason = reason
 }
 
+// guestReconnectGrace is the window after a guest drops during which an
+// already-admitted guest may silently reconnect instead of re-knocking. It
+// absorbs transient disconnects and a stray /leave racing two waiting-room join
+// drivers (the admit→kick loop); a guest who left earlier than this still
+// re-knocks for host approval, preserving the ALK-700 forced-waiting rule.
+const guestReconnectGrace = 30 * time.Second
+
+func guestWithinReconnectGrace(participant *entity.CallParticipant) bool {
+	return participant.LeftAt != nil && time.Since(*participant.LeftAt) < guestReconnectGrace
+}
+
 func shouldAutoEndAfterLeave(call *entity.Call, participants []entity.CallParticipant) bool {
 	if call == nil || call.Status == entity.CallStatusEnded {
 		return false
@@ -549,6 +560,43 @@ func serviceError(message string, err error) error {
 }
 
 // StartCall creates a new call and adds the creator as the host participant.
+// activeCallInChannel returns the first non-ended call linked to channelID in
+// the workspace, or nil. One-call-per-channel guard (9b).
+func (s *Service) activeCallInChannel(ctx context.Context, workspaceID, channelID uuid.UUID) (*entity.Call, error) {
+	calls, err := s.calls.ListActiveByWorkspace(ctx, workspaceID)
+	if err != nil {
+		return nil, cerrors.Internal("failed to list active calls", err)
+	}
+	for i := range calls {
+		if calls[i].ChannelID != nil && *calls[i].ChannelID == channelID {
+			return &calls[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// userActiveCall returns the first non-ended call in the workspace where userID
+// is a connected participant, or nil. Single-call-per-user guard (9c).
+func (s *Service) userActiveCall(ctx context.Context, workspaceID, userID uuid.UUID) (*entity.Call, error) {
+	calls, err := s.calls.ListActiveByWorkspace(ctx, workspaceID)
+	if err != nil {
+		return nil, cerrors.Internal("failed to list active calls", err)
+	}
+	for i := range calls {
+		participant, err := s.calls.GetParticipant(ctx, calls[i].ID, userID)
+		if err != nil {
+			if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+				continue
+			}
+			return nil, cerrors.Internal("failed to check user participation", err)
+		}
+		if participant.Status == entity.ParticipantStatusConnected {
+			return &calls[i], nil
+		}
+	}
+	return nil, nil
+}
+
 func (s *Service) StartCall(
 	ctx context.Context,
 	workspaceID, userID uuid.UUID,
@@ -590,6 +638,27 @@ func (s *Service) StartCall(
 		if err := s.requireChannelAccess(ctx, ch, userID); err != nil {
 			return nil, err
 		}
+
+		// One active call per channel (9b): reject a second call so the FE joins
+		// the existing one. Channel-scoped only — calls without a channel are
+		// unrestricted.
+		existing, err := s.activeCallInChannel(ctx, workspaceID, *channelID)
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil {
+			return nil, cerrors.ChannelCallExists("channel already has an active call")
+		}
+	}
+
+	// A user may be in only one call at a time (9c): reject starting a new call
+	// while already connected to another.
+	otherCall, err := s.userActiveCall(ctx, workspaceID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if otherCall != nil {
+		return nil, cerrors.UserInCall("you are already in another call")
 	}
 
 	now := time.Now()
@@ -726,8 +795,12 @@ func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid
 			return existing, nil
 		}
 		// A guest who is not already connected (e.g. left then returned with the
-		// same session) must re-knock rather than silently reconnect (ALK-700).
-		if guest && existing.Status != entity.ParticipantStatusConnected {
+		// same session) must re-knock rather than silently reconnect (ALK-700) —
+		// UNLESS they dropped within the reconnect grace window, in which case the
+		// rejoin is treated as a transient reconnect (defense in depth for the
+		// admit→kick loop where a stray /leave evicts a just-admitted guest).
+		if guest && existing.Status != entity.ParticipantStatusConnected &&
+			!guestWithinReconnectGrace(existing) {
 			if err := s.calls.UpdateParticipantStatus(ctx, existing.ID, entity.ParticipantStatusWaiting); err != nil {
 				slog.ErrorContext(ctx, "failed to return guest to waiting room", "participant_id", existing.ID, "error", err)
 				return nil, cerrors.Internal("failed to return guest to waiting room", err)
@@ -1591,6 +1664,56 @@ func (s *Service) TransferHost(ctx context.Context, workspaceID, callID, actorUs
 	s.publishParticipantEvent(ctx, event.TypeCallParticipantUpdated, call, target)
 
 	slog.InfoContext(ctx, "host transferred", "call_id", callID, "from", actorUserID, "to", targetUserID)
+	return nil
+}
+
+// RemoveParticipant lets the host evict another participant from the call. The
+// target is disconnected exactly as if they had left (CallParticipantLeft event
+// + LiveKit RemoveParticipant); a removed guest must re-knock to return. Only
+// the host may remove participants.
+func (s *Service) RemoveParticipant(ctx context.Context, workspaceID, callID, actorUserID, targetUserID uuid.UUID) error {
+	call, err := s.requireCallAccess(ctx, workspaceID, callID, actorUserID)
+	if err != nil {
+		return err
+	}
+	if call.Status == entity.CallStatusEnded {
+		return cerrors.Forbidden("call has already ended")
+	}
+	if actorUserID == targetUserID {
+		return cerrors.InvalidInput("cannot remove yourself; leave the call instead")
+	}
+
+	actor, err := s.calls.GetParticipant(ctx, callID, actorUserID)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return cerrors.Forbidden("actor is not a participant")
+		}
+		return cerrors.Internal("failed to get actor participant", err)
+	}
+	if actor.Role != entity.CallRoleHost {
+		return cerrors.Forbidden("only the host can remove participants")
+	}
+
+	target, err := s.calls.GetParticipant(ctx, callID, targetUserID)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return cerrors.NotFound("target participant not found")
+		}
+		return cerrors.Internal("failed to get target participant", err)
+	}
+
+	disconnected, err := disconnectParticipantIfConnected(ctx, s.calls, target.ID, entity.ParticipantLeftReasonLeft)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to remove participant", "call_id", callID, "target_user_id", targetUserID, "error", err)
+		return cerrors.Internal("failed to remove participant", err)
+	}
+	if disconnected {
+		markParticipantDisconnected(target, entity.ParticipantLeftReasonLeft)
+		s.publishParticipantEvent(ctx, event.TypeCallParticipantLeft, call, target)
+	}
+	s.removeLiveKitParticipantBestEffort(ctx, callID, targetUserID)
+
+	slog.InfoContext(ctx, "participant removed by host", "call_id", callID, "actor_user_id", actorUserID, "target_user_id", targetUserID)
 	return nil
 }
 

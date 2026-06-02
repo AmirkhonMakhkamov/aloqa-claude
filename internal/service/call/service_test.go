@@ -218,6 +218,55 @@ func TestGuestGrantAllowsJoiningChannelScopedCall(t *testing.T) {
 	}
 }
 
+// 9b: one active call per channel — starting a second is rejected so the FE can
+// join the existing one.
+func TestStartCallRejectsSecondCallInChannel(t *testing.T) {
+	ctx := context.Background()
+	workspaceID, channelID := uuid.New(), uuid.New()
+	hostID, existingCallID := uuid.New(), uuid.New()
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, hostID}: {WorkspaceID: workspaceID, UserID: hostID, Role: entity.WorkspaceRoleMember},
+	}}
+	channels := &fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
+		channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
+	}}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			existingCallID: {ID: existingCallID, WorkspaceID: workspaceID, ChannelID: &channelID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, channels, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	if _, err := svc.StartCall(ctx, workspaceID, hostID, entity.CallTypeMeeting, "", &channelID, entity.CallSettings{}); !hasCode(err, cerrors.CodeChannelCallExists) {
+		t.Fatalf("StartCall in a busy channel = %v, want CHANNEL_ALREADY_HAS_ACTIVE_CALL", err)
+	}
+}
+
+// 9c: a user may be in only one call at a time — starting a new call while
+// connected to another is rejected.
+func TestStartCallRejectsUserAlreadyInAnotherCall(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	userID, otherCallID := uuid.New(), uuid.New()
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			otherCallID: {ID: otherCallID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{otherCallID, userID}: {ID: uuid.New(), CallID: otherCallID, UserID: userID, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected},
+		},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	if _, err := svc.StartCall(ctx, workspaceID, userID, entity.CallTypeMeeting, "", nil, entity.CallSettings{}); !hasCode(err, cerrors.CodeUserInCall) {
+		t.Fatalf("StartCall while already in another call = %v, want USER_ALREADY_IN_CALL", err)
+	}
+}
+
 func TestCrossWorkspaceDMMemberCanJoinSharedChannelCall(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -406,6 +455,131 @@ func TestJoinCallKeepsExistingWaitingParticipantWaiting(t *testing.T) {
 	}
 	if pub.called {
 		t.Fatalf("waiting participant rejoin published %q; want no event", pub.subject)
+	}
+}
+
+func removeParticipantFixture(workspaceID, callID, hostID, targetID uuid.UUID, actorRole entity.CallRole) (*Service, *fakeCallRepo) {
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, hostID}: {WorkspaceID: workspaceID, UserID: hostID, Role: entity.WorkspaceRoleMember},
+	}}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}:   {ID: uuid.New(), CallID: callID, UserID: hostID, Role: actorRole, Status: entity.ParticipantStatusConnected},
+			{callID, targetID}: {ID: uuid.New(), CallID: callID, UserID: targetID, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected},
+		},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+	return svc, calls
+}
+
+func TestRemoveParticipantHostEvictsConnectedTarget(t *testing.T) {
+	ctx := context.Background()
+	workspaceID, callID := uuid.New(), uuid.New()
+	hostID, targetID := uuid.New(), uuid.New()
+	svc, calls := removeParticipantFixture(workspaceID, callID, hostID, targetID, entity.CallRoleHost)
+
+	if err := svc.RemoveParticipant(ctx, workspaceID, callID, hostID, targetID); err != nil {
+		t.Fatalf("RemoveParticipant returned error: %v", err)
+	}
+	if got := calls.participants[[2]uuid.UUID{callID, targetID}].Status; got != entity.ParticipantStatusDisconnected {
+		t.Fatalf("target status = %q, want %q", got, entity.ParticipantStatusDisconnected)
+	}
+}
+
+func TestRemoveParticipantRejectsNonHostActor(t *testing.T) {
+	ctx := context.Background()
+	workspaceID, callID := uuid.New(), uuid.New()
+	actorID, targetID := uuid.New(), uuid.New()
+	svc, _ := removeParticipantFixture(workspaceID, callID, actorID, targetID, entity.CallRoleParticipant)
+
+	if err := svc.RemoveParticipant(ctx, workspaceID, callID, actorID, targetID); !hasCode(err, cerrors.CodeForbidden) {
+		t.Fatalf("RemoveParticipant by non-host = %v, want Forbidden", err)
+	}
+}
+
+func TestRemoveParticipantRejectsSelf(t *testing.T) {
+	ctx := context.Background()
+	workspaceID, callID := uuid.New(), uuid.New()
+	hostID, targetID := uuid.New(), uuid.New()
+	svc, _ := removeParticipantFixture(workspaceID, callID, hostID, targetID, entity.CallRoleHost)
+
+	if err := svc.RemoveParticipant(ctx, workspaceID, callID, hostID, hostID); !hasCode(err, cerrors.CodeInvalidInput) {
+		t.Fatalf("RemoveParticipant of self = %v, want InvalidInput", err)
+	}
+}
+
+// guestReconnectFixture builds a service where `guestID` is a guest with an
+// existing disconnected participant that left `leftAgo` ago, ready to rejoin.
+func guestReconnectFixture(
+	workspaceID, callID, channelID, guestID, participantID uuid.UUID,
+	leftAgo time.Duration,
+	pub EventPublisher,
+) *Service {
+	leftAt := time.Now().Add(-leftAgo)
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {ID: callID, WorkspaceID: workspaceID, ChannelID: &channelID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive, Settings: entity.CallSettings{WaitingRoom: true}},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, guestID}: {
+				ID:         participantID,
+				CallID:     callID,
+				UserID:     guestID,
+				Role:       entity.CallRoleParticipant,
+				Status:     entity.ParticipantStatusDisconnected,
+				LeftAt:     &leftAt,
+				LeftReason: entity.ParticipantLeftReasonLeft,
+			},
+		},
+	}
+	channels := &fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
+		channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePrivate},
+	}}
+	guests := guestaccess.NewChecker(&fakeGuestAccessRepo{grants: []entity.GuestAccessGrant{{
+		ID:          uuid.New(),
+		WorkspaceID: workspaceID,
+		UserID:      guestID,
+		ChannelIDs:  []uuid.UUID{channelID},
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}}})
+	return NewService(calls, &fakeBreakoutRepo{}, channels, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), guests, nil)
+}
+
+// A guest dropped moments ago (a transient disconnect or the stray /leave from
+// the admit→kick race) reconnects silently instead of re-knocking (ALK-700 +
+// guest admit→kick loop hardening).
+func TestJoinCallGuestSilentReconnectWithinGrace(t *testing.T) {
+	ctx := context.Background()
+	workspaceID, callID, channelID := uuid.New(), uuid.New(), uuid.New()
+	guestID, participantID := uuid.New(), uuid.New()
+	svc := guestReconnectFixture(workspaceID, callID, channelID, guestID, participantID, 5*time.Second, noopPublisher{})
+
+	participant, err := svc.JoinCall(ctx, workspaceID, callID, guestID)
+	if err != nil {
+		t.Fatalf("JoinCall returned error: %v", err)
+	}
+	if participant.Status != entity.ParticipantStatusConnected {
+		t.Fatalf("participant status = %q, want %q (silent reconnect within grace)", participant.Status, entity.ParticipantStatusConnected)
+	}
+}
+
+// A guest who left earlier than the grace window still re-knocks for host
+// approval (preserves the ALK-700 forced-waiting rule).
+func TestJoinCallGuestReKnocksAfterGraceExpires(t *testing.T) {
+	ctx := context.Background()
+	workspaceID, callID, channelID := uuid.New(), uuid.New(), uuid.New()
+	guestID, participantID := uuid.New(), uuid.New()
+	svc := guestReconnectFixture(workspaceID, callID, channelID, guestID, participantID, 5*time.Minute, noopPublisher{})
+
+	participant, err := svc.JoinCall(ctx, workspaceID, callID, guestID)
+	if err != nil {
+		t.Fatalf("JoinCall returned error: %v", err)
+	}
+	if participant.Status != entity.ParticipantStatusWaiting {
+		t.Fatalf("participant status = %q, want %q (re-knock after grace)", participant.Status, entity.ParticipantStatusWaiting)
 	}
 }
 
@@ -1976,8 +2150,14 @@ func (r *fakeCallRepo) GetByID(_ context.Context, id uuid.UUID) (*entity.Call, e
 	}
 	return nil, cerrors.NotFound("call not found")
 }
-func (r *fakeCallRepo) ListActiveByWorkspace(context.Context, uuid.UUID) ([]entity.Call, error) {
-	return nil, nil
+func (r *fakeCallRepo) ListActiveByWorkspace(_ context.Context, workspaceID uuid.UUID) ([]entity.Call, error) {
+	var calls []entity.Call
+	for _, call := range r.calls {
+		if call.Status != entity.CallStatusEnded && call.WorkspaceID == workspaceID {
+			calls = append(calls, *call)
+		}
+	}
+	return calls, nil
 }
 func (r *fakeCallRepo) ListStaleOpen(_ context.Context, before time.Time, limit int) ([]entity.Call, error) {
 	calls := []entity.Call{}

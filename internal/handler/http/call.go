@@ -591,6 +591,31 @@ func (h *CallHandler) TransferHost(w http.ResponseWriter, r *http.Request) {
 	writeNoContent(w)
 }
 
+// RemoveParticipant lets the host evict a participant from the call.
+// DELETE /calls/{callID}/participants/{userID}
+func (h *CallHandler) RemoveParticipant(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	targetID, err := id.Parse(chi.URLParam(r, "userID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	if err := h.svc.RemoveParticipant(r.Context(), workspaceID, callID, userID, targetID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
 // --- Screen-share controls (ALK-697) ---
 
 // RequestScreenShare lets a connected non-viewer ask the host for permission.

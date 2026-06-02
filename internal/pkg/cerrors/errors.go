@@ -39,6 +39,13 @@ const (
 	// already declined (ALK-700 guest flow). Maps to 403 so the FE deep-link
 	// classifier can render a terminal "declined" state and stop re-polling.
 	CodeWaitingRoomDeclined Code = "WAITING_ROOM_DECLINED"
+	// CodeChannelCallExists marks an attempt to start a call in a channel that
+	// already has an active one (one call per channel). Maps to 409 so the FE
+	// can join the existing call instead of starting a second.
+	CodeChannelCallExists Code = "CHANNEL_ALREADY_HAS_ACTIVE_CALL"
+	// CodeUserInCall marks an attempt to start a call while already connected to
+	// another (a user may be in only one call at a time). Maps to 409.
+	CodeUserInCall Code = "USER_ALREADY_IN_CALL"
 )
 
 // AppError is the standard application error type.
@@ -64,7 +71,7 @@ func (e *AppError) HTTPStatus() int {
 	switch e.Code {
 	case CodeNotFound:
 		return http.StatusNotFound
-	case CodeAlreadyExists, CodeConflict:
+	case CodeAlreadyExists, CodeConflict, CodeChannelCallExists, CodeUserInCall:
 		return http.StatusConflict
 	case CodeInvalidInput:
 		return http.StatusBadRequest
@@ -125,6 +132,17 @@ func Internal(msg string, err error) *AppError {
 
 func Conflict(msg string) *AppError {
 	return &AppError{Code: CodeConflict, Message: msg}
+}
+
+// ChannelCallExists returns a 409 marking a channel that already hosts an active
+// call, so the FE joins the existing call instead of starting a second one.
+func ChannelCallExists(msg string) *AppError {
+	return &AppError{Code: CodeChannelCallExists, Message: msg}
+}
+
+// UserInCall returns a 409 marking an attempt to be in two calls at once.
+func UserInCall(msg string) *AppError {
+	return &AppError{Code: CodeUserInCall, Message: msg}
 }
 
 func Unavailable(msg string) *AppError {

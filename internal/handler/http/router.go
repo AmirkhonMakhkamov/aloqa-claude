@@ -33,6 +33,7 @@ type RouterDeps struct {
 	WS               *wshandler.Handler
 	Validator        middleware.TokenValidator
 	PersonalResolver middleware.PersonalWorkspaceResolver
+	SessionResolver  SessionUserResolver // optional: session-cookie fallback for the public resolve endpoint
 	Idempotency      func(http.Handler) http.Handler
 	CORSOrigins      []string // Allowed CORS origins from config
 	RequestMetrics   *middleware.RequestMetricsCollector
@@ -114,6 +115,9 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 		// route a member straight to the call. (unified guest link)
 		if deps.Calls != nil {
 			deps.Calls.SetTokenValidator(deps.Validator)
+			// Session-cookie fallback so a member following the unified
+			// /join/<token> link (cookies forwarded, no Bearer) is detected.
+			deps.Calls.SetSessionResolver(deps.SessionResolver)
 			r.Get("/api/v1/invites/{token}", deps.Calls.ResolveGuestLink)
 		}
 	})

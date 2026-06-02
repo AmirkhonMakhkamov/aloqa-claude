@@ -563,6 +563,13 @@ func (s *Service) StartCall(
 	// Recording is only offerable when egress is configured server-side; advertise
 	// an honest capability so the FE control gate (settings.recording) is truthful (ALK-701).
 	settings.Recording = s.recordingEnabled
+	// Call chat is on for every call. Previously only the calendar flow set this,
+	// so ad-hoc/channel/DM calls were created with chat disabled and every message
+	// POST 403d with "call chat is disabled". Force it on here (server-authoritative,
+	// mirroring settings.Recording above) so all creation paths are consistent.
+	// There is no API to toggle chat per call today; if one is added, this becomes
+	// the default rather than an unconditional override.
+	settings.Chat = true
 	if err := s.requireWorkspaceMember(ctx, workspaceID, userID); err != nil {
 		return nil, err
 	}

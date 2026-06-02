@@ -31,9 +31,14 @@ type sendMessageRequest struct {
 	ForwardedFrom   json.RawMessage           `json:"forwarded_from,omitempty"`
 	QuotedMessageID *string                   `json:"quoted_message_id,omitempty"`
 	QuotedSnapshot  *chat.QuotedSnapshotInput `json:"quoted_snapshot,omitempty"`
+	ProfileShare    *profileShareRequest      `json:"profile_share,omitempty"`
 	// Optional client-generated id (the optimistic message id). Echoed back on
 	// the message.created event so the client can dedup by exact id (ALK-440).
 	ClientMessageID *string `json:"client_message_id,omitempty"`
+}
+
+type profileShareRequest struct {
+	UserID string `json:"user_id"`
 }
 
 func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
@@ -74,6 +79,11 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	profileShare, err := parseProfileShareInput(req.ProfileShare)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
 
 	userID := middleware.UserIDFromContext(r.Context())
 
@@ -94,6 +104,7 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 		ForwardedFrom:   req.ForwardedFrom,
 		QuotedMessageID: quotedMessageID,
 		QuotedSnapshot:  quotedSnapshot,
+		ProfileShare:    profileShare,
 		ClientMessageID: clientMessageID,
 	})
 	if err != nil {
@@ -102,6 +113,17 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeCreated(w, msg)
+}
+
+func parseProfileShareInput(input *profileShareRequest) (*chat.ProfileShareInput, error) {
+	if input == nil {
+		return nil, nil
+	}
+	userID, err := uuid.Parse(input.UserID)
+	if err != nil {
+		return nil, cerrors.InvalidInput("invalid profile_share.user_id")
+	}
+	return &chat.ProfileShareInput{UserID: userID}, nil
 }
 
 func parseQuotedSnapshotInput(input *chat.QuotedSnapshotInput) (*chat.ParsedQuotedSnapshotInput, error) {

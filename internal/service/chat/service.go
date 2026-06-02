@@ -307,8 +307,13 @@ type SendMessageInput struct {
 	ForwardedFrom   json.RawMessage
 	QuotedMessageID *uuid.UUID
 	QuotedSnapshot  *ParsedQuotedSnapshotInput
+	ProfileShare    *ProfileShareInput
 	// Optional client-supplied id, echoed on the created message for dedup (ALK-440).
 	ClientMessageID *string
+}
+
+type ProfileShareInput struct {
+	UserID uuid.UUID
 }
 
 type QuotedSnapshotInput struct {
@@ -1175,6 +1180,50 @@ func (s *Service) RemoveChannelMember(ctx context.Context, channelID, actorID, t
 	return nil
 }
 
+func (s *Service) buildProfileShare(
+	ctx context.Context,
+	ch *entity.Channel,
+	workspaceID uuid.UUID,
+	input *ProfileShareInput,
+) (*entity.ProfileShare, error) {
+	if input == nil {
+		return nil, nil
+	}
+	if input.UserID == uuid.Nil {
+		return nil, cerrors.InvalidInput("profile_share.user_id is required")
+	}
+	if ch.Type != entity.ChannelTypeDM {
+		return nil, cerrors.Forbidden("profile shares can only be sent to a direct message")
+	}
+
+	member, err := s.members.GetMember(ctx, workspaceID, input.UserID)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return nil, cerrors.Forbidden("shared profile is not a member of this workspace")
+		}
+		slog.ErrorContext(ctx, "failed to verify shared profile workspace membership", "workspace_id", workspaceID, "user_id", input.UserID, "error", err)
+		return nil, cerrors.Internal("failed to verify shared profile", err)
+	}
+	if member.User == nil {
+		return nil, cerrors.Internal("failed to hydrate shared profile", fmt.Errorf("workspace member %s has no user", member.UserID))
+	}
+	if member.User.Status != entity.UserStatusActive {
+		return nil, cerrors.Forbidden("shared profile is not active")
+	}
+
+	return &entity.ProfileShare{
+		UserID:      member.UserID,
+		WorkspaceID: workspaceID,
+		Snapshot: entity.ProfileShareSnapshot{
+			DisplayName: member.User.DisplayName,
+			AvatarURL:   member.User.AvatarURL,
+			Role:        member.Role,
+			Position:    member.User.Position,
+			Department:  member.User.Department,
+		},
+	}, nil
+}
+
 // SendMessage creates a new message in a channel after verifying membership.
 func (s *Service) SendMessage(
 	ctx context.Context,
@@ -1187,8 +1236,9 @@ func (s *Service) SendMessage(
 	contentLen := utf8.RuneCountInString(input.Content)
 	// Empty content is allowed when the message carries forwarded content
 	// (ForwardedFrom) OR a quoted snapshot (Share message flow — the source
-	// message becomes a quote and the author may omit their own text).
-	if len(input.ForwardedFrom) == 0 && input.QuotedSnapshot == nil && contentLen < 1 {
+	// message becomes a quote and the author may omit their own text) OR a
+	// profile share card (ALK-708).
+	if len(input.ForwardedFrom) == 0 && input.QuotedSnapshot == nil && input.ProfileShare == nil && contentLen < 1 {
 		return nil, cerrors.InvalidInput("content is required")
 	}
 	if contentLen > 40000 {
@@ -1233,6 +1283,11 @@ func (s *Service) SendMessage(
 		return nil, cerrors.Forbidden("cannot send messages to an archived channel")
 	}
 
+	profileShare, err := s.buildProfileShare(ctx, ch, workspaceID, input.ProfileShare)
+	if err != nil {
+		return nil, err
+	}
+
 	// If replying to a thread, verify parent message exists in the same channel.
 	if input.ParentID != nil {
 		parent, err := s.messages.GetByID(ctx, *input.ParentID)
@@ -1259,6 +1314,7 @@ func (s *Service) SendMessage(
 		ForwardedFrom:   input.ForwardedFrom,
 		QuotedMessageID: input.QuotedMessageID,
 		QuotedSnapshot:  quotedSnapshot,
+		ProfileShare:    profileShare,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 		// Transient echo only — not a persisted column (see entity.Message).
@@ -2455,18 +2511,31 @@ func redactDeletedMessages(items []entity.Message) {
 }
 
 func (s *Service) hydrateMessageReactions(ctx context.Context, items []entity.Message) error {
+	messageIDs := make([]uuid.UUID, 0, len(items))
 	for i := range items {
 		if items[i].DeletedAt != nil {
 			items[i].Reactions = nil
 			continue
 		}
 
-		reactions, err := s.messages.ListReactions(ctx, items[i].ID)
-		if err != nil {
-			slog.ErrorContext(ctx, "failed to list message reactions", "message_id", items[i].ID, "error", err)
-			return cerrors.Internal("failed to list message reactions", err)
+		messageIDs = append(messageIDs, items[i].ID)
+	}
+	if len(messageIDs) == 0 {
+		return nil
+	}
+
+	reactionsByMessageID, err := s.messages.ListReactionsByMessageIDs(ctx, messageIDs)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to list message reactions", "message_count", len(messageIDs), "error", err)
+		return cerrors.Internal("failed to list message reactions", err)
+	}
+
+	for i := range items {
+		if items[i].DeletedAt != nil {
+			continue
 		}
-		items[i].Reactions = reactions
+
+		items[i].Reactions = reactionsByMessageID[items[i].ID]
 	}
 	return nil
 }
@@ -2485,6 +2554,7 @@ func redactDeletedMessage(msg entity.Message) entity.Message {
 	msg.ForwardedFrom = nil
 	msg.QuotedMessageID = nil
 	msg.QuotedSnapshot = nil
+	msg.ProfileShare = nil
 	msg.Reactions = nil
 	msg.Attachments = nil
 	return msg

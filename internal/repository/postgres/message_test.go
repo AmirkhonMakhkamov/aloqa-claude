@@ -28,6 +28,14 @@ func TestMessageRepoSoftDeleteClearsForwardedFromAndQuoteFields(t *testing.T) {
 	repo := NewMessageRepo(pool)
 	msg := newMessageRepoTestMessage(env.channelID, env.userID, messageRepoTestUUID(1), "forward")
 	msg.ForwardedFrom = json.RawMessage(`{"message_id":"source","snapshot":{"content":"secret"}}`)
+	msg.ProfileShare = &entity.ProfileShare{
+		UserID:      env.userID,
+		WorkspaceID: env.workspaceID,
+		Snapshot: entity.ProfileShareSnapshot{
+			DisplayName: "Secret User",
+			Role:        entity.WorkspaceRoleMember,
+		},
+	}
 	quotedMessageID := messageRepoTestUUID(2)
 	parentMessageID := messageRepoTestUUID(3)
 	msg.QuotedMessageID = &quotedMessageID
@@ -59,6 +67,9 @@ func TestMessageRepoSoftDeleteClearsForwardedFromAndQuoteFields(t *testing.T) {
 	}
 	if got.QuotedSnapshot != nil {
 		t.Fatalf("quoted_snapshot = %+v, want nil after soft delete", got.QuotedSnapshot)
+	}
+	if got.ProfileShare != nil {
+		t.Fatalf("profile_share = %+v, want nil after soft delete", got.ProfileShare)
 	}
 }
 
@@ -114,6 +125,49 @@ func TestMessageRepoSoftDeleteWithCascadeMarksQuotedSnapshotsDeleted(t *testing.
 	}
 }
 
+func TestMessageRepoPersistsProfileShare(t *testing.T) {
+	ctx, pool := setupMessageRepoPostgresTest(t)
+	env := setupMessageRepoTestEnv(t, ctx, pool)
+	repo := NewMessageRepo(pool)
+	msg := newMessageRepoTestMessage(env.channelID, env.userID, messageRepoTestUUID(30), "")
+	position := "Product Manager"
+	department := "Product"
+	msg.ProfileShare = &entity.ProfileShare{
+		UserID:      env.userID,
+		WorkspaceID: env.workspaceID,
+		Snapshot: entity.ProfileShareSnapshot{
+			DisplayName: "Madina Karimova",
+			AvatarURL:   "https://cdn.test/madina.png",
+			Role:        entity.WorkspaceRoleAdmin,
+			Position:    &position,
+			Department:  &department,
+		},
+	}
+
+	if err := repo.Create(ctx, msg); err != nil {
+		t.Fatalf("create profile-share message: %v", err)
+	}
+	got, err := repo.GetByID(ctx, msg.ID)
+	if err != nil {
+		t.Fatalf("get profile-share message: %v", err)
+	}
+	if got.ProfileShare == nil {
+		t.Fatalf("profile_share = nil, want value")
+	}
+	if got.ProfileShare.UserID != env.userID || got.ProfileShare.WorkspaceID != env.workspaceID {
+		t.Fatalf("profile_share ids = %s/%s, want %s/%s", got.ProfileShare.UserID, got.ProfileShare.WorkspaceID, env.userID, env.workspaceID)
+	}
+	if got.ProfileShare.Snapshot.DisplayName != "Madina Karimova" || got.ProfileShare.Snapshot.Role != entity.WorkspaceRoleAdmin {
+		t.Fatalf("profile_share snapshot = %+v, want stored snapshot", got.ProfileShare.Snapshot)
+	}
+	if got.ProfileShare.Snapshot.Position == nil || *got.ProfileShare.Snapshot.Position != position {
+		t.Fatalf("profile_share position = %v, want %q", got.ProfileShare.Snapshot.Position, position)
+	}
+	if got.ProfileShare.Snapshot.Department == nil || *got.ProfileShare.Snapshot.Department != department {
+		t.Fatalf("profile_share department = %v, want %q", got.ProfileShare.Snapshot.Department, department)
+	}
+}
+
 func TestMessageRepoSoftDeleteWithCascadeFailureRollsBackPrimaryInOuterTx(t *testing.T) {
 	ctx, pool := setupMessageRepoPostgresTest(t)
 	env := setupMessageRepoTestEnv(t, ctx, pool)
@@ -162,6 +216,55 @@ func TestMessageRepoSoftDeleteWithCascadeFailureRollsBackPrimaryInOuterTx(t *tes
 	}
 	if got.Content != source.Content {
 		t.Fatalf("source content = %q, want %q after cascade rollback", got.Content, source.Content)
+	}
+}
+
+func TestMessageRepoListReactionsByMessageIDsBatchesAndGroups(t *testing.T) {
+	ctx, pool := setupMessageRepoPostgresTest(t)
+	env := setupMessageRepoTestEnv(t, ctx, pool)
+	repo := NewMessageRepo(pool)
+	first := newMessageRepoTestMessage(env.channelID, env.userID, messageRepoTestUUID(40), "first")
+	second := newMessageRepoTestMessage(env.channelID, env.userID, messageRepoTestUUID(41), "second")
+	other := newMessageRepoTestMessage(env.channelID, env.userID, messageRepoTestUUID(42), "other")
+
+	for _, msg := range []*entity.Message{first, second, other} {
+		if err := repo.Create(ctx, msg); err != nil {
+			t.Fatalf("create message %s: %v", msg.ID, err)
+		}
+	}
+
+	baseTime := time.Now().UTC()
+	firstLater := &entity.Reaction{ID: messageRepoTestUUID(43), MessageID: first.ID, UserID: env.userID, Emoji: "b", CreatedAt: baseTime.Add(time.Minute)}
+	firstEarlier := &entity.Reaction{ID: messageRepoTestUUID(44), MessageID: first.ID, UserID: env.userID, Emoji: "a", CreatedAt: baseTime}
+	secondReaction := &entity.Reaction{ID: messageRepoTestUUID(45), MessageID: second.ID, UserID: env.userID, Emoji: "c", CreatedAt: baseTime.Add(2 * time.Minute)}
+	otherReaction := &entity.Reaction{ID: messageRepoTestUUID(46), MessageID: other.ID, UserID: env.userID, Emoji: "d", CreatedAt: baseTime.Add(3 * time.Minute)}
+
+	for _, reaction := range []*entity.Reaction{firstLater, firstEarlier, secondReaction, otherReaction} {
+		if err := repo.AddReaction(ctx, reaction); err != nil {
+			t.Fatalf("add reaction %s: %v", reaction.ID, err)
+		}
+	}
+
+	got, err := repo.ListReactionsByMessageIDs(ctx, []uuid.UUID{first.ID, second.ID})
+	if err != nil {
+		t.Fatalf("ListReactionsByMessageIDs returned error: %v", err)
+	}
+	if got[first.ID][0].ID != firstEarlier.ID || got[first.ID][1].ID != firstLater.ID {
+		t.Fatalf("first message reactions = %+v, want created_at order", got[first.ID])
+	}
+	if len(got[second.ID]) != 1 || got[second.ID][0].ID != secondReaction.ID {
+		t.Fatalf("second message reactions = %+v, want %+v", got[second.ID], secondReaction)
+	}
+	if _, ok := got[other.ID]; ok {
+		t.Fatalf("got reactions for unrequested message %s", other.ID)
+	}
+
+	empty, err := repo.ListReactionsByMessageIDs(ctx, nil)
+	if err != nil {
+		t.Fatalf("empty ListReactionsByMessageIDs returned error: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("empty result = %+v, want empty map", empty)
 	}
 }
 
@@ -357,6 +460,86 @@ func TestMessageQuoteFieldsMigrationUpDownIdempotent(t *testing.T) {
 	}
 	if !messageRepoIndexExists(ctx, t, tx, "idx_messages_quoted_message_id") {
 		t.Fatalf("quoted_message_id index does not exist after idempotent up migration")
+	}
+}
+
+func TestMessageProfileShareMigrationUpDownIdempotent(t *testing.T) {
+	ctx, pool := setupMessageRepoPostgresTest(t)
+	env := setupMessageRepoTestEnv(t, ctx, pool)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin migration test tx: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = tx.Rollback(context.Background())
+	})
+
+	up := readRepoRootFile(t, "migrations/047_messages_profile_share.sql")
+	down := readRepoRootFile(t, "migrations/down/047_messages_profile_share.down.sql")
+	if _, err := tx.Exec(ctx, down); err != nil {
+		t.Fatalf("reset migration down: %v", err)
+	}
+	if messageRepoColumnExists(ctx, t, tx, "profile_share") {
+		t.Fatalf("profile_share column exists before migration up")
+	}
+	if messageRepoIndexExists(ctx, t, tx, "idx_messages_profile_share_user_id") {
+		t.Fatalf("profile_share index exists before migration up")
+	}
+
+	existingMessageID := messageRepoTestUUID(44)
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO messages (id, channel_id, user_id, content, type, created_at, updated_at)
+		VALUES ($1, $2, $3, 'existing message', 'text', $4, $4)`,
+		existingMessageID,
+		env.channelID,
+		env.userID,
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("insert existing pre-migration message: %v", err)
+	}
+
+	if _, err := tx.Exec(ctx, up); err != nil {
+		t.Fatalf("apply migration up: %v", err)
+	}
+	if !messageRepoColumnExists(ctx, t, tx, "profile_share") {
+		t.Fatalf("profile_share column does not exist after up migration")
+	}
+	if !messageRepoIndexExists(ctx, t, tx, "idx_messages_profile_share_user_id") {
+		t.Fatalf("profile_share index does not exist after up migration")
+	}
+	var profileShare json.RawMessage
+	if err := tx.QueryRow(ctx, `
+		SELECT profile_share
+		FROM messages
+		WHERE id = $1`,
+		existingMessageID,
+	).Scan(&profileShare); err != nil {
+		t.Fatalf("query existing message after migration up: %v", err)
+	}
+	if profileShare != nil {
+		t.Fatalf("profile_share for existing row = %s, want NULL", profileShare)
+	}
+
+	if _, err := tx.Exec(ctx, down); err != nil {
+		t.Fatalf("apply migration down: %v", err)
+	}
+	if messageRepoColumnExists(ctx, t, tx, "profile_share") {
+		t.Fatalf("profile_share column still exists after down migration")
+	}
+	if messageRepoIndexExists(ctx, t, tx, "idx_messages_profile_share_user_id") {
+		t.Fatalf("profile_share index still exists after down migration")
+	}
+	if _, err := tx.Exec(ctx, up); err != nil {
+		t.Fatalf("reapply migration up: %v", err)
+	}
+	if _, err := tx.Exec(ctx, up); err != nil {
+		t.Fatalf("reapply migration up second time: %v", err)
+	}
+	if !messageRepoColumnExists(ctx, t, tx, "profile_share") {
+		t.Fatalf("profile_share column does not exist after idempotent up migration")
+	}
+	if !messageRepoIndexExists(ctx, t, tx, "idx_messages_profile_share_user_id") {
+		t.Fatalf("profile_share index does not exist after idempotent up migration")
 	}
 }
 

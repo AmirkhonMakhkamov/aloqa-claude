@@ -93,11 +93,10 @@ func (c *RequestMetricsCollector) PrometheusText(ns string) string {
 		fmt.Fprintf(&b, "%s_http_requests_total{method=\"%s\"} %d\n", ns, m, methodCounts[m])
 	}
 
-	// Latency histogram.
-	cumulative := int64(0)
+	// Latency histogram. bucketCounts are already cumulative: record increments
+	// every bucket whose upper bound contains the observed latency.
 	for _, bound := range c.bucketBounds {
-		cumulative += bucketCounts[bound]
-		fmt.Fprintf(&b, "%s_http_request_duration_seconds_bucket{le=\"%g\"} %d\n", ns, bound, cumulative)
+		fmt.Fprintf(&b, "%s_http_request_duration_seconds_bucket{le=\"%g\"} %d\n", ns, bound, bucketCounts[bound])
 	}
 	fmt.Fprintf(&b, "%s_http_request_duration_seconds_bucket{le=\"+Inf\"} %d\n", ns, latencyCount)
 	fmt.Fprintf(&b, "%s_http_request_duration_seconds_sum %f\n", ns, latencySum)

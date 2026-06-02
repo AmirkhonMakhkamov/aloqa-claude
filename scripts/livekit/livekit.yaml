@@ -20,7 +20,7 @@ webhook:
     - http://host.docker.internal:8090/livekit/webhook
 
 room:
-  auto_create: true
+  auto_create: false
   enabled_codecs:
     - mime: audio/opus
     - mime: video/VP8

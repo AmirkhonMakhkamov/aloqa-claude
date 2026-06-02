@@ -13,6 +13,7 @@ import (
 	"aloqa/internal/pkg/cerrors"
 	"aloqa/internal/pkg/id"
 	"aloqa/internal/service/call"
+	"aloqa/internal/service/guest"
 )
 
 // StartCallResponse carries the created call plus the LiveKit connection info
@@ -37,11 +38,64 @@ type JoinCallResponse struct {
 }
 
 type CallHandler struct {
-	svc *call.Service
+	svc    *call.Service
+	guests *guest.Service
 }
 
-func NewCallHandler(svc *call.Service) *CallHandler {
-	return &CallHandler{svc: svc}
+func NewCallHandler(svc *call.Service, guests *guest.Service) *CallHandler {
+	return &CallHandler{svc: svc, guests: guests}
+}
+
+// guestCallLinkMaxUses caps redeems on a single call guest link. It is set high
+// because the authoritative expiry for "reusable until the call ends" is the
+// redeem-time call-ended check, not the use count (ALK-700).
+const guestCallLinkMaxUses = 100
+
+// guestCallLinkTTL is the backstop expiry for a call guest link.
+const guestCallLinkTTL = 12 * time.Hour
+
+type guestLinkResponse struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// CreateGuestLink mints a one-time-style guest link scoped to a specific call.
+// Host/co-host only; rejected for channel-less calls so the guest grant can
+// never be an empty (all-channels) scope (ALK-700).
+func (h *CallHandler) CreateGuestLink(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	c, err := h.svc.AuthorizeGuestLink(r.Context(), workspaceID, callID, userID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if c.ChannelID == nil {
+		writeErr(w, cerrors.InvalidInput("guest links are only available for calls in a channel"))
+		return
+	}
+
+	invite, err := h.guests.CreateInvite(r.Context(), guest.CreateInviteInput{
+		WorkspaceID: workspaceID,
+		CreatedBy:   userID,
+		CallID:      &callID,
+		ChannelIDs:  []uuid.UUID{*c.ChannelID},
+		MaxUses:     guestCallLinkMaxUses,
+		TTL:         guestCallLinkTTL,
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeCreated(w, guestLinkResponse{Token: invite.Token, ExpiresAt: invite.ExpiresAt})
 }
 
 type startCallRequest struct {
@@ -503,21 +557,165 @@ func (h *CallHandler) UpdateParticipantRole(w http.ResponseWriter, r *http.Reque
 	writeNoContent(w)
 }
 
-func (h *CallHandler) MediaToken(w http.ResponseWriter, r *http.Request) {
+type transferHostRequest struct {
+	UserID string `json:"user_id"`
+}
+
+func (h *CallHandler) TransferHost(w http.ResponseWriter, r *http.Request) {
 	callID, err := id.Parse(chi.URLParam(r, "callID"))
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
-	userID := middleware.UserIDFromContext(r.Context())
 
-	token, err := h.svc.IssueMediaJoinToken(r.Context(), workspaceID, callID, userID)
+	var req transferHostRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	targetUserID, err := id.Parse(req.UserID)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeOK(w, token)
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	if err := h.svc.TransferHost(r.Context(), workspaceID, callID, userID, targetUserID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
+// --- Screen-share controls (ALK-697) ---
+
+// RequestScreenShare lets a connected non-viewer ask the host for permission.
+// POST /calls/{callID}/share-requests
+func (h *CallHandler) RequestScreenShare(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	if err := h.svc.RequestScreenShare(r.Context(), workspaceID, callID, userID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
+type resolveShareRequest struct {
+	Approved *bool `json:"approved"`
+}
+
+// ResolveShareRequest lets a host approve or deny a screen-share request.
+// POST /calls/{callID}/share-requests/{requesterUserID}/resolve
+func (h *CallHandler) ResolveShareRequest(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	requesterID, err := id.Parse(chi.URLParam(r, "requesterUserID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	var req resolveShareRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if req.Approved == nil {
+		writeErr(w, cerrors.InvalidInput("approved is required"))
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	if err := h.svc.ResolveShareRequest(r.Context(), workspaceID, callID, userID, requesterID, *req.Approved); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
+// RevokeScreenShare lets a host revoke a participant's screen-share grant.
+// POST /calls/{callID}/participants/{userID}/revoke-screen-share
+func (h *CallHandler) RevokeScreenShare(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	targetID, err := id.Parse(chi.URLParam(r, "userID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	if err := h.svc.RevokeScreenShare(r.Context(), workspaceID, callID, userID, targetID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
+type setFeaturedShareRequest struct {
+	UserID *string `json:"user_id"`
+}
+
+// SetFeaturedShare lets a host feature one participant's screen-share for
+// everyone (a null user_id clears the featured share).
+// PUT /calls/{callID}/featured-share
+func (h *CallHandler) SetFeaturedShare(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	var req setFeaturedShareRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	var target *uuid.UUID
+	if req.UserID != nil {
+		parsed, perr := id.Parse(*req.UserID)
+		if perr != nil {
+			writeErr(w, perr)
+			return
+		}
+		target = &parsed
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	if err := h.svc.SetFeaturedShare(r.Context(), workspaceID, callID, userID, target); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
 }
 
 func (h *CallHandler) TurnCredentials(w http.ResponseWriter, r *http.Request) {
@@ -535,66 +733,4 @@ func (h *CallHandler) TurnCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeOK(w, credentials)
-}
-
-func (h *CallHandler) MediaOffer(w http.ResponseWriter, r *http.Request) {
-	callID, err := id.Parse(chi.URLParam(r, "callID"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	var req call.MediaOfferInput
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, err)
-		return
-	}
-	req.CallID = callID
-
-	answer, err := h.svc.HandleMediaOffer(r.Context(), req)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeOK(w, answer)
-}
-
-func (h *CallHandler) MediaICECandidate(w http.ResponseWriter, r *http.Request) {
-	callID, err := id.Parse(chi.URLParam(r, "callID"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	var req call.MediaICECandidateInput
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, err)
-		return
-	}
-	req.CallID = callID
-
-	if err := h.svc.AddMediaICECandidate(r.Context(), req); err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeNoContent(w)
-}
-
-func (h *CallHandler) MediaICERestart(w http.ResponseWriter, r *http.Request) {
-	callID, err := id.Parse(chi.URLParam(r, "callID"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	var req call.MediaOfferInput
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, err)
-		return
-	}
-	req.CallID = callID
-
-	answer, err := h.svc.RestartMediaICE(r.Context(), req)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeOK(w, answer)
 }

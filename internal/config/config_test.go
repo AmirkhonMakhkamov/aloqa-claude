@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadReadsDotEnvFromWorkingDirectory(t *testing.T) {
@@ -49,6 +50,45 @@ func TestLoadReadsDotEnvFromWorkingDirectory(t *testing.T) {
 	}
 	if cfg.Server.Port != 9099 {
 		t.Fatalf("Server.Port = %d, want 9099", cfg.Server.Port)
+	}
+}
+
+func TestLoadReadsWebRTCTurnSecretAndStunServers(t *testing.T) {
+	preserveEnv(t,
+		"DB_USER",
+		"DB_PASSWORD",
+		"DB_NAME",
+		"JWT_SECRET",
+		"WEBRTC_TURN_SECRET",
+		"WEBRTC_STUN_SERVERS",
+	)
+
+	dir := t.TempDir()
+	secret := strings.Repeat("s", 64)
+	writeDotEnv(t, dir, strings.Join([]string{
+		"DB_USER=aloqa",
+		"DB_PASSWORD=aloqa",
+		"DB_NAME=aloqa",
+		"JWT_SECRET=" + secret,
+		"WEBRTC_TURN_SECRET=coturn-shared-secret",
+		"WEBRTC_STUN_SERVERS=stun:lan.internal:3478",
+	}, "\n"))
+	t.Chdir(dir)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	// Regression: TURNSecret must be wired from env so the HMAC TURN branch
+	// (coturn --use-auth-secret) can actually fire in production, and
+	// STUNServers must load so they reach the call MediaConfig and LAN deploys
+	// aren't forced onto a public Google STUN dependency.
+	if cfg.WebRTC.TURNSecret != "coturn-shared-secret" {
+		t.Fatalf("WebRTC.TURNSecret = %q, want coturn-shared-secret", cfg.WebRTC.TURNSecret)
+	}
+	if len(cfg.WebRTC.STUNServers) != 1 || cfg.WebRTC.STUNServers[0] != "stun:lan.internal:3478" {
+		t.Fatalf("WebRTC.STUNServers = %+v, want [stun:lan.internal:3478]", cfg.WebRTC.STUNServers)
 	}
 }
 
@@ -198,6 +238,28 @@ func TestLoadNormalizesLiveKitWebhookPathAndPreviousKey(t *testing.T) {
 	}
 	if cfg.LiveKit.WebhookPreviousAPISecret != "previous-secret" {
 		t.Fatalf("LiveKit.WebhookPreviousAPISecret = %q, want previous-secret", cfg.LiveKit.WebhookPreviousAPISecret)
+	}
+}
+
+func TestLoadDefaultsLiveKitTokenTTLToThirtyMinutes(t *testing.T) {
+	preserveEnv(t, "DB_USER", "DB_PASSWORD", "DB_NAME", "JWT_SECRET", "LIVEKIT_TOKEN_TTL")
+
+	dir := t.TempDir()
+	secret := strings.Repeat("s", 64)
+	writeDotEnv(t, dir, strings.Join([]string{
+		"DB_USER=aloqa",
+		"DB_PASSWORD=aloqa",
+		"DB_NAME=aloqa",
+		"JWT_SECRET=" + secret,
+	}, "\n"))
+	t.Chdir(dir)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.LiveKit.TokenTTL != 30*time.Minute {
+		t.Fatalf("LiveKit.TokenTTL default = %v, want 30m", cfg.LiveKit.TokenTTL)
 	}
 }
 

@@ -30,6 +30,14 @@ type TokenResult struct {
 	ExpiresIn    int
 }
 
+// CallLookup is the minimal read needed to validate a call-scoped guest link at
+// redeem time (reject a link once the target call has ended). Satisfied by the
+// postgres CallRepo; optional — when nil the ended-call guard is skipped and the
+// stale-link case is caught later at JoinCall (CALL_ENDED). (ALK-700)
+type CallLookup interface {
+	GetByID(ctx context.Context, callID uuid.UUID) (*entity.Call, error)
+}
+
 // Service manages guest invite lifecycle.
 type Service struct {
 	invites    repository.GuestInviteRepository
@@ -38,6 +46,7 @@ type Service struct {
 	workspaces repository.WorkspaceRepository
 	channels   repository.ChannelRepository
 	tokens     TokenIssuer
+	calls      CallLookup
 	tx         txscope.Manager
 }
 
@@ -64,11 +73,18 @@ func (s *Service) SetTransactionManager(manager txscope.Manager) {
 	s.tx = manager
 }
 
+// SetCallLookup wires the optional call reader used to reject call-scoped guest
+// links once the target call has ended (ALK-700).
+func (s *Service) SetCallLookup(calls CallLookup) {
+	s.calls = calls
+}
+
 // CreateInviteInput holds parameters for creating a guest invite.
 type CreateInviteInput struct {
 	WorkspaceID uuid.UUID
 	CreatedBy   uuid.UUID
 	Email       string      // Optional: restrict to specific email
+	CallID      *uuid.UUID  // Set for call-scoped guest links (ALK-700)
 	ChannelIDs  []uuid.UUID // Channels the guest can access
 	MaxUses     int         // 0 = single use
 	TTL         time.Duration
@@ -122,6 +138,7 @@ func (s *Service) CreateInvite(ctx context.Context, input CreateInviteInput) (*e
 		CreatedBy:   input.CreatedBy,
 		Token:       token,
 		Email:       input.Email,
+		CallID:      input.CallID,
 		ChannelIDs:  input.ChannelIDs,
 		MaxUses:     input.MaxUses,
 		Status:      entity.GuestInviteStatusActive,
@@ -155,6 +172,8 @@ type RedeemInviteInput struct {
 type RedeemResult struct {
 	User         *entity.User `json:"user"`
 	WorkspaceID  uuid.UUID    `json:"workspace_id"`
+	CallID       *uuid.UUID   `json:"call_id,omitempty"`    // Target call for call-scoped guest links (ALK-700)
+	SessionID    string       `json:"session_id,omitempty"` // So the web client can install the session cookie (login parity)
 	ChannelIDs   []uuid.UUID  `json:"channel_ids"`
 	AccessToken  string       `json:"access_token"`
 	RefreshToken string       `json:"refresh_token"`
@@ -170,6 +189,24 @@ func (s *Service) RedeemInvite(ctx context.Context, input RedeemInviteInput) (*R
 
 	if !invite.IsValid() {
 		return nil, cerrors.Forbidden("invite is no longer valid")
+	}
+
+	// Call-scoped guest link (ALK-700): each redeem mints a DISTINCT ephemeral
+	// guest user. Reject the link if the target call has already ended, then
+	// synthesize a unique email so the existing create-fresh-user path runs (no
+	// email-locked / existing-user / already-a-member merge collides between
+	// successive guests on the same reusable link).
+	if invite.CallID != nil {
+		if s.calls != nil {
+			call, callErr := s.calls.GetByID(ctx, *invite.CallID)
+			if callErr != nil {
+				return nil, cerrors.NotFound("the call for this invite no longer exists")
+			}
+			if call.Status == entity.CallStatusEnded {
+				return nil, cerrors.CallEnded("this call has already ended")
+			}
+		}
+		input.Email = "guest+" + uuid.New().String() + "@guests.invalid"
 	}
 
 	// If invite is email-locked, verify the email matches.
@@ -284,7 +321,7 @@ func (s *Service) RedeemInvite(ctx context.Context, input RedeemInviteInput) (*R
 	}
 
 	// Issue authentication tokens so the guest can use the API immediately.
-	var accessToken, refreshToken string
+	var accessToken, refreshToken, sessionID string
 	var expiresIn int
 	if s.tokens != nil {
 		tokenResult, err := s.tokens.CreateSessionForUser(ctx, user.ID, input.DeviceInfo, input.IPAddress)
@@ -294,6 +331,7 @@ func (s *Service) RedeemInvite(ctx context.Context, input RedeemInviteInput) (*R
 		}
 		accessToken = tokenResult.AccessToken
 		refreshToken = tokenResult.RefreshToken
+		sessionID = tokenResult.SessionID
 		expiresIn = tokenResult.ExpiresIn
 	}
 
@@ -306,6 +344,8 @@ func (s *Service) RedeemInvite(ctx context.Context, input RedeemInviteInput) (*R
 	return &RedeemResult{
 		User:         user,
 		WorkspaceID:  invite.WorkspaceID,
+		CallID:       invite.CallID,
+		SessionID:    sessionID,
 		ChannelIDs:   invite.ChannelIDs,
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,

@@ -119,6 +119,7 @@ type ObservabilityDashboard struct {
 	RealtimeQueue QueueRuntimeStats       `json:"realtime_queue"`
 	SearchQueue   QueueRuntimeStats       `json:"search_queue"`
 	Consumers     []EventConsumerLag      `json:"consumers"`
+	ActiveCalls   []ActiveCallObservation `json:"active_calls"`
 	WebSocket     WebSocketRuntimeStats   `json:"websocket"`
 	Recording     RecordingPipelineHealth `json:"recording"`
 	Workers       []WorkerRuntimeStats    `json:"workers"`

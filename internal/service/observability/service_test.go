@@ -41,6 +41,14 @@ func (f fakeConsumerProvider) ListConsumerLag(context.Context, int) ([]entity.Ev
 	return f.items, nil
 }
 
+type fakeActiveCallProvider struct {
+	items []entity.ActiveCallObservation
+}
+
+func (f fakeActiveCallProvider) ListActiveObservations(context.Context, int) ([]entity.ActiveCallObservation, error) {
+	return f.items, nil
+}
+
 func TestDashboardIncludesAlertsAndSLOs(t *testing.T) {
 	svc := NewService(Config{
 		EventLagWarn:              5 * time.Second,
@@ -111,10 +119,26 @@ func TestMetricsOutputContainsCoreSeries(t *testing.T) {
 	svc := NewService(Config{})
 	svc.SetStorageProvider(fakeStorageProvider{report: &entity.StorageRuntimeReport{
 		Postgres: entity.PostgresRuntimeStats{AcquiredConnsPct: 50},
-		Redis:    entity.RedisRuntimeStats{UtilizationPct: 20},
+		Redis:    entity.RedisRuntimeStats{UtilizationPct: 20, ActiveConns: 2, IdleConns: 6, TotalConns: 8, OpenConnsPct: 25},
 	}})
 	svc.SetRealtimeProvider(fakeQueueProvider{stats: &entity.QueueRuntimeStats{Name: "realtime_outbox", Pending: 4}}, fakeConsumerProvider{})
 	svc.SetSearchProvider(fakeQueueProvider{stats: &entity.QueueRuntimeStats{Name: "search_indexer", Pending: 2}})
+	title := `Sprint "demo" call`
+	channelName := "General"
+	svc.SetActiveCallProvider(fakeActiveCallProvider{items: []entity.ActiveCallObservation{{
+		ID:               uuid.New(),
+		WorkspaceID:      uuid.New(),
+		Type:             entity.CallTypeGroup,
+		Status:           entity.CallStatusActive,
+		Title:            &title,
+		StartedAt:        time.Now().UTC().Add(-90 * time.Second),
+		ChannelName:      &channelName,
+		HostDisplayName:  "Ruslan",
+		Recording:        true,
+		IsOpen:           true,
+		ParticipantCount: 3,
+		ObserverCount:    1,
+	}}})
 	svc.RecordWSRestore(1, 3, 0)
 	svc.RecordRecordingRun("recording_processing", 1, 0, 0, 0, time.Second, nil)
 
@@ -127,6 +151,16 @@ func TestMetricsOutputContainsCoreSeries(t *testing.T) {
 		"aloqa_search_queue_pending",
 		"aloqa_ws_reconnect_total",
 		"aloqa_recording_processed_total",
+		"aloqa_runtime_goroutines",
+		"aloqa_runtime_heap_alloc_bytes",
+		"aloqa_runtime_alloc_bytes_total",
+		"aloqa_runtime_gc_pause_last_seconds",
+		"aloqa_redis_pool_active_conns",
+		"aloqa_redis_pool_open_conns_pct",
+		"aloqa_active_calls_total 1",
+		"aloqa_active_call_info{",
+		`title="Sprint \"demo\" call"`,
+		"aloqa_active_call_duration_seconds{",
 	} {
 		if !strings.Contains(body, needle) {
 			t.Fatalf("metrics body missing %q", needle)

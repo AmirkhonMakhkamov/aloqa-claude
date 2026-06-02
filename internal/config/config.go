@@ -32,10 +32,12 @@ type LiveKitConfig struct {
 	URL                      string        // wss://livekit.example.com (FE-facing signaling URL)
 	APIKey                   string        // shared with the LiveKit server keys map
 	APISecret                string        // 32-byte hex secret
-	TokenTTL                 time.Duration // access-token validity (default 6h)
+	TokenTTL                 time.Duration // initial join-token validity (default 30m; LiveKit refreshes connected clients)
 	WebhookPath              string        // public path that LiveKit posts to (default /livekit/webhook)
 	WebhookPreviousAPIKey    string        // previous webhook signing key accepted during rotation
 	WebhookPreviousAPISecret string        // previous webhook signing secret accepted during rotation
+	EgressEnabled            bool          // ALK-701: enable LiveKit Egress room-composite recording
+	EgressFileRoot           string        // ALK-701: dir inside the egress container bind-mounted to MEDIA_STORAGE_PATH (local output; default /out)
 }
 
 const DefaultLiveKitWebhookPath = "/livekit/webhook"
@@ -83,6 +85,7 @@ type WebRTCConfig struct {
 	TURNServer                      string   // e.g. "turn:turn.example.com:3478"
 	TURNUsername                    string
 	TURNPassword                    string
+	TURNSecret                      string // coturn --use-auth-secret shared secret (HMAC short-lived creds)
 	NodeID                          string
 	Region                          string
 	ControlURL                      string
@@ -342,6 +345,7 @@ func Load() (*Config, error) {
 			TURNServer:                      env("WEBRTC_TURN_SERVER", ""),
 			TURNUsername:                    env("WEBRTC_TURN_USERNAME", ""),
 			TURNPassword:                    env("WEBRTC_TURN_PASSWORD", ""),
+			TURNSecret:                      env("WEBRTC_TURN_SECRET", ""),
 			NodeID:                          env("WEBRTC_NODE_ID", ""),
 			Region:                          env("WEBRTC_REGION", "global"),
 			ControlURL:                      env("WEBRTC_CONTROL_URL", ""),
@@ -389,13 +393,20 @@ func Load() (*Config, error) {
 			AdaptiveEWMAAlpha:               envFloat("WEBRTC_ADAPTIVE_EWMA_ALPHA", 0.35),
 		},
 		LiveKit: LiveKitConfig{
-			URL:                      env("LIVEKIT_URL", ""),
-			APIKey:                   env("LIVEKIT_API_KEY", ""),
-			APISecret:                env("LIVEKIT_API_SECRET", ""),
-			TokenTTL:                 envDuration("LIVEKIT_TOKEN_TTL", 6*time.Hour),
+			URL:       env("LIVEKIT_URL", ""),
+			APIKey:    env("LIVEKIT_API_KEY", ""),
+			APISecret: env("LIVEKIT_API_SECRET", ""),
+			// Initial join-token lifetime. Kept short because LiveKit's server
+			// proactively refreshes a connected participant's token (rolling
+			// ~10m), so the call survives well past this; a cold rejoin
+			// re-fetches via /join. A short TTL bounds how long an unused or
+			// removed participant's token can be replayed to re-enter the room.
+			TokenTTL:                 envDuration("LIVEKIT_TOKEN_TTL", 30*time.Minute),
 			WebhookPath:              env("LIVEKIT_WEBHOOK_PATH", DefaultLiveKitWebhookPath),
 			WebhookPreviousAPIKey:    env("LIVEKIT_WEBHOOK_PREVIOUS_API_KEY", ""),
 			WebhookPreviousAPISecret: env("LIVEKIT_WEBHOOK_PREVIOUS_API_SECRET", ""),
+			EgressEnabled:            envBool("LIVEKIT_EGRESS_ENABLED", false),
+			EgressFileRoot:           env("LIVEKIT_EGRESS_FILE_ROOT", "/out"),
 		},
 		Search: SearchConfig{
 			TextConfig:     env("SEARCH_TEXT_CONFIG", "simple"),

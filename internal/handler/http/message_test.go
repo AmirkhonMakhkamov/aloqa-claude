@@ -81,6 +81,90 @@ func TestMessagePostForwardedFromCases(t *testing.T) {
 	})
 }
 
+func TestMessagePostProfileShareBuildsCardPayload(t *testing.T) {
+	f := newMessageHTTPFixture()
+	f.channels.channels[f.channelID].Type = entity.ChannelTypeDM
+	targetID := uuid.New()
+	position := "Product Manager"
+	department := "Product"
+	f.workspaces.members[[2]uuid.UUID{f.workspaceID, targetID}] = &entity.WorkspaceMember{
+		WorkspaceID: f.workspaceID,
+		UserID:      targetID,
+		Role:        entity.WorkspaceRoleAdmin,
+		User: &entity.User{
+			ID:          targetID,
+			DisplayName: "Madina Karimova",
+			AvatarURL:   "https://cdn.test/madina.png",
+			Position:    &position,
+			Department:  &department,
+			Status:      entity.UserStatusActive,
+		},
+	}
+
+	res := f.serve(
+		http.MethodPost,
+		"/channels/"+f.channelID.String()+"/messages",
+		`{"content":"","profile_share":{"user_id":"`+targetID.String()+`"}}`,
+	)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", res.Code, res.Body.String())
+	}
+
+	var msg entity.Message
+	if err := json.Unmarshal(res.Body.Bytes(), &msg); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if msg.ProfileShare == nil {
+		t.Fatalf("profile_share = nil, want value")
+	}
+	if msg.ProfileShare.UserID != targetID || msg.ProfileShare.WorkspaceID != f.workspaceID {
+		t.Fatalf("profile_share ids = %s/%s, want %s/%s", msg.ProfileShare.UserID, msg.ProfileShare.WorkspaceID, targetID, f.workspaceID)
+	}
+	if msg.ProfileShare.Snapshot.DisplayName != "Madina Karimova" ||
+		msg.ProfileShare.Snapshot.AvatarURL != "https://cdn.test/madina.png" ||
+		msg.ProfileShare.Snapshot.Role != entity.WorkspaceRoleAdmin {
+		t.Fatalf("profile_share snapshot = %+v, want hydrated target profile", msg.ProfileShare.Snapshot)
+	}
+	if msg.ProfileShare.Snapshot.Position == nil || *msg.ProfileShare.Snapshot.Position != position {
+		t.Fatalf("profile_share position = %v, want %q", msg.ProfileShare.Snapshot.Position, position)
+	}
+	if msg.ProfileShare.Snapshot.Department == nil || *msg.ProfileShare.Snapshot.Department != department {
+		t.Fatalf("profile_share department = %v, want %q", msg.ProfileShare.Snapshot.Department, department)
+	}
+
+	if len(f.publisher.events) == 0 {
+		t.Fatalf("expected message.created event")
+	}
+	var envelope struct {
+		Payload struct {
+			Message entity.Message `json:"message"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(f.publisher.events[0], &envelope); err != nil {
+		t.Fatalf("decode event: %v", err)
+	}
+	if envelope.Payload.Message.ProfileShare == nil || envelope.Payload.Message.ProfileShare.UserID != targetID {
+		t.Fatalf("event profile_share = %+v, want target profile", envelope.Payload.Message.ProfileShare)
+	}
+}
+
+func TestMessagePostProfileShareRejectsInvalidUserID(t *testing.T) {
+	f := newMessageHTTPFixture()
+	f.channels.channels[f.channelID].Type = entity.ChannelTypeDM
+
+	res := f.serve(
+		http.MethodPost,
+		"/channels/"+f.channelID.String()+"/messages",
+		`{"content":"","profile_share":{"user_id":"not-a-uuid"}}`,
+	)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "invalid profile_share.user_id") {
+		t.Fatalf("body = %s, want invalid profile_share.user_id error", res.Body.String())
+	}
+}
+
 func TestMessagePostEchoesClientMessageID(t *testing.T) {
 	f := newMessageHTTPFixture()
 	clientID := "019e7300-0000-7000-8000-000000000440"
@@ -600,6 +684,8 @@ type messageHTTPFixture struct {
 	workspaceID uuid.UUID
 	channelID   uuid.UUID
 	userID      uuid.UUID
+	channels    *messageHTTPChannelRepo
+	workspaces  *fakeHTTPWorkspaceRepo
 	messages    *messageHTTPMessageRepo
 	publisher   *messageHTTPPublisher
 	router      *chi.Mux
@@ -647,6 +733,8 @@ func newMessageHTTPFixture() messageHTTPFixture {
 		workspaceID: workspaceID,
 		channelID:   channelID,
 		userID:      userID,
+		channels:    channels,
+		workspaces:  workspaces,
 		messages:    messages,
 		publisher:   publisher,
 		router:      router,
@@ -763,6 +851,7 @@ func (r *messageHTTPMessageRepo) SoftDelete(_ context.Context, id uuid.UUID) err
 	msg.ForwardedFrom = nil
 	msg.QuotedMessageID = nil
 	msg.QuotedSnapshot = nil
+	msg.ProfileShare = nil
 	msg.UpdatedAt = now
 	msg.DeletedAt = &now
 	return nil

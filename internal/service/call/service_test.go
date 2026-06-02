@@ -89,42 +89,6 @@ func TestViewerCannotPublishMedia(t *testing.T) {
 // out of production binaries.
 func boolPtr(b bool) *bool { return &b }
 
-func TestMediaJoinTokenIsCallScopedAndRoleAware(t *testing.T) {
-	ctx := context.Background()
-	workspaceID := uuid.New()
-	userID := uuid.New()
-	callID := uuid.New()
-	otherCallID := uuid.New()
-
-	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
-		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
-	}}
-	calls := &fakeCallRepo{
-		calls: map[uuid.UUID]*entity.Call{
-			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeWebinar, Status: entity.CallStatusActive},
-		},
-		participants: map[[2]uuid.UUID]*entity.CallParticipant{
-			{callID, userID}: {ID: uuid.New(), CallID: callID, UserID: userID, Role: entity.CallRoleViewer, Status: entity.ParticipantStatusConnected},
-		},
-	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
-
-	token, err := svc.IssueMediaJoinToken(ctx, workspaceID, callID, userID)
-	if err != nil {
-		t.Fatalf("IssueMediaJoinToken returned error: %v", err)
-	}
-	if token.Role != mediaRoleViewer {
-		t.Fatalf("media role = %q, want %q", token.Role, mediaRoleViewer)
-	}
-	if err := svc.AddMediaICECandidate(ctx, MediaICECandidateInput{
-		CallID:    otherCallID,
-		Token:     token.Token,
-		Candidate: "candidate:0 1 UDP 2122252543 127.0.0.1 12345 typ host",
-	}); !hasCode(err, cerrors.CodeForbidden) {
-		t.Fatalf("AddMediaICECandidate with wrong route call error = %v, want FORBIDDEN", err)
-	}
-}
-
 func TestForwardSignalRequiresBothParticipants(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -353,81 +317,6 @@ func TestValidateQualityReportRejectsInvalidMetrics(t *testing.T) {
 	}
 }
 
-func TestMediaJoinTokenIncludesPlacementAndRejectsWrongEdge(t *testing.T) {
-	ctx := context.Background()
-	workspaceID := uuid.New()
-	userID := uuid.New()
-	callID := uuid.New()
-
-	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
-		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
-	}}
-	calls := &fakeCallRepo{
-		calls: map[uuid.UUID]*entity.Call{
-			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeWebinar, Status: entity.CallStatusActive},
-		},
-		participants: map[[2]uuid.UUID]*entity.CallParticipant{
-			{callID, userID}: {ID: uuid.New(), CallID: callID, UserID: userID, Role: entity.CallRoleViewer, Status: entity.ParticipantStatusConnected},
-		},
-	}
-	sfuServer, err := sfu.NewSFU(sfu.Config{})
-	if err != nil {
-		t.Fatalf("NewSFU returned error: %v", err)
-	}
-	defer sfuServer.Close()
-
-	placement := &entity.MediaRoomPlacement{
-		CallID:              callID,
-		WorkspaceID:         workspaceID,
-		NodeID:              "edge-b",
-		Region:              "eu-central",
-		ControlURL:          "https://edge-b.example.com",
-		MediaURL:            "wss://edge-b.example.com/media",
-		RoutingMode:         entity.MediaRoutingRegionalEdge,
-		FanoutStrategy:      entity.MediaFanoutWebinarEdges,
-		OverflowPolicy:      entity.MediaOverflowWebinarEdge,
-		ScreenSharePriority: entity.MediaScreenShareProtected,
-		TURNStrategy:        "regional_turn_pool",
-		Sticky:              true,
-		MaxParticipants:     10000,
-		MaxPresenters:       50,
-		MaxViewers:          10000,
-	}
-
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, sfuServer, mediaTestConfig(), nil, nil)
-	svc.SetMediaControlPlane(&fakeMediaControlPlane{
-		localNodeID: "edge-a",
-		policy: entity.MediaCallPolicy{
-			MaxParticipants:     10000,
-			MaxPresenters:       50,
-			MaxViewers:          10000,
-			RoutingMode:         entity.MediaRoutingRegionalEdge,
-			FanoutStrategy:      entity.MediaFanoutWebinarEdges,
-			OverflowPolicy:      entity.MediaOverflowWebinarEdge,
-			ScreenSharePriority: entity.MediaScreenShareProtected,
-			TURNStrategy:        "regional_turn_pool",
-			Sticky:              true,
-		},
-		placement: placement,
-	})
-
-	token, err := svc.IssueMediaJoinToken(ctx, workspaceID, callID, userID)
-	if err != nil {
-		t.Fatalf("IssueMediaJoinToken returned error: %v", err)
-	}
-	if token.NodeID != placement.NodeID || token.ControlURL != placement.ControlURL {
-		t.Fatalf("token routing = %+v, want placement %+v", token, placement)
-	}
-	if _, err := svc.HandleMediaOffer(ctx, MediaOfferInput{
-		CallID: callID,
-		Token:  token.Token,
-		SDP:    "v=0",
-		Type:   "offer",
-	}); !hasCode(err, cerrors.CodeUnavailable) {
-		t.Fatalf("HandleMediaOffer wrong-edge error = %v, want UNAVAILABLE", err)
-	}
-}
-
 func TestJoinCallHonorsPolicyParticipantCap(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -517,6 +406,43 @@ func TestJoinCallKeepsExistingWaitingParticipantWaiting(t *testing.T) {
 	}
 	if pub.called {
 		t.Fatalf("waiting participant rejoin published %q; want no event", pub.subject)
+	}
+}
+
+func TestJoinCall_OnEndedCall_ReturnsCallEndedNot403(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	userID := uuid.New()
+
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {
+				ID:          callID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeMeeting,
+				Status:      entity.CallStatusEnded,
+			},
+		},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	_, err := svc.JoinCall(ctx, workspaceID, callID, userID)
+	if err == nil {
+		t.Fatal("JoinCall on ended call returned nil error, want CALL_ENDED")
+	}
+	appErr, ok := cerrors.AsAppError(err)
+	if !ok {
+		t.Fatalf("JoinCall on ended call err = %T (%v), want *cerrors.AppError", err, err)
+	}
+	if appErr.Code != cerrors.CodeCallEnded {
+		t.Fatalf("JoinCall on ended call code = %q, want %q", appErr.Code, cerrors.CodeCallEnded)
+	}
+	if appErr.HTTPStatus() != 410 {
+		t.Fatalf("JoinCall on ended call HTTP status = %d, want 410 Gone", appErr.HTTPStatus())
 	}
 }
 
@@ -2199,8 +2125,43 @@ func (r *fakeCallRepo) UpdateParticipantRole(_ context.Context, id uuid.UUID, ro
 	}
 	return cerrors.NotFound("call participant not found")
 }
-func (r *fakeCallRepo) UpdateParticipantMedia(context.Context, uuid.UUID, bool, bool, bool) error {
-	return nil
+func (r *fakeCallRepo) TransferHost(_ context.Context, callID, fromUserID, toUserID uuid.UUID) (bool, error) {
+	from := r.participants[[2]uuid.UUID{callID, fromUserID}]
+	to := r.participants[[2]uuid.UUID{callID, toUserID}]
+	if from == nil || to == nil || from.Role != entity.CallRoleHost ||
+		to.Role == entity.CallRoleHost || to.Status != entity.ParticipantStatusConnected {
+		return false, nil
+	}
+	from.Role = entity.CallRoleParticipant
+	to.Role = entity.CallRoleHost
+	return true, nil
+}
+func (r *fakeCallRepo) UpdateParticipantMedia(_ context.Context, id uuid.UUID, audioMuted, videoMuted, screenSharing bool) error {
+	for _, p := range r.participants {
+		if p.ID == id {
+			p.AudioMuted = audioMuted
+			p.VideoMuted = videoMuted
+			p.ScreenSharing = screenSharing
+			return nil
+		}
+	}
+	return cerrors.NotFound("call participant not found")
+}
+func (r *fakeCallRepo) SetCanScreenShare(_ context.Context, id uuid.UUID, canShare bool) error {
+	for _, p := range r.participants {
+		if p.ID == id {
+			p.CanScreenShare = canShare
+			return nil
+		}
+	}
+	return cerrors.NotFound("participant not found")
+}
+func (r *fakeCallRepo) SetFeaturedShareUserID(_ context.Context, callID uuid.UUID, userID *uuid.UUID) error {
+	if c := r.calls[callID]; c != nil {
+		c.FeaturedShareUserID = userID
+		return nil
+	}
+	return cerrors.NotFound("call not found")
 }
 func (r *fakeCallRepo) RemoveParticipant(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 
@@ -2209,21 +2170,42 @@ type removedLiveKitParticipant struct {
 	userID uuid.UUID
 }
 
+type updatedLiveKitParticipant struct {
+	room     string
+	identity string
+	perm     *livekitpb.ParticipantPermission
+}
+
 type fakeLiveKitRoomClient struct {
 	ensureCalls           int
 	ensureErr             error
+	ensuredRoomNames      []string
+	deletedRoomNames      []string
 	removedParticipants   []removedLiveKitParticipant
 	participantsByCall    map[uuid.UUID][]*livekitpb.ParticipantInfo
 	listParticipantsErr   error
 	listParticipantsCalls int
+	updatedParticipants   []updatedLiveKitParticipant
+	updateParticipantErr  error
 }
 
-func (c *fakeLiveKitRoomClient) EnsureRoom(context.Context, LiveKitEnsureRoomArgs) error {
+func (c *fakeLiveKitRoomClient) EnsureRoom(_ context.Context, args LiveKitEnsureRoomArgs) error {
 	c.ensureCalls++
+	name := args.RoomName
+	if name == "" {
+		name = args.CallID.String()
+	}
+	c.ensuredRoomNames = append(c.ensuredRoomNames, name)
 	return c.ensureErr
 }
 
-func (c *fakeLiveKitRoomClient) DeleteRoom(context.Context, uuid.UUID) error {
+func (c *fakeLiveKitRoomClient) DeleteRoom(_ context.Context, callID uuid.UUID) error {
+	c.deletedRoomNames = append(c.deletedRoomNames, callID.String())
+	return nil
+}
+
+func (c *fakeLiveKitRoomClient) DeleteRoomByName(_ context.Context, name string) error {
+	c.deletedRoomNames = append(c.deletedRoomNames, name)
 	return nil
 }
 
@@ -2241,6 +2223,14 @@ func (c *fakeLiveKitRoomClient) ListParticipants(_ context.Context, callID uuid.
 		return nil, c.listParticipantsErr
 	}
 	return c.participantsByCall[callID], nil
+}
+
+func (c *fakeLiveKitRoomClient) UpdateParticipant(_ context.Context, room, identity string, perm *livekitpb.ParticipantPermission) error {
+	if c.updateParticipantErr != nil {
+		return c.updateParticipantErr
+	}
+	c.updatedParticipants = append(c.updatedParticipants, updatedLiveKitParticipant{room: room, identity: identity, perm: perm})
+	return nil
 }
 
 type fakeBreakoutRepo struct{}

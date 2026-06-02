@@ -333,6 +333,15 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 			r.Post("/turn-credentials", deps.Calls.TurnCredentials)
 			r.Get("/participants", deps.Calls.Participants)
 			r.Put("/participants/{userID}/role", deps.Calls.UpdateParticipantRole)
+			r.Post("/transfer-host", deps.Calls.TransferHost)
+			r.Post("/guest-link", deps.Calls.CreateGuestLink) // ALK-700: host mints a call-scoped guest link
+			// Screen-share controls (ALK-697).
+			r.Route("/share-requests", func(r chi.Router) {
+				r.Post("/", deps.Calls.RequestScreenShare)
+				r.Post("/{requesterUserID}/resolve", deps.Calls.ResolveShareRequest)
+			})
+			r.Post("/participants/{userID}/revoke-screen-share", deps.Calls.RevokeScreenShare)
+			r.Put("/featured-share", deps.Calls.SetFeaturedShare)
 			r.Put("/media", deps.Calls.UpdateMedia)
 			r.Put("/quality", deps.Calls.SetQuality)
 			r.Route("/messages", func(r chi.Router) {
@@ -341,10 +350,9 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 				r.Delete("/{messageID}", deps.Calls.DeleteCallMessage)
 			})
 			r.Route("/media-session", func(r chi.Router) {
-				r.Post("/token", deps.Calls.MediaToken)
-				r.Post("/offer", deps.Calls.MediaOffer)
-				r.Post("/ice-candidate", deps.Calls.MediaICECandidate)
-				r.Post("/ice-restart", deps.Calls.MediaICERestart)
+				// Custom-SFU client signaling (token/offer/ice-candidate/
+				// ice-restart) was removed with the LiveKit migration — LiveKit
+				// owns client signaling now. Only the QoS report remains.
 				r.Post("/quality-report", deps.Calls.ReportNetworkQuality)
 			})
 

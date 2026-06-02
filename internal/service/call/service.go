@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -88,20 +89,46 @@ type CancelCallResult struct {
 
 // Service handles call lifecycle, participant management, and WebRTC signaling.
 type Service struct {
-	calls         repository.CallRepository
-	callMessages  repository.CallMessageRepository
-	breakoutRooms repository.BreakoutRoomRepository
-	channels      repository.ChannelRepository
-	members       repository.WorkspaceRepository
-	pubsub        EventPublisher
-	sfu           *sfu.SFU
-	media         MediaConfig
-	livekit       LiveKitSettings
-	livekitRooms  LiveKitRoomClient
-	guests        *guestaccess.Checker
-	collab        CollaborationAccessAuthorizer
-	control       MediaControlPlane
-	tx            txscope.Manager
+	calls            repository.CallRepository
+	callMessages     repository.CallMessageRepository
+	breakoutRooms    repository.BreakoutRoomRepository
+	channels         repository.ChannelRepository
+	members          repository.WorkspaceRepository
+	pubsub           EventPublisher
+	sfu              *sfu.SFU
+	media            MediaConfig
+	livekit          LiveKitSettings
+	livekitRooms     LiveKitRoomClient
+	guests           *guestaccess.Checker
+	collab           CollaborationAccessAuthorizer
+	control          MediaControlPlane
+	tx               txscope.Manager
+	egressSink       EgressWebhookSink // ALK-701: recording finalizer for egress_* webhooks
+	recordingEnabled bool              // ALK-701: egress configured → calls advertise settings.recording
+
+	// breakoutTimers holds in-memory auto-close timers keyed by callID
+	// (uuid.UUID -> *time.Timer). See breakout_timer.go.
+	breakoutTimers sync.Map
+
+	// breakoutDeleteTimers holds in-memory grace-period timers for the deferred
+	// deletion of breakout-room LiveKit rooms, keyed by the LiveKit room name
+	// (string -> *time.Timer). The grace lets connected clients leave the
+	// breakout room (driven by the WS return-to-main events) before the room is
+	// deleted, so LiveKit's DeleteRoom does not kick them with ROOM_DELETED.
+	// See breakout_timer.go.
+	breakoutDeleteTimers sync.Map
+}
+
+// SetEgressSink installs the recording finalizer invoked by the egress_* webhook
+// bridge (ALK-701). Implemented by the recording service.
+func (s *Service) SetEgressSink(sink EgressWebhookSink) {
+	s.egressSink = sink
+}
+
+// SetRecordingEnabled records whether egress recording is configured so new
+// calls advertise an honest settings.recording capability to the FE (ALK-701).
+func (s *Service) SetRecordingEnabled(enabled bool) {
+	s.recordingEnabled = enabled
 }
 
 type MediaConfig struct {
@@ -111,6 +138,8 @@ type MediaConfig struct {
 	TURNURLs                 []string
 	TURNUsername             string
 	TURNCredential           string
+	TURNSecret               string
+	STUNServers              []string
 	TURNCredentialsTTL       time.Duration
 	MaxPresentersPerCall     int
 	MaxViewersPerCall        int
@@ -195,6 +224,40 @@ func (s *Service) canAccessWorkspaceContent(ctx context.Context, workspaceID, us
 	return cerrors.Forbidden("user does not have access to this workspace")
 }
 
+// isGuestUser reports whether userID is a guest in this workspace: not a member,
+// but holding an active guest access grant. Drives the forced-waiting rule and
+// the is_guest participant flag (ALK-700).
+func (s *Service) isGuestUser(ctx context.Context, workspaceID, userID uuid.UUID) bool {
+	if _, err := s.members.GetMember(ctx, workspaceID, userID); err == nil {
+		return false
+	}
+	if s.guests == nil {
+		return false
+	}
+	allowed, err := s.guests.HasWorkspaceAccess(ctx, workspaceID, userID)
+	if err != nil {
+		return false
+	}
+	return allowed
+}
+
+// AuthorizeGuestLink validates that userID may mint a guest link for the call:
+// it must be an active (non-ended) call the user can access as host/co-host.
+// Returns the call so the handler can scope the invite to its channel (ALK-700).
+func (s *Service) AuthorizeGuestLink(ctx context.Context, workspaceID, callID, userID uuid.UUID) (*entity.Call, error) {
+	call, err := s.requireCallAccess(ctx, workspaceID, callID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if call.Status == entity.CallStatusEnded {
+		return nil, cerrors.CallEnded("call has already ended")
+	}
+	if err := s.requireHostOrCoHost(ctx, callID, userID); err != nil {
+		return nil, err
+	}
+	return call, nil
+}
+
 func (s *Service) requireChannelAccess(ctx context.Context, ch *entity.Channel, userID uuid.UUID) error {
 	if ch.WorkspaceID == nil {
 		return cerrors.NotFound("channel not found")
@@ -263,6 +326,22 @@ func (s *Service) requireCallAccess(ctx context.Context, workspaceID, callID, us
 		ch, err := s.channels.GetByID(ctx, *call.ChannelID)
 		if err != nil {
 			return nil, cerrors.Internal("failed to get channel", err)
+		}
+		// A connected participant of a private one_to_one DM call keeps access to
+		// their own call without a DM channel-member row — but only while still
+		// workspace-authorized. This skips ONLY the channel-membership requirement
+		// (the source of the 1:1 in-call chat 403), not the workspace trust
+		// boundary. Scoped both to one_to_one AND to an actual DM/GroupDM channel
+		// type, so a one_to_one mistakenly linked to a private group channel, and
+		// every group/meeting call, still goes through the full channel gate where
+		// revoking a member revokes the call. (ALK-695, ALK-665)
+		if call.Type == entity.CallTypeOneToOne &&
+			(ch.Type == entity.ChannelTypeDM || ch.Type == entity.ChannelTypeGroupDM) &&
+			s.canAccessWorkspaceContent(ctx, call.WorkspaceID, userID) == nil {
+			if p, perr := s.calls.GetParticipant(ctx, callID, userID); perr == nil &&
+				p.Status == entity.ParticipantStatusConnected {
+				return call, nil
+			}
 		}
 		if err := s.requireChannelAccess(ctx, ch, userID); err != nil {
 			return nil, err
@@ -481,6 +560,9 @@ func (s *Service) StartCall(
 	if err := validateCallSettings(callType, settings); err != nil {
 		return nil, err
 	}
+	// Recording is only offerable when egress is configured server-side; advertise
+	// an honest capability so the FE control gate (settings.recording) is truthful (ALK-701).
+	settings.Recording = s.recordingEnabled
 	if err := s.requireWorkspaceMember(ctx, workspaceID, userID); err != nil {
 		return nil, err
 	}
@@ -587,8 +669,12 @@ func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid
 	}
 
 	if call.Status == entity.CallStatusEnded {
-		return nil, cerrors.Forbidden("call has already ended")
+		return nil, cerrors.CallEnded("call has already ended")
 	}
+
+	// Guests always require host approval (ALK-700): they are forced into the
+	// waiting room on every join regardless of the call's waiting-room setting.
+	guest := s.isGuestUser(ctx, call.WorkspaceID, userID)
 
 	// Check capacity if max participants is set.
 	effectiveCap := s.effectiveParticipantCap(call)
@@ -624,9 +710,24 @@ func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid
 		}
 	}
 	if existing != nil {
+		// A declined guest may not re-knock — terminal state (ALK-700).
+		if existing.Status == entity.ParticipantStatusDeclined {
+			return nil, cerrors.WaitingRoomDeclined("the host declined your request to join")
+		}
 		if existing.Status == entity.ParticipantStatusWaiting {
-			s.ensureLiveKitRoomBestEffort(ctx, call)
 			slog.InfoContext(ctx, "participant remains in waiting room", "call_id", callID, "user_id", userID)
+			return existing, nil
+		}
+		// A guest who is not already connected (e.g. left then returned with the
+		// same session) must re-knock rather than silently reconnect (ALK-700).
+		if guest && existing.Status != entity.ParticipantStatusConnected {
+			if err := s.calls.UpdateParticipantStatus(ctx, existing.ID, entity.ParticipantStatusWaiting); err != nil {
+				slog.ErrorContext(ctx, "failed to return guest to waiting room", "participant_id", existing.ID, "error", err)
+				return nil, cerrors.Internal("failed to return guest to waiting room", err)
+			}
+			existing.Status = entity.ParticipantStatusWaiting
+			s.publishParticipantEvent(ctx, event.TypeWaitingRoomJoined, call, existing)
+			slog.InfoContext(ctx, "guest returned to waiting room", "call_id", callID, "user_id", userID)
 			return existing, nil
 		}
 
@@ -663,9 +764,10 @@ func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid
 
 	now := time.Now()
 
-	// Determine initial status: if waiting room is enabled, place in waiting.
+	// Determine initial status: if waiting room is enabled, or the joiner is a
+	// guest (always gated, ALK-700), place in waiting.
 	initialStatus := entity.ParticipantStatusConnected
-	if call.Settings.WaitingRoom {
+	if call.Settings.WaitingRoom || guest {
 		initialStatus = entity.ParticipantStatusWaiting
 	}
 	role := entity.CallRoleParticipant
@@ -866,6 +968,22 @@ func (s *Service) RejectParticipant(ctx context.Context, workspaceID, callID, us
 
 	if participant.Status != entity.ParticipantStatusWaiting {
 		return cerrors.Conflict("participant is not in the waiting room")
+	}
+
+	// For a guest, reject is TERMINAL: mark 'declined' (instead of deleting the
+	// row) so a subsequent JoinCall is refused with WAITING_ROOM_DECLINED and the
+	// FE deep-link poll stops instead of re-knocking. Non-guest waiting-room
+	// rejects keep their existing remove-the-row behaviour (ALK-700).
+	if s.isGuestUser(ctx, call.WorkspaceID, targetUserID) {
+		if err := s.calls.UpdateParticipantStatus(ctx, participant.ID, entity.ParticipantStatusDeclined); err != nil {
+			slog.ErrorContext(ctx, "failed to decline guest", "call_id", callID, "target_user_id", targetUserID, "error", err)
+			return cerrors.Internal("failed to reject participant", err)
+		}
+		participant.Status = entity.ParticipantStatusDeclined
+		s.publishParticipantEvent(ctx, event.TypeWaitingRoomRejected, call, participant)
+		s.removeLiveKitParticipantBestEffort(ctx, callID, targetUserID)
+		slog.InfoContext(ctx, "guest declined from waiting room", "call_id", callID, "target_user_id", targetUserID)
+		return nil
 	}
 
 	if err := s.calls.RemoveParticipant(ctx, callID, targetUserID); err != nil {
@@ -1316,6 +1434,12 @@ func (s *Service) UpdateMedia(ctx context.Context, workspaceID, callID, userID u
 			return err
 		}
 	}
+	// Defense-in-depth per-participant gate (secondary to the join-token
+	// CanPublishSources gate): a non-host without an explicit grant cannot flip
+	// screen-sharing ON. (ALK-697)
+	if screenSharing != nil && *screenSharing && !participant.ScreenSharing && !canShareScreen(*participant) {
+		return cerrors.Forbidden("screen_share_not_granted")
+	}
 
 	if err := s.calls.UpdateParticipantMedia(ctx, participant.ID, nextAudio, nextVideo, nextScreen); err != nil {
 		slog.ErrorContext(ctx, "failed to update participant media", "participant_id", participant.ID, "error", err)
@@ -1343,6 +1467,12 @@ func (s *Service) UpdateParticipantRole(ctx context.Context, workspaceID, callID
 	}
 	if err := validateAssignableRole(call.Type, role); err != nil {
 		return err
+	}
+	// Host is single-occupancy and may only change hands through the atomic
+	// /transfer-host endpoint; the generic role endpoint must never be able to
+	// mint a second host. (ALK-696)
+	if role == entity.CallRoleHost {
+		return cerrors.InvalidInput("host role can only be assigned via transfer-host")
 	}
 
 	actor, err := s.calls.GetParticipant(ctx, callID, actorUserID)
@@ -1388,6 +1518,72 @@ func (s *Service) UpdateParticipantRole(ctx context.Context, workspaceID, callID
 	}
 
 	s.publishParticipantEvent(ctx, event.TypeCallParticipantUpdated, call, target)
+	return nil
+}
+
+// TransferHost performs an atomic single-host transfer: the current host is
+// demoted to a regular participant and the target is promoted to host in one
+// transaction. Unlike UpdateParticipantRole (which can leave two hosts and
+// forbids self-demotion), this gives the call exactly one host. Only the
+// current host may transfer; the target must be a connected participant of the
+// call that is not already the host. (ALK-696)
+func (s *Service) TransferHost(ctx context.Context, workspaceID, callID, actorUserID, targetUserID uuid.UUID) error {
+	call, err := s.requireCallAccess(ctx, workspaceID, callID, actorUserID)
+	if err != nil {
+		return err
+	}
+	if call.Status == entity.CallStatusEnded {
+		return cerrors.Forbidden("call has already ended")
+	}
+	if actorUserID == targetUserID {
+		return cerrors.InvalidInput("cannot transfer host to yourself")
+	}
+
+	actor, err := s.calls.GetParticipant(ctx, callID, actorUserID)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return cerrors.Forbidden("actor is not a participant")
+		}
+		return cerrors.Internal("failed to get actor participant", err)
+	}
+	if actor.Role != entity.CallRoleHost {
+		return cerrors.Forbidden("only the host can transfer host")
+	}
+
+	target, err := s.calls.GetParticipant(ctx, callID, targetUserID)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return cerrors.NotFound("target participant not found")
+		}
+		return cerrors.Internal("failed to get target participant", err)
+	}
+	if target.Status != entity.ParticipantStatusConnected {
+		return cerrors.InvalidInput("target participant is not connected")
+	}
+	if target.Role == entity.CallRoleHost {
+		return cerrors.Conflict("target is already the host")
+	}
+
+	// The demote-old + promote-new swap is performed as ONE atomic repository
+	// operation that only fires while the actor is still the host and the target
+	// is still present (all-or-nothing). This guarantees the single-host
+	// invariant even under concurrent transfers: the loser observes the host
+	// already changed and gets a no-op (swapped=false → Conflict). The pre-checks
+	// above only produce friendly errors for the common case. (ALK-696)
+	swapped, err := s.calls.TransferHost(ctx, callID, actorUserID, targetUserID)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to transfer host", "call_id", callID, "from", actorUserID, "to", targetUserID, "error", err)
+		return cerrors.Internal("failed to transfer host", err)
+	}
+	if !swapped {
+		return cerrors.Conflict("host changed; please retry")
+	}
+	actor.Role = entity.CallRoleParticipant
+	target.Role = entity.CallRoleHost
+	s.publishParticipantEvent(ctx, event.TypeCallParticipantUpdated, call, actor)
+	s.publishParticipantEvent(ctx, event.TypeCallParticipantUpdated, call, target)
+
+	slog.InfoContext(ctx, "host transferred", "call_id", callID, "from", actorUserID, "to", targetUserID)
 	return nil
 }
 
@@ -1573,6 +1769,29 @@ func (s *Service) publishCallMessageEvent(ctx context.Context, evtType event.Typ
 	s.doPublish(ctx, evtType, subject, call.WorkspaceID, channelID, msg.SenderID, payload)
 }
 
+func (s *Service) publishRecordingEvent(ctx context.Context, evtType event.Type, call *entity.Call, rec *entity.Recording) {
+	channelID := uuid.Nil
+	if call.ChannelID != nil {
+		channelID = *call.ChannelID
+	}
+	subject := fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID)
+	s.doPublish(ctx, evtType, subject, call.WorkspaceID, channelID, rec.StartedBy, event.CallRecordingPayload{
+		CallID:    call.ID,
+		Recording: rec,
+	})
+}
+
+// BroadcastRecordingStarted / BroadcastRecordingUpdated implement the
+// recording.RecordingBroadcaster seam (ALK-701) so the recording service can
+// emit call.recording.* events through the call service's publisher.
+func (s *Service) BroadcastRecordingStarted(ctx context.Context, call *entity.Call, rec *entity.Recording) {
+	s.publishRecordingEvent(ctx, event.TypeCallRecordingStarted, call, rec)
+}
+
+func (s *Service) BroadcastRecordingUpdated(ctx context.Context, call *entity.Call, rec *entity.Recording) {
+	s.publishRecordingEvent(ctx, event.TypeCallRecordingUpdated, call, rec)
+}
+
 func (s *Service) enqueueCallEventTx(ctx context.Context, scope txscope.Scope, evtType event.Type, call *entity.Call, userID uuid.UUID) error {
 	channelID := uuid.Nil
 	if call != nil && call.ChannelID != nil {
@@ -1670,6 +1889,18 @@ func (s *Service) closeAllBreakoutSFURooms(ctx context.Context, callID uuid.UUID
 		sfuRoomID := fmt.Sprintf("%s:breakout:%s", callID, room.ID)
 		if s.sfu != nil {
 			s.sfu.CloseRoom(sfuRoomID)
+		}
+		// The main call is ending, so its breakout rooms are empty: cancel any
+		// pending grace-period delete and delete the LiveKit room immediately so
+		// breakout rooms do not linger after the call ends. No one is connected,
+		// so there is nobody to kick.
+		roomName := breakoutLiveKitRoomName(callID, room.ID)
+		s.cancelBreakoutLiveKitDelete(roomName)
+		if s.livekitRooms != nil {
+			if err := s.livekitRooms.DeleteRoomByName(ctx, roomName); err != nil {
+				slog.WarnContext(ctx, "failed to delete livekit breakout room on call end",
+					"call_id", callID, "breakout_room_id", room.ID, "error", err)
+			}
 		}
 	}
 

@@ -12,6 +12,7 @@ import (
 	"aloqa/internal/config"
 	"aloqa/internal/domain/entity"
 	"aloqa/internal/extension"
+	applog "aloqa/internal/pkg/logging"
 	"aloqa/internal/platform/db"
 	"aloqa/internal/platform/reliability"
 	"aloqa/internal/platform/storage"
@@ -20,9 +21,9 @@ import (
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	slog.SetDefault(slog.New(applog.SuppressCanceled(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
-	})))
+	}))))
 
 	if err := run(); err != nil {
 		slog.Error("recording worker failed", "error", err)

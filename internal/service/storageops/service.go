@@ -81,18 +81,28 @@ func (s *Service) RuntimeReport(ctx context.Context) (*entity.StorageRuntimeRepo
 	if s.rdb != nil {
 		stats := s.rdb.PoolStats()
 		utilization := 0.0
+		openConnsPct := 0.0
+		activeConns := stats.TotalConns
+		if activeConns >= stats.IdleConns {
+			activeConns -= stats.IdleConns
+		} else {
+			activeConns = 0
+		}
 		if s.config.RedisPoolSize > 0 {
-			utilization = (float64(stats.TotalConns) / float64(s.config.RedisPoolSize)) * 100
+			utilization = (float64(activeConns) / float64(s.config.RedisPoolSize)) * 100
+			openConnsPct = (float64(stats.TotalConns) / float64(s.config.RedisPoolSize)) * 100
 		}
 		report.Redis = entity.RedisRuntimeStats{
 			PoolSize:           s.config.RedisPoolSize,
 			TotalConns:         stats.TotalConns,
+			ActiveConns:        activeConns,
 			IdleConns:          stats.IdleConns,
 			StaleConns:         stats.StaleConns,
 			Misses:             stats.Misses,
 			Hits:               stats.Hits,
 			Timeouts:           stats.Timeouts,
 			UtilizationPct:     utilization,
+			OpenConnsPct:       openConnsPct,
 			Saturated:          reliability.RedisPressure(stats, s.config.RedisPoolSize).Saturated,
 			OperationTimeoutMs: s.config.RedisOpTimeout.Milliseconds(),
 			PresenceShards:     s.config.PresenceShardCount,

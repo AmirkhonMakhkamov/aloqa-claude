@@ -1,0 +1,21 @@
+# LiveKit Egress (dev) — ALK-701 call recording.
+# Egress connects to the LiveKit server over the compose network and records a
+# room-composite (grid) into a single MP4. Output destination is chosen per
+# request by the backend (EncodedFileOutput): for dev it is a local file under
+# /out (bind-mounted to the API's MEDIA_STORAGE_PATH); for prod the backend sets
+# an S3 upload, so no global storage block is needed here.
+log_level: info
+
+# Must match a key in scripts/livekit/livekit.yaml `keys:`.
+api_key: APIaloqaDev
+api_secret: aloqa-livekit-development-secret-32bytes-min
+
+# Internal signaling URL reachable from the egress container on the compose
+# network (NOT the FE-facing wss host).
+ws_url: ws://livekit-server:7880
+
+redis:
+  address: redis:6379
+
+# Room-composite uses the bundled headless Chrome template; no custom template
+# server is required for the default grid layout.

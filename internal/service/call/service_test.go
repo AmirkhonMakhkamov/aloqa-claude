@@ -989,6 +989,49 @@ func TestStartCallDefaultsChatEnabled(t *testing.T) {
 	}
 }
 
+func TestStartCallDefaultsBreakoutRoomsForGroupAndMeeting(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name string
+		typ  entity.CallType
+		want bool
+	}{
+		{name: "group", typ: entity.CallTypeGroup, want: true},
+		{name: "meeting", typ: entity.CallTypeMeeting, want: true},
+		{name: "one_to_one", typ: entity.CallTypeOneToOne, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspaceID := uuid.New()
+			userID := uuid.New()
+			workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+				{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+			}}
+			calls := &fakeCallRepo{calls: map[uuid.UUID]*entity.Call{}, participants: map[[2]uuid.UUID]*entity.CallParticipant{}}
+			svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+			configureCleanupLiveKit(svc, nil)
+
+			callEntity, err := svc.StartCall(ctx, workspaceID, userID, tc.typ, "", nil, entity.CallSettings{})
+			if err != nil {
+				t.Fatalf("StartCall returned error: %v", err)
+			}
+			if callEntity == nil {
+				t.Fatalf("StartCall returned nil call")
+			}
+			if callEntity.Settings.BreakoutRooms != tc.want {
+				t.Fatalf("StartCall Settings.BreakoutRooms = %v, want %v", callEntity.Settings.BreakoutRooms, tc.want)
+			}
+			persisted, ok := calls.calls[callEntity.ID]
+			if !ok {
+				t.Fatalf("call was not persisted")
+			}
+			if persisted.Settings.BreakoutRooms != tc.want {
+				t.Fatalf("persisted Settings.BreakoutRooms = %v, want %v", persisted.Settings.BreakoutRooms, tc.want)
+			}
+		})
+	}
+}
+
 func TestJoinCallRequiresLiveKitRoomBeforeParticipantInsert(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()

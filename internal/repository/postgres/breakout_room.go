@@ -87,7 +87,7 @@ func (r *BreakoutRoomRepo) ListByCall(ctx context.Context, callID uuid.UUID) ([]
 	}
 	defer rows.Close()
 
-	var rooms []entity.BreakoutRoom
+	rooms := make([]entity.BreakoutRoom, 0)
 	for rows.Next() {
 		var room entity.BreakoutRoom
 		if err := rows.Scan(
@@ -205,7 +205,7 @@ func (r *BreakoutRoomRepo) ListParticipants(ctx context.Context, breakoutRoomID 
 	}
 	defer rows.Close()
 
-	var participants []entity.CallParticipant
+	participants := make([]entity.CallParticipant, 0)
 	for rows.Next() {
 		var p entity.CallParticipant
 		if err := rows.Scan(

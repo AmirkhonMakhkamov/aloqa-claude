@@ -168,6 +168,9 @@ func (s *Service) ListBreakoutRooms(ctx context.Context, callID uuid.UUID) ([]en
 		slog.ErrorContext(ctx, "failed to list breakout rooms", "call_id", callID, "error", err)
 		return nil, cerrors.Internal("failed to list breakout rooms", err)
 	}
+	if rooms == nil {
+		rooms = []entity.BreakoutRoom{}
+	}
 
 	return rooms, nil
 }
@@ -215,6 +218,10 @@ func (s *Service) JoinBreakoutRoom(
 		return nil, cerrors.Forbidden("participant is not connected")
 	}
 
+	if !s.livekit.IsConfigured() {
+		return nil, cerrors.Unavailable("livekit is not configured")
+	}
+
 	// If already in a breakout room, remove from that SFU room first.
 	if participant.BreakoutRoomID != nil {
 		oldSFURoomID := breakoutSFURoomID(callID, *participant.BreakoutRoomID)
@@ -249,9 +256,6 @@ func (s *Service) JoinBreakoutRoom(
 	slog.InfoContext(ctx, "participant joined breakout room",
 		"call_id", callID, "user_id", userID, "breakout_room_id", breakoutRoomID)
 
-	if !s.livekit.IsConfigured() {
-		return nil, nil
-	}
 	return s.IssueLiveKitBreakoutJoinInfo(ctx, call, breakoutRoomID, userID)
 }
 
@@ -275,6 +279,10 @@ func (s *Service) ReturnToMainRoom(ctx context.Context, callID, userID uuid.UUID
 		return nil, cerrors.Conflict("participant is already in the main room")
 	}
 
+	if !s.livekit.IsConfigured() {
+		return nil, cerrors.Unavailable("livekit is not configured")
+	}
+
 	// Remove from breakout SFU room.
 	oldSFURoomID := breakoutSFURoomID(callID, *participant.BreakoutRoomID)
 	if sfuRoom, ok := s.sfu.GetRoom(oldSFURoomID); ok {
@@ -296,9 +304,6 @@ func (s *Service) ReturnToMainRoom(ctx context.Context, callID, userID uuid.UUID
 
 	slog.InfoContext(ctx, "participant returned to main room", "call_id", callID, "user_id", userID)
 
-	if !s.livekit.IsConfigured() {
-		return nil, nil
-	}
 	// Re-issue a token for the MAIN call room so the FE can reconnect there.
 	return s.IssueLiveKitJoinInfo(ctx, call, userID, "")
 }
@@ -480,6 +485,9 @@ func (s *Service) ListBreakoutRoomParticipants(
 		slog.ErrorContext(ctx, "failed to list breakout room participants",
 			"breakout_room_id", breakoutRoomID, "error", err)
 		return nil, cerrors.Internal("failed to list participants", err)
+	}
+	if participants == nil {
+		participants = []entity.CallParticipant{}
 	}
 
 	return participants, nil

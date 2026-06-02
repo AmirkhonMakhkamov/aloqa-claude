@@ -224,7 +224,7 @@ func (r *CallRepo) ListActiveByWorkspace(ctx context.Context, workspaceID uuid.U
 	}
 	defer rows.Close()
 
-	var calls []entity.Call
+	calls := make([]entity.Call, 0)
 	for rows.Next() {
 		var call entity.Call
 		var settingsJSON []byte
@@ -286,7 +286,7 @@ func (r *CallRepo) ListStaleOpen(ctx context.Context, before time.Time, limit in
 	}
 	defer rows.Close()
 
-	var calls []entity.Call
+	calls := make([]entity.Call, 0)
 	for rows.Next() {
 		var call entity.Call
 		var settingsJSON []byte
@@ -559,7 +559,7 @@ func (r *CallRepo) ListRecentByWorkspace(ctx context.Context, workspaceID uuid.U
 	}
 	defer rows.Close()
 
-	var calls []entity.Call
+	calls := make([]entity.Call, 0)
 	for rows.Next() {
 		var call entity.Call
 		var settingsJSON []byte
@@ -823,7 +823,7 @@ func (r *CallRepo) ListParticipants(ctx context.Context, callID uuid.UUID) ([]en
 	}
 	defer rows.Close()
 
-	var participants []entity.CallParticipant
+	participants := make([]entity.CallParticipant, 0)
 	for rows.Next() {
 		var p entity.CallParticipant
 		if err := rows.Scan(

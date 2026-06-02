@@ -46,7 +46,7 @@ func (r *stubBreakoutRepo) GetByID(_ context.Context, id uuid.UUID) (*entity.Bre
 }
 
 func (r *stubBreakoutRepo) ListByCall(_ context.Context, callID uuid.UUID) ([]entity.BreakoutRoom, error) {
-	var out []entity.BreakoutRoom
+	out := make([]entity.BreakoutRoom, 0)
 	for _, room := range r.rooms {
 		if room.CallID == callID {
 			out = append(out, *room)
@@ -131,6 +131,60 @@ func breakoutCall(callID, workspaceID, hostID uuid.UUID) *entity.Call {
 		Status:      entity.CallStatusActive,
 		CreatedBy:   hostID,
 		Settings:    entity.CallSettings{BreakoutRooms: true},
+	}
+}
+
+func TestListBreakoutRoomsReturnsEmptySlice(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+
+	calls := &fakeCallRepo{calls: map[uuid.UUID]*entity.Call{
+		callID: breakoutCall(callID, workspaceID, hostID),
+	}}
+	svc := NewService(calls, newStubBreakoutRepo(), &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	rooms, err := svc.ListBreakoutRooms(ctx, callID)
+	if err != nil {
+		t.Fatalf("ListBreakoutRooms returned error: %v", err)
+	}
+	if rooms == nil {
+		t.Fatalf("ListBreakoutRooms returned nil slice, want empty slice")
+	}
+	if len(rooms) != 0 {
+		t.Fatalf("ListBreakoutRooms len = %d, want 0", len(rooms))
+	}
+}
+
+func TestListBreakoutRoomParticipantsReturnsEmptySlice(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	roomID := uuid.New()
+
+	repo := newStubBreakoutRepo()
+	repo.rooms[roomID] = &entity.BreakoutRoom{
+		ID:     roomID,
+		CallID: callID,
+		Name:   "Room A",
+		Status: entity.BreakoutRoomStatusActive,
+	}
+	calls := &fakeCallRepo{calls: map[uuid.UUID]*entity.Call{
+		callID: breakoutCall(callID, workspaceID, hostID),
+	}}
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	participants, err := svc.ListBreakoutRoomParticipants(ctx, callID, roomID)
+	if err != nil {
+		t.Fatalf("ListBreakoutRoomParticipants returned error: %v", err)
+	}
+	if participants == nil {
+		t.Fatalf("ListBreakoutRoomParticipants returned nil slice, want empty slice")
+	}
+	if len(participants) != 0 {
+		t.Fatalf("ListBreakoutRoomParticipants len = %d, want 0", len(participants))
 	}
 }
 
@@ -271,6 +325,37 @@ func TestJoinBreakoutRoomReturnsLiveKitJoinInfo(t *testing.T) {
 	}
 }
 
+func TestJoinBreakoutRoomLiveKitUnconfiguredReturnsUnavailable(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	userID := uuid.New()
+
+	repo := newStubBreakoutRepo()
+	room := &entity.BreakoutRoom{ID: uuid.New(), CallID: callID, Name: "Room A", Status: entity.BreakoutRoomStatusActive}
+	repo.rooms[room.ID] = room
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: breakoutCall(callID, workspaceID, hostID)},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, userID}: connectedParticipant(callID, userID, entity.CallRoleParticipant),
+		},
+	}
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	info, err := svc.JoinBreakoutRoom(ctx, callID, userID, room.ID)
+	if !hasCode(err, cerrors.CodeUnavailable) {
+		t.Fatalf("JoinBreakoutRoom error = %v, want UNAVAILABLE", err)
+	}
+	if info != nil {
+		t.Fatalf("JoinBreakoutRoom info = %+v, want nil", info)
+	}
+	if len(repo.assignments) != 0 {
+		t.Fatalf("assignments = %+v, want none before livekit is configured", repo.assignments)
+	}
+}
+
 func TestReturnToMainRoomReturnsMainLiveKitJoinInfo(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -308,6 +393,38 @@ func TestReturnToMainRoomReturnsMainLiveKitJoinInfo(t *testing.T) {
 	}
 	if got := countBreakoutEvents(t, pub.captures, event.TypeBreakoutParticipantMoved); got != 1 {
 		t.Fatalf("participant.moved events = %d, want 1", got)
+	}
+}
+
+func TestReturnToMainRoomLiveKitUnconfiguredReturnsUnavailable(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	userID := uuid.New()
+	breakoutRoomID := uuid.New()
+
+	participant := connectedParticipant(callID, userID, entity.CallRoleParticipant)
+	participant.BreakoutRoomID = &breakoutRoomID
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: breakoutCall(callID, workspaceID, hostID)},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, userID}: participant,
+		},
+	}
+	repo := newStubBreakoutRepo()
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	info, err := svc.ReturnToMainRoom(ctx, callID, userID)
+	if !hasCode(err, cerrors.CodeUnavailable) {
+		t.Fatalf("ReturnToMainRoom error = %v, want UNAVAILABLE", err)
+	}
+	if info != nil {
+		t.Fatalf("ReturnToMainRoom info = %+v, want nil", info)
+	}
+	if len(repo.assignments) != 0 {
+		t.Fatalf("assignments = %+v, want none before livekit is configured", repo.assignments)
 	}
 }
 

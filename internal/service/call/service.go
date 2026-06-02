@@ -660,6 +660,9 @@ func (s *Service) StartCall(
 	channelID *uuid.UUID,
 	settings entity.CallSettings,
 ) (*entity.Call, error) {
+	if callType == entity.CallTypeGroup || callType == entity.CallTypeMeeting {
+		settings.BreakoutRooms = true
+	}
 	if err := validateCallSettings(callType, settings); err != nil {
 		return nil, err
 	}
@@ -1148,7 +1151,7 @@ func (s *Service) ListWaiting(ctx context.Context, workspaceID, callID, userID u
 		return nil, cerrors.Internal("failed to list participants", err)
 	}
 
-	var waiting []entity.CallParticipant
+	waiting := make([]entity.CallParticipant, 0)
 	for _, p := range participants {
 		if p.Status == entity.ParticipantStatusWaiting {
 			waiting = append(waiting, p)

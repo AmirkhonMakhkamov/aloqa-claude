@@ -35,6 +35,10 @@ const (
 	CodeUnprocessable      Code = "UNPROCESSABLE"
 	CodeCallEnded          Code = "CALL_ENDED"
 	CodeCanceled           Code = "CANCELED"
+	// CodeWaitingRoomDeclined marks a join attempt by a participant the host has
+	// already declined (ALK-700 guest flow). Maps to 403 so the FE deep-link
+	// classifier can render a terminal "declined" state and stop re-polling.
+	CodeWaitingRoomDeclined Code = "WAITING_ROOM_DECLINED"
 )
 
 // AppError is the standard application error type.
@@ -66,7 +70,7 @@ func (e *AppError) HTTPStatus() int {
 		return http.StatusBadRequest
 	case CodeUnauthorized:
 		return http.StatusUnauthorized
-	case CodeForbidden, CodeAccountDeactivated, CodeAccountSuspended, CodeNotDeactivated:
+	case CodeForbidden, CodeAccountDeactivated, CodeAccountSuspended, CodeNotDeactivated, CodeWaitingRoomDeclined:
 		return http.StatusForbidden
 	case CodeRateLimited:
 		return http.StatusTooManyRequests
@@ -137,6 +141,14 @@ func Unprocessable(msg string) *AppError {
 // 403 retry spinner.
 func CallEnded(msg string) *AppError {
 	return &AppError{Code: CodeCallEnded, Message: msg}
+}
+
+// WaitingRoomDeclined returns a typed AppError with HTTP 403 status and the
+// WAITING_ROOM_DECLINED code. Emitted when a (guest) participant the host has
+// already declined attempts to re-join, so the FE renders a terminal declined
+// state instead of re-polling the waiting room (ALK-700).
+func WaitingRoomDeclined(msg string) *AppError {
+	return &AppError{Code: CodeWaitingRoomDeclined, Message: msg}
 }
 
 // Canceled returns a typed AppError with HTTP 499 status, used when a request

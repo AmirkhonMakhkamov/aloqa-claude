@@ -196,6 +196,110 @@ func TestRedeemInviteCreatesGuestAccessGrantWithoutWorkspaceMembership(t *testin
 	}
 }
 
+// ALK-700: a call-scoped guest link mints a DISTINCT fresh guest user per redeem
+// (no client email needed) and echoes the target call so the FE can route in.
+func TestRedeemCallInviteMintsFreshGuestAndEchoesCall(t *testing.T) {
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	callID := uuid.New()
+
+	invites := &fakeInviteRepo{byToken: map[string]*entity.GuestInvite{
+		"call-token": {
+			ID:          uuid.New(),
+			WorkspaceID: workspaceID,
+			Token:       "call-token",
+			ChannelIDs:  []uuid.UUID{channelID},
+			CallID:      &callID,
+			MaxUses:     100,
+			Status:      entity.GuestInviteStatusActive,
+			ExpiresAt:   time.Now().Add(time.Hour),
+		},
+	}}
+	users := &fakeUserRepo{}
+	svc := NewService(
+		invites,
+		&fakeGuestAccessRepo{},
+		users,
+		&fakeWorkspaceRepo{},
+		&fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
+		}},
+		nil,
+	)
+	svc.SetCallLookup(&fakeCallLookup{call: &entity.Call{ID: callID, WorkspaceID: workspaceID, Status: entity.CallStatusActive}})
+
+	// No client email supplied — the call-invite path synthesizes one.
+	result, err := svc.RedeemInvite(context.Background(), RedeemInviteInput{
+		Token:       "call-token",
+		DisplayName: "Guest User",
+	})
+	if err != nil {
+		t.Fatalf("RedeemInvite returned error: %v", err)
+	}
+	if !users.createCalled {
+		t.Fatalf("expected a fresh guest user to be created")
+	}
+	if result.CallID == nil || *result.CallID != callID {
+		t.Fatalf("result.CallID = %v, want %s", result.CallID, callID)
+	}
+	if result.User == nil || result.User.DisplayName != "Guest User" {
+		t.Fatalf("expected guest display name to be preserved, got %+v", result.User)
+	}
+}
+
+// ALK-700: redeeming a call link for an ended call is rejected before any
+// user/session/grant is minted.
+func TestRedeemCallInviteRejectsEndedCall(t *testing.T) {
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	callID := uuid.New()
+
+	invites := &fakeInviteRepo{byToken: map[string]*entity.GuestInvite{
+		"call-token": {
+			ID:          uuid.New(),
+			WorkspaceID: workspaceID,
+			Token:       "call-token",
+			ChannelIDs:  []uuid.UUID{channelID},
+			CallID:      &callID,
+			MaxUses:     100,
+			Status:      entity.GuestInviteStatusActive,
+			ExpiresAt:   time.Now().Add(time.Hour),
+		},
+	}}
+	users := &fakeUserRepo{}
+	svc := NewService(
+		invites,
+		&fakeGuestAccessRepo{},
+		users,
+		&fakeWorkspaceRepo{},
+		&fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
+		}},
+		nil,
+	)
+	svc.SetCallLookup(&fakeCallLookup{call: &entity.Call{ID: callID, WorkspaceID: workspaceID, Status: entity.CallStatusEnded}})
+
+	_, err := svc.RedeemInvite(context.Background(), RedeemInviteInput{
+		Token:       "call-token",
+		DisplayName: "Guest User",
+	})
+	requireAppErrorCode(t, err, cerrors.CodeCallEnded)
+	if users.createCalled {
+		t.Fatalf("ended-call redeem must not create a user")
+	}
+}
+
+type fakeCallLookup struct {
+	call *entity.Call
+}
+
+func (f *fakeCallLookup) GetByID(context.Context, uuid.UUID) (*entity.Call, error) {
+	if f.call == nil {
+		return nil, cerrors.NotFound("call not found")
+	}
+	return f.call, nil
+}
+
 func requireAppErrorCode(t *testing.T, err error, code cerrors.Code) {
 	t.Helper()
 	if err == nil {

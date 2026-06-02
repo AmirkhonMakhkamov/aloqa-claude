@@ -431,11 +431,40 @@ func run() error {
 	adminSvc.SetObservabilityObserver(observabilitySvc)
 	guestSvc := guest.NewService(guestInviteRepo, guestAccessRepo, userRepo, workspaceRepo, channelRepo, &authTokenIssuer{authSvc})
 	guestSvc.SetTransactionManager(txManager)
+	guestSvc.SetCallLookup(callRepo) // ALK-700: reject call-scoped guest links once the call has ended
 	chatSvc.SetAccessPolicy(channelAccessPolicy)
 	chatSvc.SetChannelAccessStates(channelAccessStateRepo)
 	fileSvc.SetAccessPolicy(channelAccessPolicy)
 	searchSvc.SetAccessPolicy(channelAccessPolicy)
 	recordingSvc.SetCallAccessAuthorizer(callSvc)
+
+	// ALK-701: wire LiveKit Egress recording. egressClient is nil when egress is
+	// not configured, in which case StartRecording returns 503 and new calls
+	// advertise settings.recording=false (the FE control stays hidden).
+	egressOutput := call.EgressSettings{
+		Enabled:  cfg.LiveKit.EgressEnabled,
+		FileRoot: cfg.LiveKit.EgressFileRoot,
+	}
+	if cfg.Media.StorageBackend == "s3" || cfg.Media.StorageBackend == "minio" {
+		egressOutput.S3 = &call.EgressS3Settings{
+			AccessKey:      cfg.Media.ObjectStorageAccessKey,
+			Secret:         cfg.Media.ObjectStorageSecretKey,
+			Region:         cfg.Media.ObjectStorageRegion,
+			Endpoint:       cfg.Media.ObjectStorageEndpoint,
+			Bucket:         cfg.Media.ObjectStorageBucket,
+			ForcePathStyle: cfg.Media.ObjectStorageForcePathStyle,
+		}
+	}
+	egressClient := call.NewEgressClient(call.LiveKitSettings{
+		URL:       cfg.LiveKit.URL,
+		APIKey:    cfg.LiveKit.APIKey,
+		APISecret: cfg.LiveKit.APISecret,
+		TokenTTL:  cfg.LiveKit.TokenTTL,
+	}, egressOutput)
+	recordingSvc.SetEgressClient(egressClient)
+	recordingSvc.SetBroadcaster(callSvc)
+	callSvc.SetEgressSink(recordingSvc)
+	callSvc.SetRecordingEnabled(egressClient != nil)
 
 	reliability.Supervise(ctx, "session_touch", func(c context.Context) {
 		authSvc.RunSessionTouchWorker(c, 30*time.Second)
@@ -493,7 +522,7 @@ func run() error {
 	channelHandler := httphandler.NewChannelHandler(chatSvc)
 	savedHandler := httphandler.NewSavedHandler(savedSvc)
 	messageHandler := httphandler.NewMessageHandler(chatSvc)
-	callHandler := httphandler.NewCallHandler(callSvc)
+	callHandler := httphandler.NewCallHandler(callSvc, guestSvc)
 	livekitWebhookHandler := httphandler.NewLiveKitWebhookHandler(
 		callSvc,
 		cfg.LiveKit.APIKey,

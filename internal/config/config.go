@@ -36,6 +36,8 @@ type LiveKitConfig struct {
 	WebhookPath              string        // public path that LiveKit posts to (default /livekit/webhook)
 	WebhookPreviousAPIKey    string        // previous webhook signing key accepted during rotation
 	WebhookPreviousAPISecret string        // previous webhook signing secret accepted during rotation
+	EgressEnabled            bool          // ALK-701: enable LiveKit Egress room-composite recording
+	EgressFileRoot           string        // ALK-701: dir inside the egress container bind-mounted to MEDIA_STORAGE_PATH (local output; default /out)
 }
 
 const DefaultLiveKitWebhookPath = "/livekit/webhook"
@@ -391,9 +393,9 @@ func Load() (*Config, error) {
 			AdaptiveEWMAAlpha:               envFloat("WEBRTC_ADAPTIVE_EWMA_ALPHA", 0.35),
 		},
 		LiveKit: LiveKitConfig{
-			URL:                      env("LIVEKIT_URL", ""),
-			APIKey:                   env("LIVEKIT_API_KEY", ""),
-			APISecret:                env("LIVEKIT_API_SECRET", ""),
+			URL:       env("LIVEKIT_URL", ""),
+			APIKey:    env("LIVEKIT_API_KEY", ""),
+			APISecret: env("LIVEKIT_API_SECRET", ""),
 			// Initial join-token lifetime. Kept short because LiveKit's server
 			// proactively refreshes a connected participant's token (rolling
 			// ~10m), so the call survives well past this; a cold rejoin
@@ -403,6 +405,8 @@ func Load() (*Config, error) {
 			WebhookPath:              env("LIVEKIT_WEBHOOK_PATH", DefaultLiveKitWebhookPath),
 			WebhookPreviousAPIKey:    env("LIVEKIT_WEBHOOK_PREVIOUS_API_KEY", ""),
 			WebhookPreviousAPISecret: env("LIVEKIT_WEBHOOK_PREVIOUS_API_SECRET", ""),
+			EgressEnabled:            envBool("LIVEKIT_EGRESS_ENABLED", false),
+			EgressFileRoot:           env("LIVEKIT_EGRESS_FILE_ROOT", "/out"),
 		},
 		Search: SearchConfig{
 			TextConfig:     env("SEARCH_TEXT_CONFIG", "simple"),

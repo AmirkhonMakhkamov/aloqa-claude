@@ -25,12 +25,20 @@ const (
 type LiveKitRoomClient interface {
 	EnsureRoom(ctx context.Context, args LiveKitEnsureRoomArgs) error
 	DeleteRoom(ctx context.Context, callID uuid.UUID) error
+	DeleteRoomByName(ctx context.Context, name string) error
 	RemoveParticipant(ctx context.Context, callID, userID uuid.UUID) error
 	ListParticipants(ctx context.Context, callID uuid.UUID) ([]*livekitpb.ParticipantInfo, error)
+	// UpdateParticipant replaces a connected participant's LiveKit permission so
+	// a grant/revoke applies at the media plane with no rejoin. (ALK-697)
+	UpdateParticipant(ctx context.Context, room, identity string, perm *livekitpb.ParticipantPermission) error
 }
 
 type LiveKitEnsureRoomArgs struct {
-	CallID          uuid.UUID
+	CallID uuid.UUID
+	// RoomName overrides the LiveKit room name. When empty it falls back to
+	// CallID.String() (the main-room convention). Breakout rooms pass the
+	// "{callID}:breakout:{breakoutRoomID}" scheme here.
+	RoomName        string
 	WorkspaceID     uuid.UUID
 	CallType        entity.CallType
 	MaxParticipants uint32
@@ -82,8 +90,13 @@ func (c *liveKitRoomServiceClient) EnsureRoom(ctx context.Context, args LiveKitE
 		emptyTimeout = uint32(defaultLiveKitEmptyTimeout.Seconds())
 	}
 
+	name := args.RoomName
+	if name == "" {
+		name = args.CallID.String()
+	}
+
 	_, err := c.client.CreateRoom(ctx, &livekitpb.CreateRoomRequest{
-		Name:            args.CallID.String(),
+		Name:            name,
 		EmptyTimeout:    emptyTimeout,
 		MaxParticipants: args.MaxParticipants,
 		Metadata:        args.Metadata,
@@ -96,7 +109,7 @@ func (c *liveKitRoomServiceClient) EnsureRoom(ctx context.Context, args LiveKitE
 	}
 
 	_, updateErr := c.client.UpdateRoomMetadata(ctx, &livekitpb.UpdateRoomMetadataRequest{
-		Room:     args.CallID.String(),
+		Room:     name,
 		Metadata: args.Metadata,
 	})
 	if updateErr != nil {
@@ -106,7 +119,13 @@ func (c *liveKitRoomServiceClient) EnsureRoom(ctx context.Context, args LiveKitE
 }
 
 func (c *liveKitRoomServiceClient) DeleteRoom(ctx context.Context, callID uuid.UUID) error {
-	_, err := c.client.DeleteRoom(ctx, &livekitpb.DeleteRoomRequest{Room: callID.String()})
+	return c.DeleteRoomByName(ctx, callID.String())
+}
+
+// DeleteRoomByName deletes a LiveKit room by its raw name. Used for breakout
+// rooms whose names are not bare call UUIDs. NotFound is swallowed (idempotent).
+func (c *liveKitRoomServiceClient) DeleteRoomByName(ctx context.Context, name string) error {
+	_, err := c.client.DeleteRoom(ctx, &livekitpb.DeleteRoomRequest{Room: name})
 	if isTwirpCode(err, twirp.NotFound) {
 		return nil
 	}
@@ -139,6 +158,18 @@ func (c *liveKitRoomServiceClient) ListParticipants(ctx context.Context, callID 
 		return nil, mapTwirpErrorToAppError(err, "failed to list livekit participants")
 	}
 	return resp.GetParticipants(), nil
+}
+
+func (c *liveKitRoomServiceClient) UpdateParticipant(ctx context.Context, room, identity string, perm *livekitpb.ParticipantPermission) error {
+	_, err := c.client.UpdateParticipant(ctx, &livekitpb.UpdateParticipantRequest{
+		Room:       room,
+		Identity:   identity,
+		Permission: perm,
+	})
+	if err != nil {
+		return mapTwirpErrorToAppError(err, "failed to update livekit participant")
+	}
+	return nil
 }
 
 func isTwirpCode(err error, code twirp.ErrorCode) bool {

@@ -246,7 +246,7 @@ func newCallInteractionHTTPRouterWithMediaConfig(workspaceID, callID, userID uui
 		Account:          &AccountHandler{},
 		Channels:         &ChannelHandler{},
 		Messages:         &MessageHandler{},
-		Calls:            NewCallHandler(svc),
+		Calls:            NewCallHandler(svc, nil),
 		Breakout:         &BreakoutHandler{},
 		Files:            &FileHandler{},
 		Presence:         &PresenceHandler{},
@@ -464,6 +464,22 @@ func (r *httpCallRepo) TransferHost(context.Context, uuid.UUID, uuid.UUID, uuid.
 }
 func (r *httpCallRepo) UpdateParticipantMedia(context.Context, uuid.UUID, bool, bool, bool) error {
 	return nil
+}
+func (r *httpCallRepo) SetCanScreenShare(_ context.Context, id uuid.UUID, canShare bool) error {
+	for _, p := range r.participants {
+		if p.ID == id {
+			p.CanScreenShare = canShare
+			return nil
+		}
+	}
+	return cerrors.NotFound("call participant not found")
+}
+func (r *httpCallRepo) SetFeaturedShareUserID(_ context.Context, callID uuid.UUID, userID *uuid.UUID) error {
+	if c := r.calls[callID]; c != nil {
+		c.FeaturedShareUserID = userID
+		return nil
+	}
+	return cerrors.NotFound("call not found")
 }
 func (r *httpCallRepo) RemoveParticipant(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 

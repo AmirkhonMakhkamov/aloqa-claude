@@ -73,6 +73,7 @@ type Recording struct {
 	MaxProcessingAttempts int                  `json:"max_processing_attempts"`
 	LastError             string               `json:"last_error,omitempty"`
 	Metadata              map[string]any       `json:"metadata,omitempty"`
+	EgressID              *string              `json:"egress_id,omitempty"` // LiveKit Egress job id (ALK-701)
 	LegalHold             bool                 `json:"legal_hold"`
 	StartedAt             time.Time            `json:"started_at"`
 	StoppedAt             *time.Time           `json:"stopped_at,omitempty"`

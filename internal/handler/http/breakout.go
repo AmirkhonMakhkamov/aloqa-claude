@@ -2,6 +2,7 @@ package http
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -9,6 +10,34 @@ import (
 	"aloqa/internal/pkg/id"
 	"aloqa/internal/service/call"
 )
+
+// JoinBreakoutRoomResponse carries the LiveKit connection info the FE needs to
+// (re)connect to the breakout (or, for Return, the main) room. Mirrors
+// JoinCallResponse minus the participant row. Fields are omitted when LiveKit
+// is not configured.
+type JoinBreakoutRoomResponse struct {
+	LivekitURL     string     `json:"livekit_url,omitempty"`
+	AccessToken    string     `json:"access_token,omitempty"`
+	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
+	TokenExpiresAt *time.Time `json:"token_expires_at,omitempty"`
+	RefreshAfter   *time.Time `json:"refresh_after,omitempty"`
+}
+
+func breakoutJoinResponse(info *call.LiveKitJoinInfo) JoinBreakoutRoomResponse {
+	resp := JoinBreakoutRoomResponse{}
+	if info == nil {
+		return resp
+	}
+	resp.LivekitURL = info.URL
+	resp.AccessToken = info.AccessToken
+	expires := info.ExpiresAt
+	tokenExpires := info.TokenExpiresAt
+	refreshAfter := info.RefreshAfter
+	resp.ExpiresAt = &expires
+	resp.TokenExpiresAt = &tokenExpires
+	resp.RefreshAfter = &refreshAfter
+	return resp
+}
 
 // BreakoutHandler handles breakout room HTTP endpoints.
 type BreakoutHandler struct {
@@ -96,12 +125,13 @@ func (h *BreakoutHandler) Join(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.svc.JoinBreakoutRoom(r.Context(), callID, userID, roomID); err != nil {
+	info, err := h.svc.JoinBreakoutRoom(r.Context(), callID, userID, roomID)
+	if err != nil {
 		writeErr(w, err)
 		return
 	}
 
-	writeNoContent(w)
+	writeOK(w, breakoutJoinResponse(info))
 }
 
 func (h *BreakoutHandler) Return(w http.ResponseWriter, r *http.Request) {
@@ -118,12 +148,13 @@ func (h *BreakoutHandler) Return(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.svc.ReturnToMainRoom(r.Context(), callID, userID); err != nil {
+	info, err := h.svc.ReturnToMainRoom(r.Context(), callID, userID)
+	if err != nil {
 		writeErr(w, err)
 		return
 	}
 
-	writeNoContent(w)
+	writeOK(w, breakoutJoinResponse(info))
 }
 
 func (h *BreakoutHandler) Close(w http.ResponseWriter, r *http.Request) {

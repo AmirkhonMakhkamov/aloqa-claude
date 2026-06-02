@@ -1059,6 +1059,11 @@ paths:
       summary: Current user joins the call
       tags: [calls]
       security: [{ bearerAuth: [] }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/JoinCallRequest' }
       responses:
         '200':
           description: Joined participant entry
@@ -1941,6 +1946,16 @@ components:
       description: Reason a participant was marked disconnected.
       enum: [left, timeout, declined, missed]
 
+    CallEntryMode:
+      type: string
+      description: |
+        How a non-guest member enters a call (set at creation):
+        `manual_admit` holds them in the waiting room until a host admits them,
+        `password` requires the join password, `open` lets them join directly.
+        Guests (one-time link) always pass through the waiting room and bypass
+        the password.
+      enum: [manual_admit, password, open]
+
     CallSettings:
       type: object
       description: Per-call feature toggles. Mirrors aloqa-claude entity.CallSettings.
@@ -1955,6 +1970,7 @@ components:
           max_participants,
           e2ee,
           watermark,
+          entry_mode,
         ]
       properties:
         waiting_room:
@@ -1984,6 +2000,8 @@ components:
         watermark:
           type: boolean
           description: Render a per-user watermark on video tiles.
+        entry_mode:
+          $ref: '#/components/schemas/CallEntryMode'
 
     StartCallSettings:
       type: object
@@ -2016,6 +2034,15 @@ components:
         watermark:
           type: boolean
           description: Render a per-user watermark on video tiles.
+        entry_mode:
+          $ref: '#/components/schemas/CallEntryMode'
+        password:
+          type: string
+          maxLength: 128
+          writeOnly: true
+          description: |
+            Join password for password entry mode (write-only, hashed
+            server-side, never returned). Required when entry_mode is "password".
 
     Call:
       type: object
@@ -2190,6 +2217,18 @@ components:
           properties:
             call: { $ref: '#/components/schemas/Call' }
         - $ref: '#/components/schemas/LiveKitConnection'
+
+    JoinCallRequest:
+      type: object
+      description: |
+        Optional join body. Send `password` only when the call's entry_mode is
+        "password"; manual_admit/open joins may omit the body entirely.
+      properties:
+        password:
+          type: string
+          maxLength: 128
+          writeOnly: true
+          description: The call's join password (verified server-side).
 
     JoinCallResponse:
       allOf:

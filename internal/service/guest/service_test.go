@@ -435,6 +435,99 @@ func TestResolveInvite(t *testing.T) {
 	})
 }
 
+// A call-scoped invite whose target call has ALREADY ENDED must resolve as
+// invalid (mirroring RedeemInvite's hard reject) and leak no call/workspace
+// metadata — otherwise the FE shows a joinable state for a dead link. (unified
+// guest link)
+func TestResolveInviteEndedCallIsInvalid(t *testing.T) {
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	expiresAt := time.Now().Add(time.Hour)
+
+	invites := &fakeInviteRepo{byToken: map[string]*entity.GuestInvite{
+		"call-token": {
+			ID:          uuid.New(),
+			WorkspaceID: workspaceID,
+			Token:       "call-token",
+			CallID:      &callID,
+			MaxUses:     100,
+			Status:      entity.GuestInviteStatusActive,
+			ExpiresAt:   expiresAt,
+		},
+	}}
+	svc := NewService(invites, &fakeGuestAccessRepo{}, &fakeUserRepo{}, &fakeWorkspaceRepo{}, &fakeChannelRepo{}, nil)
+	svc.SetCallLookup(&fakeCallLookup{call: &entity.Call{ID: callID, WorkspaceID: workspaceID, Status: entity.CallStatusEnded, Title: "Standup"}})
+
+	res, err := svc.ResolveInvite(context.Background(), "call-token", uuid.Nil)
+	if err != nil {
+		t.Fatalf("ResolveInvite returned error for ended call: %v", err)
+	}
+	if res.Valid {
+		t.Fatalf("Valid = true for ended-call invite, want false")
+	}
+	if res.WorkspaceID != uuid.Nil || res.CallID != nil || res.CallTitle != "" {
+		t.Fatalf("ended-call invite leaked metadata: %+v", res)
+	}
+}
+
+// A call-scoped invite whose target call no longer exists resolves as invalid.
+func TestResolveInviteMissingCallIsInvalid(t *testing.T) {
+	workspaceID := uuid.New()
+	callID := uuid.New()
+
+	invites := &fakeInviteRepo{byToken: map[string]*entity.GuestInvite{
+		"call-token": {
+			ID:          uuid.New(),
+			WorkspaceID: workspaceID,
+			Token:       "call-token",
+			CallID:      &callID,
+			MaxUses:     100,
+			Status:      entity.GuestInviteStatusActive,
+			ExpiresAt:   time.Now().Add(time.Hour),
+		},
+	}}
+	svc := NewService(invites, &fakeGuestAccessRepo{}, &fakeUserRepo{}, &fakeWorkspaceRepo{}, &fakeChannelRepo{}, nil)
+	svc.SetCallLookup(&fakeCallLookup{call: nil}) // GetByID -> NotFound
+
+	res, err := svc.ResolveInvite(context.Background(), "call-token", uuid.Nil)
+	if err != nil {
+		t.Fatalf("ResolveInvite returned error for missing call: %v", err)
+	}
+	if res.Valid {
+		t.Fatalf("Valid = true for missing-call invite, want false")
+	}
+}
+
+// A transient / internal GetByToken error (DB down) must surface as an error so
+// the handler returns 5xx, NOT be silently collapsed to valid:false (which would
+// mask the outage and downgrade a member's good link to the guest form). A
+// genuine NotFound still returns valid:false. (unified guest link)
+func TestResolveInviteSurfacesTransientLookupError(t *testing.T) {
+	workspaceID := uuid.New()
+
+	t.Run("transient GetByToken error surfaces", func(t *testing.T) {
+		invites := &fakeInviteRepo{getByTokenErr: cerrors.Internal("db down", nil)}
+		svc := NewService(invites, &fakeGuestAccessRepo{}, &fakeUserRepo{}, &fakeWorkspaceRepo{}, &fakeChannelRepo{}, nil)
+
+		_, err := svc.ResolveInvite(context.Background(), "any-token", uuid.Nil)
+		requireAppErrorCode(t, err, cerrors.CodeInternal)
+	})
+
+	t.Run("not-found GetByToken still resolves invalid", func(t *testing.T) {
+		invites := &fakeInviteRepo{byToken: map[string]*entity.GuestInvite{}}
+		svc := NewService(invites, &fakeGuestAccessRepo{}, &fakeUserRepo{}, &fakeWorkspaceRepo{}, &fakeChannelRepo{}, nil)
+
+		res, err := svc.ResolveInvite(context.Background(), "missing", uuid.Nil)
+		if err != nil {
+			t.Fatalf("ResolveInvite returned error for not-found token: %v", err)
+		}
+		if res.Valid {
+			t.Fatalf("Valid = true for not-found token, want false")
+		}
+		_ = workspaceID
+	})
+}
+
 type fakeCallLookup struct {
 	call *entity.Call
 }
@@ -458,8 +551,9 @@ func requireAppErrorCode(t *testing.T, err error, code cerrors.Code) {
 }
 
 type fakeInviteRepo struct {
-	created *entity.GuestInvite
-	byToken map[string]*entity.GuestInvite
+	created       *entity.GuestInvite
+	byToken       map[string]*entity.GuestInvite
+	getByTokenErr error
 }
 
 func (r *fakeInviteRepo) Create(_ context.Context, invite *entity.GuestInvite) error {
@@ -468,6 +562,9 @@ func (r *fakeInviteRepo) Create(_ context.Context, invite *entity.GuestInvite) e
 }
 
 func (r *fakeInviteRepo) GetByToken(_ context.Context, token string) (*entity.GuestInvite, error) {
+	if r.getByTokenErr != nil {
+		return nil, r.getByTokenErr
+	}
 	if invite := r.byToken[token]; invite != nil {
 		return invite, nil
 	}

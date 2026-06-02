@@ -74,6 +74,27 @@ func (c *Checker) HasCallAccess(ctx context.Context, workspaceID, callID, userID
 	return false, nil
 }
 
+// EvaluateCallAccess loads the active grants ONCE and derives both the is-guest
+// flag and whether the user holds a grant scoped to the given call. It collapses
+// the IsGuest + HasCallAccess pair into a single grants query for the hot
+// requireCallAccess guest branch (unified guest link). isGuest is true when the
+// user holds ANY active grant (channel OR call scoped); hasCallAccess is true
+// only when an active grant is scoped to callID.
+func (c *Checker) EvaluateCallAccess(ctx context.Context, workspaceID, callID, userID uuid.UUID) (isGuest, hasCallAccess bool, err error) {
+	grants, err := c.activeGrants(ctx, workspaceID, userID)
+	if err != nil {
+		return false, false, err
+	}
+	for _, grant := range grants {
+		isGuest = true
+		if grant.AllowsCall(callID) {
+			hasCallAccess = true
+			break
+		}
+	}
+	return isGuest, hasCallAccess, nil
+}
+
 func (c *Checker) activeGrants(ctx context.Context, workspaceID, userID uuid.UUID) ([]entityGrant, error) {
 	if c == nil || c.grants == nil {
 		return nil, nil

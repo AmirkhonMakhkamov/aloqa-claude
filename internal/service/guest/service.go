@@ -384,25 +384,45 @@ func (s *Service) ResolveInvite(ctx context.Context, token string, optionalUserI
 
 	invite, err := s.invites.GetByToken(ctx, token)
 	if err != nil {
-		// Unknown token: invalid, not an error.
-		return &ResolveInviteResult{Valid: false}, nil
+		// A genuine not-found token is an expected invalid state, not a failure.
+		// Any OTHER error (transient DB / internal) must surface so the handler
+		// returns 5xx — collapsing it to valid:false would mask the outage and
+		// downgrade a member's good link to the guest entry form. (unified guest link)
+		if isNotFound(err) {
+			return &ResolveInviteResult{Valid: false}, nil
+		}
+		return nil, err
 	}
 	if !invite.IsValid() {
 		return &ResolveInviteResult{Valid: false}, nil
+	}
+
+	// Mirror RedeemInvite's call-status pre-check: a call-scoped invite whose
+	// target call has ended (or no longer exists) can never grant access, so it
+	// must resolve as invalid with NO call/workspace metadata leaked — otherwise
+	// the FE shows a joinable state for a dead link. Only a transient lookup error
+	// surfaces as an error. (unified guest link)
+	var callTitle string
+	if invite.CallID != nil && s.calls != nil {
+		call, callErr := s.calls.GetByID(ctx, *invite.CallID)
+		if callErr != nil {
+			if isNotFound(callErr) {
+				return &ResolveInviteResult{Valid: false}, nil
+			}
+			return nil, callErr
+		}
+		if call == nil || call.Status == entity.CallStatusEnded {
+			return &ResolveInviteResult{Valid: false}, nil
+		}
+		callTitle = call.Title
 	}
 
 	result := &ResolveInviteResult{
 		Valid:       true,
 		WorkspaceID: invite.WorkspaceID,
 		CallID:      invite.CallID,
+		CallTitle:   callTitle,
 		ExpiresAt:   invite.ExpiresAt,
-	}
-
-	// Resolve the call title (best effort: a missing call must not fail resolve).
-	if invite.CallID != nil && s.calls != nil {
-		if call, callErr := s.calls.GetByID(ctx, *invite.CallID); callErr == nil && call != nil {
-			result.CallTitle = call.Title
-		}
 	}
 
 	// Membership is only meaningful (and only disclosed) for an authenticated

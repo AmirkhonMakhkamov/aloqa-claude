@@ -253,7 +253,10 @@ func (s *Service) isGuestUser(ctx context.Context, workspaceID, userID uuid.UUID
 
 // AuthorizeGuestLink validates that userID may mint a guest link for the call:
 // it must be an active (non-ended) call the user can access as host/co-host.
-// Returns the call so the handler can scope the invite to its channel (ALK-700).
+// Returns the call for the host/co-host + active-call authorization only; guest
+// links are now call-scoped for ANY call type, so the invite is no longer scoped
+// to the call's channel (the returned call's ChannelID is not consulted by the
+// caller). (unified guest link)
 func (s *Service) AuthorizeGuestLink(ctx context.Context, workspaceID, callID, userID uuid.UUID) (*entity.Call, error) {
 	call, err := s.requireCallAccess(ctx, workspaceID, callID, userID)
 	if err != nil {
@@ -341,24 +344,38 @@ func (s *Service) requireCallAccess(ctx context.Context, workspaceID, callID, us
 	// (CallID == nil) keeps a non-call workspace grant, so falls through to the
 	// channel/workspace member logic below which honours it via HasChannelAccess.
 	// (unified guest link)
-	if s.isGuestUser(ctx, call.WorkspaceID, userID) {
-		hasCall, aerr := s.guests.HasCallAccess(ctx, call.WorkspaceID, callID, userID)
-		if aerr != nil {
-			return nil, aerr
+	// Members never enter the guest branch (member latency is unchanged): a
+	// member short-circuits here on GetMember exactly as isGuestUser does.
+	isMember := false
+	if _, merr := s.members.GetMember(ctx, call.WorkspaceID, userID); merr == nil {
+		isMember = true
+	}
+	if !isMember && s.guests != nil {
+		// One grants query derives BOTH the is-guest flag and per-call access,
+		// instead of separate IsGuest + HasCallAccess round-trips on this hot path.
+		isGuest, hasCall, gerr := s.guests.EvaluateCallAccess(ctx, call.WorkspaceID, callID, userID)
+		if gerr != nil {
+			return nil, gerr
 		}
-		if hasCall {
-			return call, nil
+		if isGuest {
+			if hasCall {
+				return call, nil
+			}
+			// A call-scoped guest holds only call grants; a legacy channel guest
+			// holds at least one non-call workspace grant. Re-use HasWorkspaceAccess
+			// (a cached/cheap second derivation) only to distinguish the two — a
+			// legacy guest falls through to the channel/workspace branch, while a
+			// pure call-scoped guest on a call they were NOT invited to is hard-denied
+			// so they can never see any other call or channel.
+			hasLegacy, werr := s.guests.HasWorkspaceAccess(ctx, call.WorkspaceID, userID)
+			if werr != nil {
+				return nil, werr
+			}
+			if !hasLegacy {
+				return nil, cerrors.Forbidden("you do not have access to this call")
+			}
+			// Legacy channel guest: continue to the channel/workspace branches.
 		}
-		hasLegacy, werr := s.guests.HasWorkspaceAccess(ctx, call.WorkspaceID, userID)
-		if werr != nil {
-			return nil, werr
-		}
-		if !hasLegacy {
-			// Call-scoped guest on a call they were NOT invited to: hard-deny so
-			// they can never see any other call or channel.
-			return nil, cerrors.Forbidden("you do not have access to this call")
-		}
-		// Legacy channel guest: continue to the channel/workspace branches.
 	}
 	if call.ChannelID != nil {
 		ch, err := s.channels.GetByID(ctx, *call.ChannelID)

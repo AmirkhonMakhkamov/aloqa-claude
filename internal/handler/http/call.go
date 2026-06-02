@@ -126,6 +126,15 @@ type resolveInviteResponse struct {
 // fine (anonymous). An invalid / expired / used / revoked invite token returns
 // 200 with {"valid": false}, never an error. (unified guest link)
 func (h *CallHandler) ResolveGuestLink(w http.ResponseWriter, r *http.Request) {
+	// The public route is mounted on deps.Calls != nil, but this handler needs the
+	// guest service. CallHandler is legitimately built with a nil guest service in
+	// several callers (NewCallHandler(svc, nil)); fail closed with valid:false
+	// rather than risk a nil-deref panic on this public route. (unified guest link)
+	if h.guests == nil {
+		writeOK(w, resolveInviteResponse{Valid: false})
+		return
+	}
+
 	token := chi.URLParam(r, "token")
 
 	// Best-effort optional auth: only a Bearer header is honoured, and any parse

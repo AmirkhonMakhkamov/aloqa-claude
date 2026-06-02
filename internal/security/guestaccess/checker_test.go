@@ -114,6 +114,62 @@ func TestCheckerLegacyEmptyChannelGrantAllowsAllChannels(t *testing.T) {
 	}
 }
 
+// EvaluateCallAccess loads the active grants once and derives both the is-guest
+// flag and per-call access in a single pass. A call-scoped grant yields isGuest
+// true + hasCallAccess true for the granted call, and hasCallAccess false for
+// another call. A legacy channel grant yields isGuest true + hasCallAccess false.
+func TestCheckerEvaluateCallAccess(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	userID := uuid.New()
+	callID := uuid.New()
+	otherCall := uuid.New()
+
+	t.Run("call-scoped grant", func(t *testing.T) {
+		checker := NewChecker(&fakeGrantRepo{grants: []entity.GuestAccessGrant{{
+			ID:          uuid.New(),
+			WorkspaceID: workspaceID,
+			UserID:      userID,
+			CallID:      &callID,
+			ExpiresAt:   time.Now().Add(time.Hour),
+		}}})
+
+		isGuest, hasCall, err := checker.EvaluateCallAccess(ctx, workspaceID, callID, userID)
+		if err != nil || !isGuest || !hasCall {
+			t.Fatalf("EvaluateCallAccess(own) = (%v, %v, %v), want (true, true, nil)", isGuest, hasCall, err)
+		}
+
+		isGuest, hasCall, err = checker.EvaluateCallAccess(ctx, workspaceID, otherCall, userID)
+		if err != nil || !isGuest || hasCall {
+			t.Fatalf("EvaluateCallAccess(other) = (%v, %v, %v), want (true, false, nil)", isGuest, hasCall, err)
+		}
+	})
+
+	t.Run("legacy channel grant", func(t *testing.T) {
+		channelID := uuid.New()
+		checker := NewChecker(&fakeGrantRepo{grants: []entity.GuestAccessGrant{{
+			ID:          uuid.New(),
+			WorkspaceID: workspaceID,
+			UserID:      userID,
+			ChannelIDs:  []uuid.UUID{channelID},
+			ExpiresAt:   time.Now().Add(time.Hour),
+		}}})
+
+		isGuest, hasCall, err := checker.EvaluateCallAccess(ctx, workspaceID, callID, userID)
+		if err != nil || !isGuest || hasCall {
+			t.Fatalf("EvaluateCallAccess(legacy) = (%v, %v, %v), want (true, false, nil)", isGuest, hasCall, err)
+		}
+	})
+
+	t.Run("no grant", func(t *testing.T) {
+		checker := NewChecker(&fakeGrantRepo{})
+		isGuest, hasCall, err := checker.EvaluateCallAccess(ctx, workspaceID, callID, userID)
+		if err != nil || isGuest || hasCall {
+			t.Fatalf("EvaluateCallAccess(no grant) = (%v, %v, %v), want (false, false, nil)", isGuest, hasCall, err)
+		}
+	})
+}
+
 func TestCheckerNoGrant(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()

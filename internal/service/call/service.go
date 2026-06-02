@@ -518,6 +518,17 @@ func markParticipantDisconnected(participant *entity.CallParticipant, reason ent
 	participant.LeftReason = reason
 }
 
+// guestReconnectGrace is the window after a guest drops during which an
+// already-admitted guest may silently reconnect instead of re-knocking. It
+// absorbs transient disconnects and a stray /leave racing two waiting-room join
+// drivers (the admit→kick loop); a guest who left earlier than this still
+// re-knocks for host approval, preserving the ALK-700 forced-waiting rule.
+const guestReconnectGrace = 30 * time.Second
+
+func guestWithinReconnectGrace(participant *entity.CallParticipant) bool {
+	return participant.LeftAt != nil && time.Since(*participant.LeftAt) < guestReconnectGrace
+}
+
 func shouldAutoEndAfterLeave(call *entity.Call, participants []entity.CallParticipant) bool {
 	if call == nil || call.Status == entity.CallStatusEnded {
 		return false
@@ -600,6 +611,13 @@ func (s *Service) StartCall(
 	// Recording is only offerable when egress is configured server-side; advertise
 	// an honest capability so the FE control gate (settings.recording) is truthful (ALK-701).
 	settings.Recording = s.recordingEnabled
+	// Call chat is on for every call. Previously only the calendar flow set this,
+	// so ad-hoc/channel/DM calls were created with chat disabled and every message
+	// POST 403d with "call chat is disabled". Force it on here (server-authoritative,
+	// mirroring settings.Recording above) so all creation paths are consistent.
+	// There is no API to toggle chat per call today; if one is added, this becomes
+	// the default rather than an unconditional override.
+	settings.Chat = true
 	if err := s.requireWorkspaceMember(ctx, workspaceID, userID); err != nil {
 		return nil, err
 	}
@@ -777,8 +795,12 @@ func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid
 			return existing, nil
 		}
 		// A guest who is not already connected (e.g. left then returned with the
-		// same session) must re-knock rather than silently reconnect (ALK-700).
-		if guest && existing.Status != entity.ParticipantStatusConnected {
+		// same session) must re-knock rather than silently reconnect (ALK-700) —
+		// UNLESS they dropped within the reconnect grace window, in which case the
+		// rejoin is treated as a transient reconnect (defense in depth for the
+		// admit→kick loop where a stray /leave evicts a just-admitted guest).
+		if guest && existing.Status != entity.ParticipantStatusConnected &&
+			!guestWithinReconnectGrace(existing) {
 			if err := s.calls.UpdateParticipantStatus(ctx, existing.ID, entity.ParticipantStatusWaiting); err != nil {
 				slog.ErrorContext(ctx, "failed to return guest to waiting room", "participant_id", existing.ID, "error", err)
 				return nil, cerrors.Internal("failed to return guest to waiting room", err)
@@ -1642,6 +1664,56 @@ func (s *Service) TransferHost(ctx context.Context, workspaceID, callID, actorUs
 	s.publishParticipantEvent(ctx, event.TypeCallParticipantUpdated, call, target)
 
 	slog.InfoContext(ctx, "host transferred", "call_id", callID, "from", actorUserID, "to", targetUserID)
+	return nil
+}
+
+// RemoveParticipant lets the host evict another participant from the call. The
+// target is disconnected exactly as if they had left (CallParticipantLeft event
+// + LiveKit RemoveParticipant); a removed guest must re-knock to return. Only
+// the host may remove participants.
+func (s *Service) RemoveParticipant(ctx context.Context, workspaceID, callID, actorUserID, targetUserID uuid.UUID) error {
+	call, err := s.requireCallAccess(ctx, workspaceID, callID, actorUserID)
+	if err != nil {
+		return err
+	}
+	if call.Status == entity.CallStatusEnded {
+		return cerrors.Forbidden("call has already ended")
+	}
+	if actorUserID == targetUserID {
+		return cerrors.InvalidInput("cannot remove yourself; leave the call instead")
+	}
+
+	actor, err := s.calls.GetParticipant(ctx, callID, actorUserID)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return cerrors.Forbidden("actor is not a participant")
+		}
+		return cerrors.Internal("failed to get actor participant", err)
+	}
+	if actor.Role != entity.CallRoleHost {
+		return cerrors.Forbidden("only the host can remove participants")
+	}
+
+	target, err := s.calls.GetParticipant(ctx, callID, targetUserID)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return cerrors.NotFound("target participant not found")
+		}
+		return cerrors.Internal("failed to get target participant", err)
+	}
+
+	disconnected, err := disconnectParticipantIfConnected(ctx, s.calls, target.ID, entity.ParticipantLeftReasonLeft)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to remove participant", "call_id", callID, "target_user_id", targetUserID, "error", err)
+		return cerrors.Internal("failed to remove participant", err)
+	}
+	if disconnected {
+		markParticipantDisconnected(target, entity.ParticipantLeftReasonLeft)
+		s.publishParticipantEvent(ctx, event.TypeCallParticipantLeft, call, target)
+	}
+	s.removeLiveKitParticipantBestEffort(ctx, callID, targetUserID)
+
+	slog.InfoContext(ctx, "participant removed by host", "call_id", callID, "actor_user_id", actorUserID, "target_user_id", targetUserID)
 	return nil
 }
 

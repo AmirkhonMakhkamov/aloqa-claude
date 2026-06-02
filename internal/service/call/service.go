@@ -91,6 +91,7 @@ type CancelCallResult struct {
 type Service struct {
 	calls            repository.CallRepository
 	callMessages     repository.CallMessageRepository
+	messages         repository.MessageRepository
 	breakoutRooms    repository.BreakoutRoomRepository
 	channels         repository.ChannelRepository
 	members          repository.WorkspaceRepository
@@ -191,6 +192,13 @@ func (s *Service) SetMediaControlPlane(control MediaControlPlane) {
 
 func (s *Service) SetCallMessageRepo(repo repository.CallMessageRepository) {
 	s.callMessages = repo
+}
+
+// SetMessageRepo injects the chat message repository used to write a call-event
+// system message into the call's channel/DM timeline on the non-transactional
+// end path. The transactional path uses scope.Messages() instead.
+func (s *Service) SetMessageRepo(repo repository.MessageRepository) {
+	s.messages = repo
 }
 
 func (s *Service) SetTransactionManager(manager txscope.Manager) {
@@ -1209,6 +1217,8 @@ func (s *Service) LeaveCall(ctx context.Context, workspaceID, callID, userID uui
 		return &LeaveCallResult{AlreadyLeft: true}, nil
 	}
 	if autoEnded {
+		// Record the call in its channel/DM chat history (best-effort).
+		s.emitCallEndedChatMessage(ctx, call)
 		s.closeAllBreakoutSFURooms(ctx, callID)
 		s.deleteLiveKitRoomBestEffort(ctx, callID)
 		if s.sfu != nil {
@@ -1276,6 +1286,9 @@ func (s *Service) EndCall(ctx context.Context, workspaceID, callID, userID uuid.
 		markCallEnded(call, entity.CallEndReasonHostEnded)
 		s.publishCallEvent(ctx, event.TypeCallEnded, call, userID)
 	}
+
+	// Record the call in its channel/DM chat history (best-effort).
+	s.emitCallEndedChatMessage(ctx, call)
 
 	// Close all breakout rooms and their SFU rooms.
 	s.closeAllBreakoutSFURooms(ctx, callID)
@@ -1360,6 +1373,9 @@ func (s *Service) CancelCall(ctx context.Context, workspaceID, callID, userID uu
 	if !cancelled {
 		return &CancelCallResult{Ended: false}, nil
 	}
+
+	// Record the cancelled call in its channel/DM chat history (best-effort).
+	s.emitCallEndedChatMessage(ctx, call)
 
 	s.closeAllBreakoutSFURooms(ctx, callID)
 	s.deleteLiveKitRoomBestEffort(ctx, callID)

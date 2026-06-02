@@ -383,6 +383,7 @@ func run() error {
 	}, guestAccessChecker, collaborationAccessChecker)
 	callSvc.SetMediaControlPlane(mediaOpsSvc)
 	callSvc.SetCallMessageRepo(callMessageRepo)
+	callSvc.SetMessageRepo(messageRepo)
 	callSvc.SetTransactionManager(txManager)
 	callSvc.SetLiveKit(call.LiveKitSettings{
 		URL:       cfg.LiveKit.URL,

@@ -111,7 +111,7 @@ func (r *SavedRepo) FindSavedCopy(ctx context.Context, channelID, originalMessag
 	msg := &entity.Message{}
 	err := r.db.QueryRow(ctx, `
 		SELECT id, channel_id, user_id, parent_id, content, type, edited, edited_at, pinned, pinned_by, pinned_at,
-		       forwarded_from, saved_from, quoted_message_id, quoted_snapshot, created_at, updated_at, deleted_at
+		       forwarded_from, saved_from, quoted_message_id, quoted_snapshot, profile_share, created_at, updated_at, deleted_at
 		FROM messages
 		WHERE channel_id = $1
 		  AND saved_from->>'message_id' = $2
@@ -120,7 +120,7 @@ func (r *SavedRepo) FindSavedCopy(ctx context.Context, channelID, originalMessag
 		channelID, originalMessageID.String()).Scan(
 		&msg.ID, &msg.ChannelID, &msg.UserID, &msg.ParentID, &msg.Content, &msg.Type,
 		&msg.Edited, &msg.EditedAt, &msg.Pinned, &msg.PinnedBy, &msg.PinnedAt,
-		&msg.ForwardedFrom, &msg.SavedFrom, &msg.QuotedMessageID, &msg.QuotedSnapshot,
+		&msg.ForwardedFrom, &msg.SavedFrom, &msg.QuotedMessageID, &msg.QuotedSnapshot, &msg.ProfileShare,
 		&msg.CreatedAt, &msg.UpdatedAt, &msg.DeletedAt,
 	)
 	if err != nil {

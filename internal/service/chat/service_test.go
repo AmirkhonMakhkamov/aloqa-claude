@@ -759,6 +759,149 @@ func TestSendMessageForwardedFromValidationAndPersistence(t *testing.T) {
 	}
 }
 
+func TestSendMessageProfileShareBuildsSnapshotAndValidatesWorkspace(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	actorID := uuid.New()
+	targetID := uuid.New()
+	position := "Product Manager"
+	department := "Product"
+
+	tests := []struct {
+		name           string
+		channelType    entity.ChannelType
+		targetMember   *entity.WorkspaceMember
+		inputUserID    uuid.UUID
+		wantErrCode    cerrors.Code
+		wantErrMessage string
+	}{
+		{
+			name:        "dm share persists authoritative profile snapshot",
+			channelType: entity.ChannelTypeDM,
+			targetMember: &entity.WorkspaceMember{
+				WorkspaceID: workspaceID,
+				UserID:      targetID,
+				Role:        entity.WorkspaceRoleAdmin,
+				User: &entity.User{
+					ID:          targetID,
+					DisplayName: "Madina Karimova",
+					AvatarURL:   "https://cdn.test/madina.png",
+					Position:    &position,
+					Department:  &department,
+					Status:      entity.UserStatusActive,
+				},
+			},
+			inputUserID: targetID,
+		},
+		{
+			name:           "target must be in workspace",
+			channelType:    entity.ChannelTypeDM,
+			inputUserID:    targetID,
+			wantErrCode:    cerrors.CodeForbidden,
+			wantErrMessage: "shared profile is not a member of this workspace",
+		},
+		{
+			name:        "profile share is dm only",
+			channelType: entity.ChannelTypePublic,
+			targetMember: &entity.WorkspaceMember{
+				WorkspaceID: workspaceID,
+				UserID:      targetID,
+				Role:        entity.WorkspaceRoleMember,
+				User: &entity.User{
+					ID:          targetID,
+					DisplayName: "Madina Karimova",
+					Status:      entity.UserStatusActive,
+				},
+			},
+			inputUserID:    targetID,
+			wantErrCode:    cerrors.CodeForbidden,
+			wantErrMessage: "profile shares can only be sent to a direct message",
+		},
+		{
+			name:        "inactive profile cannot be shared",
+			channelType: entity.ChannelTypeDM,
+			targetMember: &entity.WorkspaceMember{
+				WorkspaceID: workspaceID,
+				UserID:      targetID,
+				Role:        entity.WorkspaceRoleMember,
+				User: &entity.User{
+					ID:          targetID,
+					DisplayName: "Madina Karimova",
+					Status:      entity.UserStatusDeactivated,
+				},
+			},
+			inputUserID:    targetID,
+			wantErrCode:    cerrors.CodeForbidden,
+			wantErrMessage: "shared profile is not active",
+		},
+		{
+			name:           "user id is required",
+			channelType:    entity.ChannelTypeDM,
+			inputUserID:    uuid.Nil,
+			wantErrCode:    cerrors.CodeInvalidInput,
+			wantErrMessage: "profile_share.user_id is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			channels := &fakeChannelRepo{
+				channels: map[uuid.UUID]*entity.Channel{
+					channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: tt.channelType},
+				},
+				members: map[[2]uuid.UUID]*entity.ChannelMember{
+					{channelID, actorID}: {ChannelID: channelID, UserID: actorID},
+				},
+			}
+			workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+				{workspaceID, actorID}: {WorkspaceID: workspaceID, UserID: actorID, Role: entity.WorkspaceRoleMember},
+			}}
+			if tt.targetMember != nil {
+				workspaces.members[[2]uuid.UUID{workspaceID, tt.targetMember.UserID}] = tt.targetMember
+			}
+			messages := &fakeMessageRepo{messages: map[uuid.UUID]*entity.Message{}}
+			svc := NewService(channels, messages, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+
+			msg, err := svc.SendMessage(ctx, channelID, actorID, SendMessageInput{
+				Content:      "",
+				ProfileShare: &ProfileShareInput{UserID: tt.inputUserID},
+			})
+			if tt.wantErrCode != "" {
+				if !hasCode(err, tt.wantErrCode) {
+					t.Fatalf("SendMessage error = %v, want code %s", err, tt.wantErrCode)
+				}
+				if err.Error() != string(tt.wantErrCode)+": "+tt.wantErrMessage {
+					t.Fatalf("SendMessage error = %q, want message %q", err.Error(), tt.wantErrMessage)
+				}
+				if len(messages.messages) != 0 {
+					t.Fatalf("created %d messages on invalid profile share, want 0", len(messages.messages))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("SendMessage returned error: %v", err)
+			}
+			if msg.ProfileShare == nil {
+				t.Fatalf("profile_share = nil, want value")
+			}
+			if msg.ProfileShare.UserID != targetID || msg.ProfileShare.WorkspaceID != workspaceID {
+				t.Fatalf("profile_share ids = %s/%s, want %s/%s", msg.ProfileShare.UserID, msg.ProfileShare.WorkspaceID, targetID, workspaceID)
+			}
+			snapshot := msg.ProfileShare.Snapshot
+			if snapshot.DisplayName != "Madina Karimova" || snapshot.AvatarURL != "https://cdn.test/madina.png" || snapshot.Role != entity.WorkspaceRoleAdmin {
+				t.Fatalf("profile_share snapshot = %+v, want target user snapshot", snapshot)
+			}
+			if snapshot.Position == nil || *snapshot.Position != position {
+				t.Fatalf("profile_share position = %v, want %q", snapshot.Position, position)
+			}
+			if snapshot.Department == nil || *snapshot.Department != department {
+				t.Fatalf("profile_share department = %v, want %q", snapshot.Department, department)
+			}
+		})
+	}
+}
+
 func TestEditMessageRejectsEmptyContent(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -1724,6 +1867,7 @@ func (r *fakeMessageRepo) SoftDelete(_ context.Context, id uuid.UUID) error {
 	msg.ForwardedFrom = nil
 	msg.QuotedMessageID = nil
 	msg.QuotedSnapshot = nil
+	msg.ProfileShare = nil
 	msg.UpdatedAt = now
 	msg.DeletedAt = &now
 	return nil

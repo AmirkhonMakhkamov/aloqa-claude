@@ -1393,6 +1393,8 @@ components:
         email: { type: string }
         display_name: { type: string }
         avatar_url: { type: string, nullable: true }
+        position: { type: string, nullable: true }
+        department: { type: string, nullable: true }
         status:
           type: string
           enum: [active, suspended, deactivated]
@@ -1538,6 +1540,11 @@ components:
           allOf:
             - $ref: '#/components/schemas/ForwardedFromMeta'
           nullable: true
+        profile_share:
+          description: Server-built internal user profile card payload.
+          allOf:
+            - $ref: '#/components/schemas/ProfileShare'
+          nullable: true
         reply_count: { type: integer, nullable: true }
         reactions:
           type: array
@@ -1558,7 +1565,7 @@ components:
       properties:
         content:
           type: string
-          description: Empty string is allowed when `forwarded_from` is present.
+          description: Empty string is allowed when `forwarded_from` or `profile_share` is present.
         type:
           type: string
           enum: [text, file]
@@ -1567,6 +1574,45 @@ components:
           allOf:
             - $ref: '#/components/schemas/ForwardedFromMeta'
           nullable: true
+        profile_share:
+          description: Send a workspace member profile card in a DM. The server builds the snapshot; clients send only the target user id.
+          allOf:
+            - $ref: '#/components/schemas/ProfileShareRequest'
+          nullable: true
+
+    ProfileShareRequest:
+      type: object
+      description: Client request to share an active workspace member profile.
+      required: [user_id]
+      properties:
+        user_id:
+          description: Target user whose profile should be shared.
+          $ref: '#/components/schemas/UUID'
+
+    ProfileShare:
+      type: object
+      description: Persisted internal profile-share payload. Snapshot fields are captured at send time.
+      required: [user_id, workspace_id, snapshot]
+      properties:
+        user_id:
+          $ref: '#/components/schemas/UUID'
+        workspace_id:
+          $ref: '#/components/schemas/UUID'
+        snapshot:
+          $ref: '#/components/schemas/ProfileShareSnapshot'
+
+    ProfileShareSnapshot:
+      type: object
+      description: Backend-generated profile details rendered by clients as a profile card.
+      required: [display_name, role]
+      properties:
+        display_name: { type: string }
+        avatar_url: { type: string, nullable: true }
+        role:
+          type: string
+          enum: [owner, admin, member, guest]
+        position: { type: string, nullable: true }
+        department: { type: string, nullable: true }
 
     ForwardedFromMeta:
       type: object

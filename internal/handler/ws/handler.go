@@ -223,6 +223,8 @@ func (h *Handler) handleMessage(ctx context.Context, client *platformws.Client, 
 		h.handleUnsubscribe(client, msg.Payload)
 	case "typing":
 		h.handleTyping(ctx, client, msg.Payload)
+	case "call_typing":
+		h.handleCallTyping(ctx, client, msg.Payload)
 	case "signal.offer", "signal.answer", "signal.candidate":
 		h.handleSignal(ctx, client, msg.Type, msg.Payload)
 	default:
@@ -301,6 +303,52 @@ func (h *Handler) handleTyping(ctx context.Context, client *platformws.Client, p
 
 	// Broadcast typing indicator to the channel room.
 	h.hub.BroadcastToRoom("channel:"+p.ChannelID, data)
+}
+
+type callTypingPayload struct {
+	WorkspaceID string `json:"workspace_id"`
+	CallID      string `json:"call_id"`
+}
+
+func (h *Handler) handleCallTyping(ctx context.Context, client *platformws.Client, payload json.RawMessage) {
+	var p callTypingPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return
+	}
+	workspaceID, err := uuid.Parse(p.WorkspaceID)
+	if err != nil {
+		h.sendError(client, "invalid workspace_id")
+		return
+	}
+	callID, err := uuid.Parse(p.CallID)
+	if err != nil {
+		h.sendError(client, "invalid call_id")
+		return
+	}
+	if h.callSvc == nil || h.hub == nil {
+		h.sendError(client, "websocket service unavailable")
+		return
+	}
+	if err := h.callSvc.CanAccessCall(ctx, workspaceID, callID, client.UserID); err != nil {
+		h.sendError(client, "you do not have access to this call")
+		return
+	}
+
+	evt := ServerMessage{
+		Type: string(event.TypeCallTypingStarted),
+		Payload: event.CallTypingPayload{
+			CallID: callID,
+			UserID: client.UserID,
+		},
+		Timestamp: time.Now().UTC(),
+	}
+
+	data, err := json.Marshal(evt)
+	if err != nil {
+		return
+	}
+
+	h.hub.BroadcastToRoom("aloqa.ws."+workspaceID.String(), data)
 }
 
 type signalPayload struct {

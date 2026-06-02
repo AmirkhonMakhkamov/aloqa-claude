@@ -2511,18 +2511,31 @@ func redactDeletedMessages(items []entity.Message) {
 }
 
 func (s *Service) hydrateMessageReactions(ctx context.Context, items []entity.Message) error {
+	messageIDs := make([]uuid.UUID, 0, len(items))
 	for i := range items {
 		if items[i].DeletedAt != nil {
 			items[i].Reactions = nil
 			continue
 		}
 
-		reactions, err := s.messages.ListReactions(ctx, items[i].ID)
-		if err != nil {
-			slog.ErrorContext(ctx, "failed to list message reactions", "message_id", items[i].ID, "error", err)
-			return cerrors.Internal("failed to list message reactions", err)
+		messageIDs = append(messageIDs, items[i].ID)
+	}
+	if len(messageIDs) == 0 {
+		return nil
+	}
+
+	reactionsByMessageID, err := s.messages.ListReactionsByMessageIDs(ctx, messageIDs)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to list message reactions", "message_count", len(messageIDs), "error", err)
+		return cerrors.Internal("failed to list message reactions", err)
+	}
+
+	for i := range items {
+		if items[i].DeletedAt != nil {
+			continue
 		}
-		items[i].Reactions = reactions
+
+		items[i].Reactions = reactionsByMessageID[items[i].ID]
 	}
 	return nil
 }

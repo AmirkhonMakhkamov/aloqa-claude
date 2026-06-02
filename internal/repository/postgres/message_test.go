@@ -219,6 +219,55 @@ func TestMessageRepoSoftDeleteWithCascadeFailureRollsBackPrimaryInOuterTx(t *tes
 	}
 }
 
+func TestMessageRepoListReactionsByMessageIDsBatchesAndGroups(t *testing.T) {
+	ctx, pool := setupMessageRepoPostgresTest(t)
+	env := setupMessageRepoTestEnv(t, ctx, pool)
+	repo := NewMessageRepo(pool)
+	first := newMessageRepoTestMessage(env.channelID, env.userID, messageRepoTestUUID(40), "first")
+	second := newMessageRepoTestMessage(env.channelID, env.userID, messageRepoTestUUID(41), "second")
+	other := newMessageRepoTestMessage(env.channelID, env.userID, messageRepoTestUUID(42), "other")
+
+	for _, msg := range []*entity.Message{first, second, other} {
+		if err := repo.Create(ctx, msg); err != nil {
+			t.Fatalf("create message %s: %v", msg.ID, err)
+		}
+	}
+
+	baseTime := time.Now().UTC()
+	firstLater := &entity.Reaction{ID: messageRepoTestUUID(43), MessageID: first.ID, UserID: env.userID, Emoji: "b", CreatedAt: baseTime.Add(time.Minute)}
+	firstEarlier := &entity.Reaction{ID: messageRepoTestUUID(44), MessageID: first.ID, UserID: env.userID, Emoji: "a", CreatedAt: baseTime}
+	secondReaction := &entity.Reaction{ID: messageRepoTestUUID(45), MessageID: second.ID, UserID: env.userID, Emoji: "c", CreatedAt: baseTime.Add(2 * time.Minute)}
+	otherReaction := &entity.Reaction{ID: messageRepoTestUUID(46), MessageID: other.ID, UserID: env.userID, Emoji: "d", CreatedAt: baseTime.Add(3 * time.Minute)}
+
+	for _, reaction := range []*entity.Reaction{firstLater, firstEarlier, secondReaction, otherReaction} {
+		if err := repo.AddReaction(ctx, reaction); err != nil {
+			t.Fatalf("add reaction %s: %v", reaction.ID, err)
+		}
+	}
+
+	got, err := repo.ListReactionsByMessageIDs(ctx, []uuid.UUID{first.ID, second.ID})
+	if err != nil {
+		t.Fatalf("ListReactionsByMessageIDs returned error: %v", err)
+	}
+	if got[first.ID][0].ID != firstEarlier.ID || got[first.ID][1].ID != firstLater.ID {
+		t.Fatalf("first message reactions = %+v, want created_at order", got[first.ID])
+	}
+	if len(got[second.ID]) != 1 || got[second.ID][0].ID != secondReaction.ID {
+		t.Fatalf("second message reactions = %+v, want %+v", got[second.ID], secondReaction)
+	}
+	if _, ok := got[other.ID]; ok {
+		t.Fatalf("got reactions for unrequested message %s", other.ID)
+	}
+
+	empty, err := repo.ListReactionsByMessageIDs(ctx, nil)
+	if err != nil {
+		t.Fatalf("empty ListReactionsByMessageIDs returned error: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("empty result = %+v, want empty map", empty)
+	}
+}
+
 func TestMessageForwardedFromMigrationUpDownIdempotent(t *testing.T) {
 	ctx, pool := setupMessageRepoPostgresTest(t)
 	env := setupMessageRepoTestEnv(t, ctx, pool)

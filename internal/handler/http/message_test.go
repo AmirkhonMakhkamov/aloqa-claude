@@ -933,6 +933,20 @@ func (r *messageHTTPMessageRepo) ListReactions(_ context.Context, messageID uuid
 	}
 	return reactions, nil
 }
+func (r *messageHTTPMessageRepo) ListReactionsByMessageIDs(_ context.Context, messageIDs []uuid.UUID) (map[uuid.UUID][]entity.Reaction, error) {
+	messageIDSet := make(map[uuid.UUID]struct{}, len(messageIDs))
+	for _, messageID := range messageIDs {
+		messageIDSet[messageID] = struct{}{}
+	}
+
+	reactionsByMessageID := make(map[uuid.UUID][]entity.Reaction, len(messageIDs))
+	for _, reaction := range r.reactions {
+		if _, ok := messageIDSet[reaction.MessageID]; ok {
+			reactionsByMessageID[reaction.MessageID] = append(reactionsByMessageID[reaction.MessageID], reaction)
+		}
+	}
+	return reactionsByMessageID, nil
+}
 func (r *messageHTTPMessageRepo) CreateAttachment(context.Context, *entity.Attachment) error {
 	return nil
 }

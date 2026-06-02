@@ -104,6 +104,7 @@ type MessageRepository interface {
 	RemoveReaction(ctx context.Context, messageID, userID uuid.UUID, emoji string) error
 	RemoveReactionByID(ctx context.Context, id uuid.UUID) error
 	ListReactions(ctx context.Context, messageID uuid.UUID) ([]entity.Reaction, error)
+	ListReactionsByMessageIDs(ctx context.Context, messageIDs []uuid.UUID) (map[uuid.UUID][]entity.Reaction, error)
 
 	CreateAttachment(ctx context.Context, a *entity.Attachment) error
 	DeleteAttachment(ctx context.Context, id uuid.UUID) error

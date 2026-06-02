@@ -1072,6 +1072,80 @@ func TestGetMessagesReturnsDeletedTombstoneWithoutContent(t *testing.T) {
 	}
 }
 
+func TestGetMessagesHydratesReactionsInSingleBatch(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	userID := uuid.New()
+	messageID := uuid.New()
+	secondMessageID := uuid.New()
+	deletedMessageID := uuid.New()
+	deletedAt := time.Now().UTC()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, userID}: {ChannelID: channelID, UserID: userID},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	messages := &fakeMessageRepo{
+		messages: map[uuid.UUID]*entity.Message{
+			messageID:        {ID: messageID, ChannelID: channelID, UserID: userID, Content: "one", CreatedAt: deletedAt.Add(-3 * time.Minute), UpdatedAt: deletedAt.Add(-3 * time.Minute)},
+			secondMessageID:  {ID: secondMessageID, ChannelID: channelID, UserID: userID, Content: "two", CreatedAt: deletedAt.Add(-2 * time.Minute), UpdatedAt: deletedAt.Add(-2 * time.Minute)},
+			deletedMessageID: {ID: deletedMessageID, ChannelID: channelID, UserID: userID, Content: "deleted", CreatedAt: deletedAt.Add(-time.Minute), UpdatedAt: deletedAt, DeletedAt: &deletedAt},
+		},
+		reactions: map[uuid.UUID]entity.Reaction{},
+	}
+	firstReaction := entity.Reaction{ID: uuid.New(), MessageID: messageID, UserID: userID, Emoji: "👍", CreatedAt: deletedAt.Add(-2 * time.Minute)}
+	secondReaction := entity.Reaction{ID: uuid.New(), MessageID: secondMessageID, UserID: userID, Emoji: "🚀", CreatedAt: deletedAt.Add(-time.Minute)}
+	deletedReaction := entity.Reaction{ID: uuid.New(), MessageID: deletedMessageID, UserID: userID, Emoji: "👀", CreatedAt: deletedAt}
+	messages.reactions[firstReaction.ID] = firstReaction
+	messages.reactions[secondReaction.ID] = secondReaction
+	messages.reactions[deletedReaction.ID] = deletedReaction
+
+	svc := NewService(channels, messages, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+
+	page, err := svc.GetMessages(ctx, channelID, userID, pagination.Params{Limit: 10})
+	if err != nil {
+		t.Fatalf("GetMessages returned error: %v", err)
+	}
+	if messages.listReactionsCalls != 0 {
+		t.Fatalf("ListReactions calls = %d, want 0", messages.listReactionsCalls)
+	}
+	if messages.listReactionsByMessageIDsCalls != 1 {
+		t.Fatalf("ListReactionsByMessageIDs calls = %d, want 1", messages.listReactionsByMessageIDsCalls)
+	}
+	if len(messages.lastListReactionsByMessageIDsArg) != 2 {
+		t.Fatalf("batch message IDs = %v, want only 2 non-deleted IDs", messages.lastListReactionsByMessageIDsArg)
+	}
+	batchedIDs := map[uuid.UUID]bool{}
+	for _, id := range messages.lastListReactionsByMessageIDsArg {
+		batchedIDs[id] = true
+	}
+	if !batchedIDs[messageID] || !batchedIDs[secondMessageID] || batchedIDs[deletedMessageID] {
+		t.Fatalf("batch message IDs = %v, want active IDs only", messages.lastListReactionsByMessageIDsArg)
+	}
+
+	gotByID := map[uuid.UUID]entity.Message{}
+	for _, msg := range page.Items {
+		gotByID[msg.ID] = msg
+	}
+	if gotByID[messageID].Reactions[0].ID != firstReaction.ID {
+		t.Fatalf("first message reactions = %+v, want %+v", gotByID[messageID].Reactions, firstReaction)
+	}
+	if gotByID[secondMessageID].Reactions[0].ID != secondReaction.ID {
+		t.Fatalf("second message reactions = %+v, want %+v", gotByID[secondMessageID].Reactions, secondReaction)
+	}
+	if gotByID[deletedMessageID].Reactions != nil {
+		t.Fatalf("deleted message reactions = %+v, want nil", gotByID[deletedMessageID].Reactions)
+	}
+}
+
 func TestDeleteMessagePublishesRedactedTombstone(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -1805,8 +1879,11 @@ func (r *fakeChannelRepo) GetDMChannel(context.Context, uuid.UUID, uuid.UUID, uu
 }
 
 type fakeMessageRepo struct {
-	messages  map[uuid.UUID]*entity.Message
-	reactions map[uuid.UUID]entity.Reaction
+	messages                         map[uuid.UUID]*entity.Message
+	reactions                        map[uuid.UUID]entity.Reaction
+	listReactionsCalls               int
+	listReactionsByMessageIDsCalls   int
+	lastListReactionsByMessageIDsArg []uuid.UUID
 }
 
 func (r *fakeMessageRepo) Create(_ context.Context, msg *entity.Message) error {
@@ -1937,6 +2014,7 @@ func (r *fakeMessageRepo) RemoveReactionByID(_ context.Context, id uuid.UUID) er
 	return nil
 }
 func (r *fakeMessageRepo) ListReactions(_ context.Context, messageID uuid.UUID) ([]entity.Reaction, error) {
+	r.listReactionsCalls++
 	var reactions []entity.Reaction
 	for _, reaction := range r.reactions {
 		if reaction.MessageID == messageID {
@@ -1944,6 +2022,22 @@ func (r *fakeMessageRepo) ListReactions(_ context.Context, messageID uuid.UUID) 
 		}
 	}
 	return reactions, nil
+}
+func (r *fakeMessageRepo) ListReactionsByMessageIDs(_ context.Context, messageIDs []uuid.UUID) (map[uuid.UUID][]entity.Reaction, error) {
+	r.listReactionsByMessageIDsCalls++
+	r.lastListReactionsByMessageIDsArg = append([]uuid.UUID(nil), messageIDs...)
+	messageIDSet := make(map[uuid.UUID]struct{}, len(messageIDs))
+	for _, messageID := range messageIDs {
+		messageIDSet[messageID] = struct{}{}
+	}
+
+	reactionsByMessageID := make(map[uuid.UUID][]entity.Reaction, len(messageIDs))
+	for _, reaction := range r.reactions {
+		if _, ok := messageIDSet[reaction.MessageID]; ok {
+			reactionsByMessageID[reaction.MessageID] = append(reactionsByMessageID[reaction.MessageID], reaction)
+		}
+	}
+	return reactionsByMessageID, nil
 }
 func (r *fakeMessageRepo) CreateAttachment(context.Context, *entity.Attachment) error { return nil }
 func (r *fakeMessageRepo) DeleteAttachment(context.Context, uuid.UUID) error          { return nil }

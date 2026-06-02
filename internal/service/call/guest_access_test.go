@@ -43,7 +43,7 @@ func TestRequireCallAccessCallScopedGuest(t *testing.T) {
 		ExpiresAt:   time.Now().Add(time.Hour),
 	}}})
 	// Empty workspace repo: the guest is NOT a member.
-	svc := NewService(calls, &fakeBreakoutRepo{}, channels, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), guests, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, channels, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), guests, nil)
 
 	// Their own call → allowed.
 	if _, err := svc.requireCallAccess(ctx, workspaceID, ownCallID, guestID); err != nil {
@@ -91,7 +91,7 @@ func TestRequireCallAccessMemberUnaffected(t *testing.T) {
 	}}
 	// An empty guest checker (no grants) — the member must never enter the guest branch.
 	guests := guestaccess.NewChecker(&fakeGuestAccessRepo{})
-	svc := NewService(calls, &fakeBreakoutRepo{}, channels, workspaces, noopPublisher{}, nil, mediaTestConfig(), guests, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, channels, workspaces, noopPublisher{}, nil, mediaTestConfig(), guests, nil)
 
 	if _, err := svc.requireCallAccess(ctx, workspaceID, channelLessCallID, memberID); err != nil {
 		t.Fatalf("requireCallAccess(member, channel-less) = %v, want nil", err)

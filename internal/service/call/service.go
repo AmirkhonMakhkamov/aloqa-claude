@@ -26,10 +26,6 @@ type EventPublisher interface {
 	Publish(ctx context.Context, subject string, data []byte) error
 }
 
-type RealtimeOutbox interface {
-	Enqueue(ctx context.Context, evt event.Event, body []byte, maxAttempts int) error
-}
-
 type CollaborationAccessAuthorizer interface {
 	AuthorizeCall(ctx context.Context, channelID, userID uuid.UUID) (collabaccess.Decision, error)
 }
@@ -100,7 +96,6 @@ type Service struct {
 	channels         repository.ChannelRepository
 	members          repository.WorkspaceRepository
 	pubsub           EventPublisher
-	realtimeOutbox   RealtimeOutbox
 	sfu              *sfu.SFU
 	media            MediaConfig
 	livekit          LiveKitSettings
@@ -167,7 +162,6 @@ func NewService(
 	media MediaConfig,
 	guests *guestaccess.Checker,
 	collab CollaborationAccessAuthorizer,
-	realtimeOutbox RealtimeOutbox,
 ) *Service {
 	if media.TokenTTL <= 0 {
 		media.TokenTTL = 5 * time.Minute
@@ -176,16 +170,15 @@ func NewService(
 		media.DefaultWebinarPresenters = sfu.DefaultMaxPresenters
 	}
 	return &Service{
-		calls:          calls,
-		breakoutRooms:  breakoutRooms,
-		channels:       channels,
-		members:        members,
-		pubsub:         pubsub,
-		realtimeOutbox: realtimeOutbox,
-		sfu:            sfuServer,
-		media:          media,
-		guests:         guests,
-		collab:         collab,
+		calls:         calls,
+		breakoutRooms: breakoutRooms,
+		channels:      channels,
+		members:       members,
+		pubsub:        pubsub,
+		sfu:           sfuServer,
+		media:         media,
+		guests:        guests,
+		collab:        collab,
 	}
 }
 
@@ -1996,7 +1989,7 @@ func (s *Service) enqueueCallEventTx(ctx context.Context, scope txscope.Scope, e
 	if call != nil && call.ChannelID != nil {
 		channelID = *call.ChannelID
 	}
-	return s.enqueueRealtimeTx(ctx, scope, evtType, fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID), call.WorkspaceID, channelID, userID, event.CallPayload{Call: call})
+	return s.enqueueDurableEventTx(ctx, scope, evtType, fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID), call.WorkspaceID, channelID, userID, event.CallPayload{Call: call})
 }
 
 func (s *Service) enqueueParticipantEventTx(ctx context.Context, scope txscope.Scope, evtType event.Type, call *entity.Call, p *entity.CallParticipant) error {
@@ -2004,7 +1997,7 @@ func (s *Service) enqueueParticipantEventTx(ctx context.Context, scope txscope.S
 	if call != nil && call.ChannelID != nil {
 		channelID = *call.ChannelID
 	}
-	return s.enqueueRealtimeTx(ctx, scope, evtType, fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID), call.WorkspaceID, channelID, p.UserID, event.CallParticipantPayload{
+	return s.enqueueDurableEventTx(ctx, scope, evtType, fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID), call.WorkspaceID, channelID, p.UserID, event.CallParticipantPayload{
 		CallID:      call.ID,
 		Participant: p,
 	})
@@ -2017,7 +2010,7 @@ func (s *Service) enqueueCallMessageEventTx(ctx context.Context, scope txscope.S
 	}
 	subject := fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID)
 	payload := callMessagePayloadFor(evtType, call, msg)
-	return s.enqueueRealtimeTx(ctx, scope, evtType, subject, call.WorkspaceID, channelID, msg.SenderID, payload)
+	return s.enqueueDurableEventTx(ctx, scope, evtType, subject, call.WorkspaceID, channelID, msg.SenderID, payload)
 }
 
 func callMessagePayloadFor(evtType event.Type, call *entity.Call, msg *entity.CallMessage) any {
@@ -2027,7 +2020,7 @@ func callMessagePayloadFor(evtType event.Type, call *entity.Call, msg *entity.Ca
 	return event.CallMessagePayload{CallID: call.ID, Message: *msg}
 }
 
-func (s *Service) enqueueRealtimeTx(ctx context.Context, scope txscope.Scope, evtType event.Type, subject string, workspaceID, channelID, userID uuid.UUID, payload any) error {
+func (s *Service) enqueueDurableEventTx(ctx context.Context, scope txscope.Scope, evtType event.Type, subject string, workspaceID, channelID, userID uuid.UUID, payload any) error {
 	if scope == nil {
 		return cerrors.Unavailable("transaction scope is not configured")
 	}
@@ -2043,38 +2036,11 @@ func (s *Service) enqueueRealtimeTx(ctx context.Context, scope txscope.Scope, ev
 		return err
 	}
 	if !durable {
-		slog.WarnContext(ctx, "enqueueRealtimeTx invoked for non-durable event; skipping outbox enqueue",
+		slog.WarnContext(ctx, "enqueueDurableEventTx invoked for non-durable event; skipping outbox enqueue",
 			"type", evtType, "subject", subject)
 		return nil
 	}
 	return scope.EnqueueRealtime(ctx, evt, body)
-}
-
-func (s *Service) enqueueRealtime(ctx context.Context, evtType event.Type, subject string, workspaceID, channelID, userID uuid.UUID, payload any) {
-	evt, body, durable, err := event.Prepare(subject, event.Event{
-		Type:        evtType,
-		WorkspaceID: workspaceID,
-		ChannelID:   channelID,
-		UserID:      userID,
-		Timestamp:   time.Now(),
-		Payload:     payload,
-	})
-	if err != nil {
-		slog.ErrorContext(ctx, "failed to prepare realtime event", "type", evtType, "subject", subject, "error", err)
-		return
-	}
-	if !durable {
-		slog.WarnContext(ctx, "enqueueRealtime invoked for non-durable event; skipping outbox enqueue",
-			"type", evtType, "subject", subject)
-		return
-	}
-	if s.realtimeOutbox == nil {
-		s.doPublish(ctx, evtType, subject, workspaceID, channelID, userID, payload)
-		return
-	}
-	if err := s.realtimeOutbox.Enqueue(ctx, evt, body, 0); err != nil {
-		slog.ErrorContext(ctx, "failed to enqueue realtime event", "type", evtType, "subject", subject, "error", err)
-	}
 }
 
 func (s *Service) doPublish(ctx context.Context, evtType event.Type, subject string, workspaceID, channelID, userID uuid.UUID, payload any) {

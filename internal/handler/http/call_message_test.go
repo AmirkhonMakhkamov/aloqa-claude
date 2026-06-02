@@ -162,7 +162,7 @@ func newCallMessageHTTPFixture() callMessageHTTPFixture {
 		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
 	}}
 	messages := &fakeHTTPCallMessageRepo{messages: map[uuid.UUID]*entity.CallMessage{}}
-	svc := callsvc.NewService(calls, fakeHTTPBreakoutRepo{}, fakeHTTPChannelRepo{}, workspaces, noopHTTPPublisher{}, nil, callsvc.MediaConfig{TokenSecret: []byte("01234567890123456789012345678901")}, nil, nil, nil)
+	svc := callsvc.NewService(calls, fakeHTTPBreakoutRepo{}, fakeHTTPChannelRepo{}, workspaces, noopHTTPPublisher{}, nil, callsvc.MediaConfig{TokenSecret: []byte("01234567890123456789012345678901")}, nil, nil)
 	svc.SetCallMessageRepo(messages)
 	handler := NewCallHandler(svc, nil)
 

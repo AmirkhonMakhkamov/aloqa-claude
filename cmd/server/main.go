@@ -380,7 +380,7 @@ func run() error {
 			PoorSamplesForDowngrade: cfg.WebRTC.AdaptivePoorSamplesForDowngrade,
 			EWMAAlpha:               cfg.WebRTC.AdaptiveEWMAAlpha,
 		},
-	}, guestAccessChecker, collaborationAccessChecker, realtimeRepo)
+	}, guestAccessChecker, collaborationAccessChecker)
 	callSvc.SetMediaControlPlane(mediaOpsSvc)
 	callSvc.SetCallMessageRepo(callMessageRepo)
 	callSvc.SetMessageRepo(messageRepo)

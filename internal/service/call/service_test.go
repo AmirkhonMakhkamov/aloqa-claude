@@ -36,7 +36,7 @@ func TestCallTenantBoundaries(t *testing.T) {
 	calls := &fakeCallRepo{calls: map[uuid.UUID]*entity.Call{
 		callID: {ID: callID, WorkspaceID: workspaceB, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive},
 	}, participants: map[[2]uuid.UUID]*entity.CallParticipant{}}
-	svc := NewService(calls, &fakeBreakoutRepo{}, channels, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, channels, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 
 	if _, err := svc.StartCall(ctx, workspaceA, userID, entity.CallTypeMeeting, "", &channelID, entity.CallSettings{}); !hasCode(err, cerrors.CodeNotFound) {
 		t.Fatalf("StartCall with cross-workspace channel error = %v, want NOT_FOUND", err)
@@ -77,7 +77,7 @@ func TestViewerCannotPublishMedia(t *testing.T) {
 			},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 
 	if err := svc.UpdateMedia(ctx, workspaceID, callID, userID, boolPtr(false), boolPtr(true), boolPtr(false)); !hasCode(err, cerrors.CodeForbidden) {
 		t.Fatalf("UpdateMedia viewer publish error = %v, want FORBIDDEN", err)
@@ -105,7 +105,7 @@ func TestForwardSignalRequiresBothParticipants(t *testing.T) {
 			{callID, fromUser}: {ID: uuid.New(), CallID: callID, UserID: fromUser, Role: entity.CallRoleHost, Status: entity.ParticipantStatusConnected},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
 
 	err := svc.ForwardSignal(ctx, callID, fromUser, toUser, "offer", event.SignalPayload{SDP: "v=0"})
 	if !hasCode(err, cerrors.CodeNotFound) {
@@ -145,7 +145,7 @@ func TestHostCanPromoteWebinarViewerToPresenter(t *testing.T) {
 			{callID, viewerID}: {ID: viewerParticipantID, CallID: callID, UserID: viewerID, Role: entity.CallRoleViewer, Status: entity.ParticipantStatusConnected},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 
 	if err := svc.UpdateParticipantRole(ctx, workspaceID, callID, hostID, viewerID, entity.CallRolePresenter); err != nil {
 		t.Fatalf("UpdateParticipantRole returned error: %v", err)
@@ -175,7 +175,7 @@ func TestScreenShareCapacityIsEnforced(t *testing.T) {
 			{callID, userB}: {ID: uuid.New(), CallID: callID, UserID: userB, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 
 	if err := svc.UpdateMedia(ctx, workspaceID, callID, userB, boolPtr(true), boolPtr(true), boolPtr(true)); !hasCode(err, cerrors.CodeConflict) {
 		t.Fatalf("UpdateMedia second screen share error = %v, want CONFLICT", err)
@@ -207,7 +207,7 @@ func TestGuestGrantAllowsJoiningChannelScopedCall(t *testing.T) {
 		ChannelIDs:  []uuid.UUID{channelID},
 		ExpiresAt:   time.Now().Add(time.Hour),
 	}}})
-	svc := NewService(calls, &fakeBreakoutRepo{}, channels, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), guests, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, channels, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), guests, nil)
 
 	participant, err := svc.JoinCall(ctx, workspaceID, callID, guestID)
 	if err != nil {
@@ -236,7 +236,7 @@ func TestStartCallRejectsSecondCallInChannel(t *testing.T) {
 		},
 		participants: map[[2]uuid.UUID]*entity.CallParticipant{},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, channels, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, channels, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 
 	if _, err := svc.StartCall(ctx, workspaceID, hostID, entity.CallTypeMeeting, "", &channelID, entity.CallSettings{}); !hasCode(err, cerrors.CodeChannelCallExists) {
 		t.Fatalf("StartCall in a busy channel = %v, want CHANNEL_ALREADY_HAS_ACTIVE_CALL", err)
@@ -260,7 +260,7 @@ func TestStartCallRejectsUserAlreadyInAnotherCall(t *testing.T) {
 			{otherCallID, userID}: {ID: uuid.New(), CallID: otherCallID, UserID: userID, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 
 	if _, err := svc.StartCall(ctx, workspaceID, userID, entity.CallTypeMeeting, "", nil, entity.CallSettings{}); !hasCode(err, cerrors.CodeUserInCall) {
 		t.Fatalf("StartCall while already in another call = %v, want USER_ALREADY_IN_CALL", err)
@@ -297,7 +297,7 @@ func TestCrossWorkspaceDMMemberCanJoinSharedChannelCall(t *testing.T) {
 	}}
 	svc := NewService(calls, &fakeBreakoutRepo{}, channels, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, fakeCallCollabChecker{
 		decision: collabaccess.Decision{Managed: true, Allowed: true},
-	}, nil)
+	})
 
 	participant, err := svc.JoinCall(ctx, workspaceID, callID, remoteUserID)
 	if err != nil {
@@ -338,7 +338,7 @@ func TestCrossWorkspaceDMMemberCannotJoinCallWhenSharedCallsRevoked(t *testing.T
 	}}
 	svc := NewService(calls, &fakeBreakoutRepo{}, channels, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, fakeCallCollabChecker{
 		decision: collabaccess.Decision{Managed: true, Allowed: false},
-	}, nil)
+	})
 
 	if _, err := svc.JoinCall(ctx, workspaceID, callID, remoteUserID); !hasCode(err, cerrors.CodeForbidden) {
 		t.Fatalf("JoinCall revoked collaboration error = %v, want FORBIDDEN", err)
@@ -388,7 +388,7 @@ func TestJoinCallHonorsPolicyParticipantCap(t *testing.T) {
 			{callID, userB}: {ID: uuid.New(), CallID: callID, UserID: userB, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 	svc.SetMediaControlPlane(&fakeMediaControlPlane{
 		localNodeID: "edge-a",
 		policy: entity.MediaCallPolicy{
@@ -440,7 +440,7 @@ func TestJoinCallKeepsExistingWaitingParticipantWaiting(t *testing.T) {
 			},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, pub, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, pub, nil, mediaTestConfig(), nil, nil)
 
 	participant, err := svc.JoinCall(ctx, workspaceID, callID, userID)
 	if err != nil {
@@ -471,7 +471,7 @@ func removeParticipantFixture(workspaceID, callID, hostID, targetID uuid.UUID, a
 			{callID, targetID}: {ID: uuid.New(), CallID: callID, UserID: targetID, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 	return svc, calls
 }
 
@@ -545,7 +545,7 @@ func guestReconnectFixture(
 		ChannelIDs:  []uuid.UUID{channelID},
 		ExpiresAt:   time.Now().Add(time.Hour),
 	}}})
-	return NewService(calls, &fakeBreakoutRepo{}, channels, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), guests, nil, nil)
+	return NewService(calls, &fakeBreakoutRepo{}, channels, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), guests, nil)
 }
 
 // A guest dropped moments ago (a transient disconnect or the stray /leave from
@@ -602,7 +602,7 @@ func TestJoinCall_OnEndedCall_ReturnsCallEndedNot403(t *testing.T) {
 			},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 
 	_, err := svc.JoinCall(ctx, workspaceID, callID, userID)
 	if err == nil {
@@ -649,7 +649,7 @@ func TestLiveKitParticipantJoinedDoesNotAdmitWaitingParticipant(t *testing.T) {
 			},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
 	svc.SetLiveKit(LiveKitSettings{
 		URL:       "http://livekit.test",
 		APIKey:    "test-key",
@@ -692,7 +692,7 @@ func TestLiveKitParticipantJoinedDoesNotRepublishAlreadyActiveParticipant(t *tes
 		},
 	}
 	pub := &capturingPublisher{}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
 
 	if err := svc.handleLiveKitParticipantJoined(ctx, callID, &livekitpb.ParticipantInfo{Identity: userID.String()}); err != nil {
 		t.Fatalf("handleLiveKitParticipantJoined returned error: %v", err)
@@ -721,8 +721,8 @@ func TestLiveKitWebhookDedupesParticipantLeftAcrossServiceInstances(t *testing.T
 	}
 	firstPub := &capturingPublisher{}
 	secondPub := &capturingPublisher{}
-	first := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, firstPub, nil, mediaTestConfig(), nil, nil, nil)
-	second := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, secondPub, nil, mediaTestConfig(), nil, nil, nil)
+	first := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, firstPub, nil, mediaTestConfig(), nil, nil)
+	second := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, secondPub, nil, mediaTestConfig(), nil, nil)
 	ev := liveKitWebhookEvent(eventID, "participant_left", callID, userID)
 
 	if err := first.HandleLiveKitWebhook(ctx, ev); err != nil {
@@ -759,8 +759,8 @@ func TestLiveKitWebhookDedupesRoomFinishedAcrossServiceInstances(t *testing.T) {
 	}
 	firstPub := &capturingPublisher{}
 	secondPub := &capturingPublisher{}
-	first := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, firstPub, nil, mediaTestConfig(), nil, nil, nil)
-	second := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, secondPub, nil, mediaTestConfig(), nil, nil, nil)
+	first := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, firstPub, nil, mediaTestConfig(), nil, nil)
+	second := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, secondPub, nil, mediaTestConfig(), nil, nil)
 	ev := liveKitWebhookEvent(eventID, "room_finished", callID, uuid.Nil)
 
 	if err := first.HandleLiveKitWebhook(ctx, ev); err != nil {
@@ -800,7 +800,7 @@ func TestLiveKitWebhookInProgressDuplicateReturnsRetryableConflict(t *testing.T)
 		},
 	}
 	pub := &capturingPublisher{}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
 
 	err := svc.HandleLiveKitWebhook(ctx, liveKitWebhookEvent(eventID, "room_finished", callID, uuid.Nil))
 	if !hasCode(err, cerrors.CodeConflict) {
@@ -825,7 +825,7 @@ func TestLiveKitWebhookSupersededClaimDoesNotMarkProcessed(t *testing.T) {
 		},
 	}
 	pub := &capturingPublisher{}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
 
 	err := svc.HandleLiveKitWebhook(ctx, liveKitWebhookEvent(eventID, "room_finished", callID, uuid.Nil))
 	if !hasCode(err, cerrors.CodeConflict) {
@@ -851,7 +851,7 @@ func TestLiveKitWebhookIgnoresParticipantLeftAfterRoomFinished(t *testing.T) {
 		liveKitWebhookEvents: map[string]*entity.LiveKitWebhookEvent{},
 	}
 	pub := &capturingPublisher{}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
 
 	if err := svc.HandleLiveKitWebhook(ctx, liveKitWebhookEvent(uuid.New().String(), "room_finished", callID, uuid.Nil)); err != nil {
 		t.Fatalf("room_finished HandleLiveKitWebhook returned error: %v", err)
@@ -877,7 +877,7 @@ func TestLiveKitTrackChangedDoesNotPublishWhenScreenShareStateAlreadyMatches(t *
 		},
 	}
 	pub := &capturingPublisher{}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
 
 	err := svc.handleLiveKitTrackChanged(ctx, callID, &livekitpb.ParticipantInfo{Identity: userID.String()}, &livekitpb.TrackInfo{Source: livekitpb.TrackSource_SCREEN_SHARE}, true)
 	if err != nil {
@@ -912,7 +912,7 @@ func TestLiveKitParticipantLeftRetryAfterDisconnectStillAutoEnds(t *testing.T) {
 		liveKitWebhookEvents: map[string]*entity.LiveKitWebhookEvent{},
 	}
 	pub := &capturingPublisher{}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
 
 	if err := svc.HandleLiveKitWebhook(ctx, liveKitWebhookEvent(uuid.New().String(), "participant_left", callID, userID)); err != nil {
 		t.Fatalf("HandleLiveKitWebhook returned error: %v", err)
@@ -937,7 +937,7 @@ func TestStartCallRequiresLiveKitRoomBeforePersist(t *testing.T) {
 	}}
 	calls := &fakeCallRepo{calls: map[uuid.UUID]*entity.Call{}, participants: map[[2]uuid.UUID]*entity.CallParticipant{}}
 	roomClient := &fakeLiveKitRoomClient{ensureErr: cerrors.Unavailable("livekit unavailable")}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 	svc.SetLiveKit(LiveKitSettings{URL: "https://livekit.example.com", APIKey: "key", APISecret: "secret", TokenTTL: time.Minute})
 	svc.SetLiveKitRoomClient(roomClient)
 
@@ -964,7 +964,7 @@ func TestStartCallDefaultsChatEnabled(t *testing.T) {
 		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
 	}}
 	calls := &fakeCallRepo{calls: map[uuid.UUID]*entity.Call{}, participants: map[[2]uuid.UUID]*entity.CallParticipant{}}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 	configureCleanupLiveKit(svc, nil)
 
 	// Empty settings → Settings.Chat is the Go zero value (false). StartCall must
@@ -1008,7 +1008,7 @@ func TestStartCallDefaultsBreakoutRoomsForGroupAndMeeting(t *testing.T) {
 				{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
 			}}
 			calls := &fakeCallRepo{calls: map[uuid.UUID]*entity.Call{}, participants: map[[2]uuid.UUID]*entity.CallParticipant{}}
-			svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+			svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 			configureCleanupLiveKit(svc, nil)
 
 			callEntity, err := svc.StartCall(ctx, workspaceID, userID, tc.typ, "", nil, entity.CallSettings{})
@@ -1050,7 +1050,7 @@ func TestJoinCallRequiresLiveKitRoomBeforeParticipantInsert(t *testing.T) {
 		},
 	}
 	roomClient := &fakeLiveKitRoomClient{ensureErr: cerrors.Unavailable("livekit unavailable")}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 	svc.SetLiveKit(LiveKitSettings{URL: "https://livekit.example.com", APIKey: "key", APISecret: "secret", TokenTTL: time.Minute})
 	svc.SetLiveKitRoomClient(roomClient)
 
@@ -1117,7 +1117,7 @@ func TestCleanupStaleOpenCallsEndsRingingAsMissed(t *testing.T) {
 			},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
 	configureCleanupLiveKit(svc, nil)
 
 	ended, err := svc.CleanupStaleOpenCalls(ctx, 5*time.Minute, 100)
@@ -1197,7 +1197,7 @@ func TestCleanupStaleOpenCallsEndsRingingWithOnlyCallerInLiveKit(t *testing.T) {
 			},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 	configureCleanupLiveKit(svc, roomClient)
 
 	ended, err := svc.CleanupStaleOpenCalls(ctx, 5*time.Minute, 100)
@@ -1260,7 +1260,7 @@ func TestCleanupStaleOpenCallsKeepsRingingWithAnsweredParticipantInLiveKit(t *te
 			},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 	configureCleanupLiveKit(svc, roomClient)
 
 	ended, err := svc.CleanupStaleOpenCalls(ctx, 5*time.Minute, 100)
@@ -1306,7 +1306,7 @@ func TestCleanupStaleOpenCallsSkipsWhenLiveKitDisabled(t *testing.T) {
 		},
 	}
 	pub := &capturingPublisher{}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
 
 	ended, err := svc.CleanupStaleOpenCalls(ctx, 5*time.Minute, 100)
 	if err != nil {
@@ -1365,7 +1365,7 @@ func TestCleanupStaleOpenCallsEndsActiveAsAllLeftAndTimeoutsParticipants(t *test
 			},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 	configureCleanupLiveKit(svc, nil)
 
 	ended, err := svc.CleanupStaleOpenCalls(ctx, 5*time.Minute, 100)
@@ -1419,7 +1419,7 @@ func TestCleanupStaleOpenCallsKeepsRecentlyActivatedOldRingingCall(t *testing.T)
 			},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 	configureCleanupLiveKit(svc, nil)
 
 	didActivate, err := activateRingingCall(ctx, calls, callID)
@@ -1482,7 +1482,7 @@ func TestCleanupStaleOpenCallsKeepsCallWithLiveKitParticipants(t *testing.T) {
 			},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 	configureCleanupLiveKit(svc, roomClient)
 
 	ended, err := svc.CleanupStaleOpenCalls(ctx, 5*time.Minute, 100)
@@ -1522,7 +1522,7 @@ func TestCleanupStaleOpenCallsKeepsCallOnLiveKitInspectionError(t *testing.T) {
 		participants: map[[2]uuid.UUID]*entity.CallParticipant{},
 	}
 	roomClient := &fakeLiveKitRoomClient{listParticipantsErr: errors.New("livekit temporarily unavailable")}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 	configureCleanupLiveKit(svc, roomClient)
 
 	ended, err := svc.CleanupStaleOpenCalls(ctx, 5*time.Minute, 100)
@@ -1555,7 +1555,7 @@ func TestLeaveCallIsIdempotentAndAutoEndsOneToOne(t *testing.T) {
 			{callID, userID}: {ID: uuid.New(), CallID: callID, UserID: userID, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 
 	result, err := svc.LeaveCall(ctx, workspaceID, callID, userID)
 	if err != nil {
@@ -1605,7 +1605,7 @@ func TestLeaveCallAfterEndedIsAlreadyLeftNoMutation(t *testing.T) {
 			{callID, userID}: participant,
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 
 	result, err := svc.LeaveCall(ctx, workspaceID, callID, userID)
 	if err != nil {
@@ -1649,7 +1649,7 @@ func TestLeaveCallConcurrentDisconnectIsAlreadyLeftNoPublish(t *testing.T) {
 			p.LeftReason = entity.ParticipantLeftReasonLeft
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, pub, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, pub, nil, mediaTestConfig(), nil, nil)
 
 	result, err := svc.LeaveCall(ctx, workspaceID, callID, userID)
 	if err != nil {
@@ -1690,7 +1690,7 @@ func TestLiveKitParticipantLeftConcurrentDisconnectStillAutoEnds(t *testing.T) {
 			p.LeftReason = entity.ParticipantLeftReasonLeft
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
 
 	err := svc.handleLiveKitParticipantLeft(ctx, callID, &livekitpb.ParticipantInfo{
 		Identity: userID.String(),
@@ -1725,7 +1725,7 @@ func TestCancelCallEndsRingingByCreator(t *testing.T) {
 			{callID, userID}: {ID: uuid.New(), CallID: callID, UserID: userID, Role: entity.CallRoleHost, Status: entity.ParticipantStatusConnected},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 
 	result, err := svc.CancelCall(ctx, workspaceID, callID, userID)
 	if err != nil {
@@ -1773,7 +1773,7 @@ func TestIssueLiveKitJoinInfoUsesParticipantRoleForPublishGrant(t *testing.T) {
 			},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 	svc.SetLiveKit(LiveKitSettings{
 		URL:       "ws://livekit.test",
 		APIKey:    "APItest",
@@ -1831,7 +1831,7 @@ func TestIssueLiveKitJoinInfoRejectsWaitingParticipant(t *testing.T) {
 			},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 	svc.SetLiveKit(LiveKitSettings{
 		URL:       "ws://livekit.test",
 		APIKey:    "APItest",
@@ -1863,7 +1863,7 @@ func TestCancelCallDoesNotEndWhenCallWasActivatedConcurrently(t *testing.T) {
 			call.Status = entity.CallStatusActive
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 
 	result, err := svc.CancelCall(ctx, workspaceID, callID, userID)
 	if !hasCode(err, cerrors.CodeConflict) {
@@ -1932,7 +1932,7 @@ func TestReportNetworkQualityAppliesMeetingWidePolicyAndPersistsClientSnapshot(t
 			AlertingEnabled:      true,
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, sfuServer, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, sfuServer, mediaTestConfig(), nil, nil)
 	svc.SetMediaControlPlane(control)
 
 	decision, err := svc.ReportNetworkQuality(ctx, workspaceID, callID, userID, MediaQualityReportInput{
@@ -1988,23 +1988,6 @@ type capturingPublisher struct {
 type capturedPublish struct {
 	subject string
 	body    []byte
-}
-
-type fakeRealtimeOutbox struct {
-	events      []event.Event
-	bodies      [][]byte
-	maxAttempts []int
-	err         error
-}
-
-func (f *fakeRealtimeOutbox) Enqueue(_ context.Context, evt event.Event, body []byte, maxAttempts int) error {
-	if f.err != nil {
-		return f.err
-	}
-	f.events = append(f.events, evt)
-	f.bodies = append(f.bodies, append([]byte(nil), body...))
-	f.maxAttempts = append(f.maxAttempts, maxAttempts)
-	return nil
 }
 
 type fakeCallCollabChecker struct {

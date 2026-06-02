@@ -121,7 +121,8 @@ func DefinitionForType(t Type) Definition {
 	switch t {
 	case TypeTypingStarted, TypeCallTypingStarted, TypeSignalOffer, TypeSignalAnswer, TypeSignalCandidate,
 		TypeCallHandRaised, TypeCallHandLowered, TypeCallReaction,
-		TypeCallShareRequestCreated, TypeCallShareRequestResolved, TypeCallFeaturedShareUpdated:
+		TypeCallShareRequestCreated, TypeCallShareRequestResolved, TypeCallFeaturedShareUpdated,
+		TypeBreakoutBroadcast:
 		return Definition{
 			Version:          CurrentVersion,
 			DeliverySemantic: DeliveryEphemeral,

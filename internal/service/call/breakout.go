@@ -400,6 +400,16 @@ func (s *Service) CloseAllBreakoutRooms(ctx context.Context, callID, userID uuid
 		return err
 	}
 
+	return s.closeAllBreakoutRoomsForCall(ctx, call)
+}
+
+// closeAllBreakoutRoomsForCall closes every active breakout room in the call
+// and returns all participants to the main room. It performs no host
+// authorization; user callers must authorize first, and the system sweeper
+// calls it directly so closure does not depend on a live host participant row.
+func (s *Service) closeAllBreakoutRoomsForCall(ctx context.Context, call *entity.Call) error {
+	callID := call.ID
+
 	rooms, err := s.breakoutRooms.ListByCall(ctx, callID)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to list breakout rooms for close-all", "call_id", callID, "error", err)
@@ -436,7 +446,7 @@ func (s *Service) CloseAllBreakoutRooms(ctx context.Context, callID, userID uuid
 		CallID: callID,
 	})
 
-	slog.InfoContext(ctx, "all breakout rooms closed", "call_id", callID, "user_id", userID)
+	slog.InfoContext(ctx, "all breakout rooms closed", "call_id", callID)
 	return nil
 }
 
@@ -535,7 +545,7 @@ func (s *Service) publishBreakoutEvent(ctx context.Context, evtType event.Type, 
 		channelID = *call.ChannelID
 	}
 	subject := fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID)
-	s.enqueueRealtime(ctx, evtType, subject, call.WorkspaceID, channelID, call.CreatedBy, payload)
+	s.doPublish(ctx, evtType, subject, call.WorkspaceID, channelID, call.CreatedBy, payload)
 }
 
 // breakoutRoomNameSeparator delimits the call and breakout-room UUIDs in a

@@ -240,7 +240,7 @@ func newCallInteractionHTTPRouterWithMediaConfig(workspaceID, callID, userID uui
 	workspaces := &httpWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
 		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
 	}}
-	svc := callsvc.NewService(calls, httpBreakoutRepo{}, httpChannelRepo{}, workspaces, httpNoopPublisher{}, nil, media, nil, nil, nil)
+	svc := callsvc.NewService(calls, httpBreakoutRepo{}, httpChannelRepo{}, workspaces, httpNoopPublisher{}, nil, media, nil, nil)
 	router := NewRouter(RouterDeps{
 		Auth:             &AuthHandler{},
 		Account:          &AccountHandler{},

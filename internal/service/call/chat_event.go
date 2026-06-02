@@ -84,11 +84,11 @@ func (s *Service) emitCallEndedChatMessage(ctx context.Context, call *entity.Cal
 			if err := scope.Messages().Create(ctx, msg); err != nil {
 				return err
 			}
-			if err := s.enqueueRealtimeTx(ctx, scope, event.TypeMessageCreated,
+			if err := s.enqueueDurableEventTx(ctx, scope, event.TypeMessageCreated,
 				fmt.Sprintf("aloqa.chat.%s", channelID), call.WorkspaceID, channelID, call.CreatedBy, payload); err != nil {
 				return err
 			}
-			return s.enqueueRealtimeTx(ctx, scope, event.TypeMessageCreated,
+			return s.enqueueDurableEventTx(ctx, scope, event.TypeMessageCreated,
 				fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID), call.WorkspaceID, channelID, call.CreatedBy, payload)
 		}); err != nil {
 			slog.ErrorContext(ctx, "failed to persist call-ended chat message",

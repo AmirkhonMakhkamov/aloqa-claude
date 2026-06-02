@@ -197,7 +197,7 @@ func newCallMessageServiceFixture() callMessageServiceFixture {
 		},
 	}
 	messages := &fakeCallMessageRepo{messages: map[uuid.UUID]*entity.CallMessage{}}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 	svc.SetCallMessageRepo(messages)
 
 	return callMessageServiceFixture{

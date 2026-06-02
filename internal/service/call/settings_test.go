@@ -27,7 +27,7 @@ func TestUpdateCallSettingsRejectsNonHost(t *testing.T) {
 			{callID, actorID}: connectedParticipant(callID, actorID, entity.CallRoleParticipant),
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 
 	_, err := svc.UpdateCallSettings(ctx, callID, actorID, CallSettingsPatch{BreakoutRooms: boolPtr(false)})
 	if !hasCode(err, cerrors.CodeForbidden) {
@@ -53,7 +53,7 @@ func TestUpdateCallSettingsEnableBreakoutRoomsPersistsAndPublishes(t *testing.T)
 		},
 	}
 	pub := &capturingPublisher{}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
 
 	updated, err := svc.UpdateCallSettings(ctx, callID, hostID, CallSettingsPatch{BreakoutRooms: boolPtr(true)})
 	if err != nil {
@@ -89,7 +89,7 @@ func TestUpdateCallSettingsDisableBreakoutRoomsClosesActiveRoomsFirst(t *testing
 		Status: entity.BreakoutRoomStatusActive,
 	}
 	pub := &capturingPublisher{}
-	svc := NewService(calls, breakouts, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, breakouts, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
 
 	updated, err := svc.UpdateCallSettings(ctx, callID, hostID, CallSettingsPatch{BreakoutRooms: boolPtr(false)})
 	if err != nil {
@@ -123,7 +123,7 @@ func TestUpdateCallSettingsNilPatchLeavesSettingsUntouched(t *testing.T) {
 		},
 	}
 	pub := &capturingPublisher{}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
 
 	updated, err := svc.UpdateCallSettings(ctx, callID, hostID, CallSettingsPatch{})
 	if err != nil {

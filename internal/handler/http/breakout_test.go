@@ -110,7 +110,7 @@ func newBreakoutHTTPHandler(workspaceID, callID, userID uuid.UUID, repo *breakou
 	workspaces := &httpWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
 		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
 	}}
-	svc := callsvc.NewService(calls, repo, httpChannelRepo{}, workspaces, httpNoopPublisher{}, nil, callsvc.MediaConfig{}, nil, nil, nil)
+	svc := callsvc.NewService(calls, repo, httpChannelRepo{}, workspaces, httpNoopPublisher{}, nil, callsvc.MediaConfig{}, nil, nil)
 	return NewBreakoutHandler(svc)
 }
 

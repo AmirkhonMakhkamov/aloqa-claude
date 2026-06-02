@@ -40,7 +40,7 @@ func newTestServiceWithConnectedParticipant(t *testing.T) (*Service, turnTestFix
 			{callID, userID}: {ID: uuid.New(), CallID: callID, UserID: userID, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 	return svc, turnTestFixtures{workspaceID: workspaceID, callID: callID, userID: userID}
 }
 
@@ -58,7 +58,7 @@ func newTestServiceWithCallButNoParticipant(t *testing.T) (*Service, turnTestFix
 			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive},
 		},
 	}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 	return svc, turnTestFixtures{workspaceID: workspaceID, callID: callID, userID: userID}
 }
 

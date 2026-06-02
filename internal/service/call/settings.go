@@ -25,12 +25,13 @@ func (s *Service) UpdateCallSettings(ctx context.Context, callID, actorID uuid.U
 	if err != nil {
 		return nil, s.wrapCallError(ctx, err, callID, "update call settings")
 	}
-	if call.Status != entity.CallStatusActive {
-		return nil, cerrors.Forbidden("call is not active")
-	}
 
 	if err := s.requireHostOrCoHost(ctx, callID, actorID); err != nil {
 		return nil, err
+	}
+
+	if call.Status != entity.CallStatusActive {
+		return nil, cerrors.Forbidden("call is not active")
 	}
 
 	if patch.BreakoutRooms == nil {
@@ -68,7 +69,7 @@ func (s *Service) publishCallSettingsChanged(ctx context.Context, call *entity.C
 	}
 
 	subject := fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID)
-	s.enqueueRealtime(ctx, event.TypeCallSettingsChanged, subject, call.WorkspaceID, channelID, call.CreatedBy, event.CallSettingsChangedPayload{
+	s.doPublish(ctx, event.TypeCallSettingsChanged, subject, call.WorkspaceID, channelID, call.CreatedBy, event.CallSettingsChangedPayload{
 		CallID:   call.ID,
 		Settings: call.Settings,
 	})

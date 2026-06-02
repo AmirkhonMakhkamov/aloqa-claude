@@ -52,7 +52,7 @@ func shareTestHarness(t *testing.T, callStatus entity.CallStatus) (
 		},
 	}
 	rooms := &fakeLiveKitRoomClient{}
-	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, pub, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, pub, nil, mediaTestConfig(), nil, nil)
 	svc.SetLiveKitRoomClient(rooms)
 	return svc, calls, rooms, pub, workspaceID, callID, hostID, participantID
 }

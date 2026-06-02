@@ -84,7 +84,7 @@ func (s *Service) closeExpiredBreakoutCall(ctx context.Context, callID uuid.UUID
 		return false
 	}
 
-	if err := s.CloseAllBreakoutRooms(ctx, callID, call.CreatedBy); err != nil {
+	if err := s.closeAllBreakoutRoomsForCall(ctx, call); err != nil {
 		slog.WarnContext(ctx, "failed to auto-close breakout rooms", "call_id", callID, "error", err)
 		return false
 	}

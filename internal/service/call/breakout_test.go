@@ -168,7 +168,7 @@ func TestListBreakoutRoomsReturnsEmptySlice(t *testing.T) {
 	calls := &fakeCallRepo{calls: map[uuid.UUID]*entity.Call{
 		callID: breakoutCall(callID, workspaceID, hostID),
 	}}
-	svc := NewService(calls, newStubBreakoutRepo(), &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, newStubBreakoutRepo(), &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 
 	rooms, err := svc.ListBreakoutRooms(ctx, callID)
 	if err != nil {
@@ -199,7 +199,7 @@ func TestListBreakoutRoomParticipantsReturnsEmptySlice(t *testing.T) {
 	calls := &fakeCallRepo{calls: map[uuid.UUID]*entity.Call{
 		callID: breakoutCall(callID, workspaceID, hostID),
 	}}
-	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 
 	participants, err := svc.ListBreakoutRoomParticipants(ctx, callID, roomID)
 	if err != nil {
@@ -242,7 +242,7 @@ func TestCreateBreakoutRoomsAssignsConnectedParticipants(t *testing.T) {
 	repo := newStubBreakoutRepo()
 	pub := &capturingPublisher{}
 	roomClient := &fakeLiveKitRoomClient{}
-	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
 	svc.SetLiveKit(breakoutTestLiveKit())
 	svc.SetLiveKitRoomClient(roomClient)
 
@@ -301,7 +301,7 @@ func TestCreateBreakoutRoomsSetsClosesAtForTimeLimitedRooms(t *testing.T) {
 		},
 	}
 	repo := newStubBreakoutRepo()
-	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, newBreakoutSFU(t), mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
 
 	before := time.Now().Add(time.Duration(limitSeconds) * time.Second)
 	rooms, err := svc.CreateBreakoutRooms(ctx, callID, hostID, []CreateBreakoutRoomInput{
@@ -350,7 +350,7 @@ func TestBreakoutAutoCloseSweeperClosesExpiredCall(t *testing.T) {
 	}
 	repo.rooms[room.ID] = room
 	pub := &capturingPublisher{}
-	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
 
 	closed, err := svc.CloseExpiredBreakoutRooms(ctx, now, 10)
 	if err != nil {
@@ -391,7 +391,7 @@ func TestBreakoutAutoCloseSweeperIgnoresFutureDeadlines(t *testing.T) {
 	}
 	repo.rooms[room.ID] = room
 	pub := &capturingPublisher{}
-	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
 
 	closed, err := svc.CloseExpiredBreakoutRooms(ctx, now, 10)
 	if err != nil {
@@ -432,7 +432,7 @@ func TestBreakoutAutoCloseSweeperSkipsAlreadyClosedRooms(t *testing.T) {
 	}
 	repo.rooms[room.ID] = room
 	pub := &capturingPublisher{}
-	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
 
 	closed, err := svc.CloseExpiredBreakoutRooms(ctx, now, 10)
 	if err != nil {
@@ -482,43 +482,7 @@ func TestStubBreakoutRepoListCallsWithExpiredActiveBreakouts(t *testing.T) {
 	}
 }
 
-func TestPublishBreakoutEventUsesRealtimeOutboxWhenConfigured(t *testing.T) {
-	ctx := context.Background()
-	workspaceID := uuid.New()
-	callID := uuid.New()
-	hostID := uuid.New()
-	userID := uuid.New()
-	roomID := uuid.New()
-
-	pub := &capturingPublisher{}
-	outbox := &fakeRealtimeOutbox{}
-	svc := NewService(nil, newStubBreakoutRepo(), nil, nil, pub, nil, mediaTestConfig(), nil, nil, outbox)
-	call := breakoutCall(callID, workspaceID, hostID)
-
-	svc.publishBreakoutEvent(ctx, event.TypeBreakoutParticipantMoved, call, event.BreakoutParticipantMovedPayload{
-		CallID:         callID,
-		UserID:         userID,
-		BreakoutRoomID: &roomID,
-	})
-
-	if len(outbox.events) != 1 {
-		t.Fatalf("outbox events = %d, want 1", len(outbox.events))
-	}
-	if outbox.events[0].Type != event.TypeBreakoutParticipantMoved {
-		t.Fatalf("outbox event type = %s, want %s", outbox.events[0].Type, event.TypeBreakoutParticipantMoved)
-	}
-	if outbox.events[0].DeliverySemantic != event.DeliveryAtLeastOnce || !outbox.events[0].Replayable {
-		t.Fatalf("outbox event durability = (%s, %v), want at_least_once replayable", outbox.events[0].DeliverySemantic, outbox.events[0].Replayable)
-	}
-	if outbox.maxAttempts[0] != 0 {
-		t.Fatalf("maxAttempts = %d, want 0 for repository default", outbox.maxAttempts[0])
-	}
-	if pub.called {
-		t.Fatalf("pubsub was called with outbox configured, want outbox-only delivery")
-	}
-}
-
-func TestPublishBreakoutEventFallsBackToPubsubWithoutOutbox(t *testing.T) {
+func TestPublishBreakoutEventPublishes(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
 	callID := uuid.New()
@@ -526,7 +490,7 @@ func TestPublishBreakoutEventFallsBackToPubsubWithoutOutbox(t *testing.T) {
 	userID := uuid.New()
 
 	pub := &capturingPublisher{}
-	svc := NewService(nil, newStubBreakoutRepo(), nil, nil, pub, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(nil, newStubBreakoutRepo(), nil, nil, pub, nil, mediaTestConfig(), nil, nil)
 	call := breakoutCall(callID, workspaceID, hostID)
 
 	svc.publishBreakoutEvent(ctx, event.TypeBreakoutParticipantMoved, call, event.BreakoutParticipantMovedPayload{
@@ -535,37 +499,30 @@ func TestPublishBreakoutEventFallsBackToPubsubWithoutOutbox(t *testing.T) {
 	})
 
 	if !pub.called {
-		t.Fatalf("pubsub was not called without outbox")
+		t.Fatalf("pubsub was not called")
 	}
 	if got := countBreakoutEvents(t, pub.captures, event.TypeBreakoutParticipantMoved); got != 1 {
 		t.Fatalf("participant.moved events = %d, want 1", got)
 	}
 }
 
-func TestPublishCallSettingsChangedUsesRealtimeOutboxWhenConfigured(t *testing.T) {
+func TestPublishCallSettingsChangedPublishes(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
 	callID := uuid.New()
 	hostID := uuid.New()
 
 	pub := &capturingPublisher{}
-	outbox := &fakeRealtimeOutbox{}
-	svc := NewService(nil, newStubBreakoutRepo(), nil, nil, pub, nil, mediaTestConfig(), nil, nil, outbox)
+	svc := NewService(nil, newStubBreakoutRepo(), nil, nil, pub, nil, mediaTestConfig(), nil, nil)
 	call := breakoutCall(callID, workspaceID, hostID)
 
 	svc.publishCallSettingsChanged(ctx, call)
 
-	if len(outbox.events) != 1 {
-		t.Fatalf("outbox events = %d, want 1", len(outbox.events))
+	if !pub.called {
+		t.Fatalf("pubsub was not called")
 	}
-	if outbox.events[0].Type != event.TypeCallSettingsChanged {
-		t.Fatalf("outbox event type = %s, want %s", outbox.events[0].Type, event.TypeCallSettingsChanged)
-	}
-	if outbox.events[0].DeliverySemantic != event.DeliveryAtLeastOnce || !outbox.events[0].Replayable {
-		t.Fatalf("outbox event durability = (%s, %v), want at_least_once replayable", outbox.events[0].DeliverySemantic, outbox.events[0].Replayable)
-	}
-	if pub.called {
-		t.Fatalf("pubsub was called with outbox configured, want outbox-only delivery")
+	if got := countBreakoutEvents(t, pub.captures, event.TypeCallSettingsChanged); got != 1 {
+		t.Fatalf("settings.changed events = %d, want 1", got)
 	}
 }
 
@@ -591,7 +548,7 @@ func TestCreateBreakoutRoomsRejectsNonHost(t *testing.T) {
 			{callID, plebID}: connectedParticipant(callID, plebID, entity.CallRoleParticipant),
 		},
 	}
-	svc := NewService(calls, newStubBreakoutRepo(), &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, newBreakoutSFU(t), mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, newStubBreakoutRepo(), &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
 
 	_, err := svc.CreateBreakoutRooms(ctx, callID, plebID, []CreateBreakoutRoomInput{{Name: "Room A"}})
 	if !hasCode(err, cerrors.CodeForbidden) {
@@ -618,7 +575,7 @@ func TestJoinBreakoutRoomReturnsLiveKitJoinInfo(t *testing.T) {
 	}
 	pub := &capturingPublisher{}
 	roomClient := &fakeLiveKitRoomClient{}
-	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
 	svc.SetLiveKit(breakoutTestLiveKit())
 	svc.SetLiveKitRoomClient(roomClient)
 
@@ -658,7 +615,7 @@ func TestJoinBreakoutRoomLiveKitUnconfiguredReturnsUnavailable(t *testing.T) {
 			{callID, userID}: connectedParticipant(callID, userID, entity.CallRoleParticipant),
 		},
 	}
-	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 
 	info, err := svc.JoinBreakoutRoom(ctx, callID, userID, room.ID)
 	if !hasCode(err, cerrors.CodeUnavailable) {
@@ -691,7 +648,7 @@ func TestReturnToMainRoomReturnsMainLiveKitJoinInfo(t *testing.T) {
 	}
 	repo := newStubBreakoutRepo()
 	pub := &capturingPublisher{}
-	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
 	svc.SetLiveKit(breakoutTestLiveKit())
 	svc.SetLiveKitRoomClient(&fakeLiveKitRoomClient{})
 
@@ -730,7 +687,7 @@ func TestReturnToMainRoomLiveKitUnconfiguredReturnsUnavailable(t *testing.T) {
 		},
 	}
 	repo := newStubBreakoutRepo()
-	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 
 	info, err := svc.ReturnToMainRoom(ctx, callID, userID)
 	if !hasCode(err, cerrors.CodeUnavailable) {
@@ -771,7 +728,7 @@ func TestCloseAllBreakoutRoomsSchedulesDeferredLiveKitDelete(t *testing.T) {
 	}
 	pub := &capturingPublisher{}
 	roomClient := &fakeLiveKitRoomClient{}
-	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
 	svc.SetLiveKit(breakoutTestLiveKit())
 	svc.SetLiveKitRoomClient(roomClient)
 
@@ -823,7 +780,7 @@ func TestCloseBreakoutRoomSchedulesDeferredLiveKitDelete(t *testing.T) {
 	}
 	pub := &capturingPublisher{}
 	roomClient := &fakeLiveKitRoomClient{}
-	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil, nil)
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
 	svc.SetLiveKit(breakoutTestLiveKit())
 	svc.SetLiveKitRoomClient(roomClient)
 
@@ -855,7 +812,7 @@ func TestEnsureLiveKitBreakoutRoomCancelsPendingDelete(t *testing.T) {
 	breakoutRoomID := uuid.New()
 
 	roomClient := &fakeLiveKitRoomClient{}
-	svc := NewService(&fakeCallRepo{}, newStubBreakoutRepo(), &fakeChannelRepo{}, &fakeWorkspaceRepo{}, &capturingPublisher{}, newBreakoutSFU(t), mediaTestConfig(), nil, nil, nil)
+	svc := NewService(&fakeCallRepo{}, newStubBreakoutRepo(), &fakeChannelRepo{}, &fakeWorkspaceRepo{}, &capturingPublisher{}, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
 	svc.SetLiveKit(breakoutTestLiveKit())
 	svc.SetLiveKitRoomClient(roomClient)
 
@@ -887,7 +844,7 @@ func TestCloseAllBreakoutSFURoomsDeletesLiveKitImmediatelyOnCallEnd(t *testing.T
 	repo.rooms[room.ID] = room
 
 	roomClient := &fakeLiveKitRoomClient{}
-	svc := NewService(&fakeCallRepo{calls: map[uuid.UUID]*entity.Call{callID: breakoutCall(callID, workspaceID, hostID)}}, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, &capturingPublisher{}, newBreakoutSFU(t), mediaTestConfig(), nil, nil, nil)
+	svc := NewService(&fakeCallRepo{calls: map[uuid.UUID]*entity.Call{callID: breakoutCall(callID, workspaceID, hostID)}}, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, &capturingPublisher{}, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
 	svc.SetLiveKit(breakoutTestLiveKit())
 	svc.SetLiveKitRoomClient(roomClient)
 

@@ -64,7 +64,7 @@ func TestIssueLiveKitJoinInfoGatesScreenShareSources(t *testing.T) {
 					},
 				},
 			}
-			svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil, nil)
+			svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
 			svc.SetLiveKit(LiveKitSettings{URL: "ws://livekit.test", APIKey: "APItest", APISecret: apiSecret, TokenTTL: time.Hour})
 
 			info, err := svc.IssueLiveKitJoinInfo(ctx, calls.calls[callID], userID, "")

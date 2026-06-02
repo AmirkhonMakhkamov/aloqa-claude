@@ -394,8 +394,9 @@ func validateCallSettings(callType entity.CallType, settings entity.CallSettings
 }
 
 // verifyJoinPassword checks a password-mode join password against the stored
-// bcrypt hash. It returns UNAUTHORIZED when no password was supplied (the FE
-// should prompt) and FORBIDDEN on mismatch. #4.
+// bcrypt hash. Both a missing and an incorrect password return UNAUTHORIZED so
+// the client uniformly re-prompts (the message distinguishes the two). A call
+// in password mode without a stored hash is a misconfiguration -> FORBIDDEN. #4.
 func verifyJoinPassword(hash, password string) error {
 	if hash == "" {
 		// Password mode with no stored hash is a misconfiguration — refuse safely.
@@ -405,7 +406,7 @@ func verifyJoinPassword(hash, password string) error {
 		return cerrors.Unauthorized("a password is required to join this call")
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {
-		return cerrors.Forbidden("incorrect call password")
+		return cerrors.Unauthorized("incorrect call password")
 	}
 	return nil
 }

@@ -54,11 +54,11 @@ func TestJoinCallEntryModes(t *testing.T) {
 			wantStatus: entity.ParticipantStatusConnected,
 		},
 		{
-			name:     "password wrong forbidden",
+			name:     "password wrong rejected",
 			settings: entity.CallSettings{EntryMode: entity.EntryModePassword},
 			hash:     string(hash),
 			password: "nope",
-			wantCode: cerrors.CodeForbidden,
+			wantCode: cerrors.CodeUnauthorized,
 		},
 		{
 			name:     "password missing unauthorized",

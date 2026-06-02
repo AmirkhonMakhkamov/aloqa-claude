@@ -218,6 +218,55 @@ func TestGuestGrantAllowsJoiningChannelScopedCall(t *testing.T) {
 	}
 }
 
+// 9b: one active call per channel — starting a second is rejected so the FE can
+// join the existing one.
+func TestStartCallRejectsSecondCallInChannel(t *testing.T) {
+	ctx := context.Background()
+	workspaceID, channelID := uuid.New(), uuid.New()
+	hostID, existingCallID := uuid.New(), uuid.New()
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, hostID}: {WorkspaceID: workspaceID, UserID: hostID, Role: entity.WorkspaceRoleMember},
+	}}
+	channels := &fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
+		channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
+	}}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			existingCallID: {ID: existingCallID, WorkspaceID: workspaceID, ChannelID: &channelID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, channels, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	if _, err := svc.StartCall(ctx, workspaceID, hostID, entity.CallTypeMeeting, "", &channelID, entity.CallSettings{}); !hasCode(err, cerrors.CodeChannelCallExists) {
+		t.Fatalf("StartCall in a busy channel = %v, want CHANNEL_ALREADY_HAS_ACTIVE_CALL", err)
+	}
+}
+
+// 9c: a user may be in only one call at a time — starting a new call while
+// connected to another is rejected.
+func TestStartCallRejectsUserAlreadyInAnotherCall(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	userID, otherCallID := uuid.New(), uuid.New()
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			otherCallID: {ID: otherCallID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{otherCallID, userID}: {ID: uuid.New(), CallID: otherCallID, UserID: userID, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected},
+		},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	if _, err := svc.StartCall(ctx, workspaceID, userID, entity.CallTypeMeeting, "", nil, entity.CallSettings{}); !hasCode(err, cerrors.CodeUserInCall) {
+		t.Fatalf("StartCall while already in another call = %v, want USER_ALREADY_IN_CALL", err)
+	}
+}
+
 func TestCrossWorkspaceDMMemberCanJoinSharedChannelCall(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -1943,8 +1992,14 @@ func (r *fakeCallRepo) GetByID(_ context.Context, id uuid.UUID) (*entity.Call, e
 	}
 	return nil, cerrors.NotFound("call not found")
 }
-func (r *fakeCallRepo) ListActiveByWorkspace(context.Context, uuid.UUID) ([]entity.Call, error) {
-	return nil, nil
+func (r *fakeCallRepo) ListActiveByWorkspace(_ context.Context, workspaceID uuid.UUID) ([]entity.Call, error) {
+	var calls []entity.Call
+	for _, call := range r.calls {
+		if call.Status != entity.CallStatusEnded && call.WorkspaceID == workspaceID {
+			calls = append(calls, *call)
+		}
+	}
+	return calls, nil
 }
 func (r *fakeCallRepo) ListStaleOpen(_ context.Context, before time.Time, limit int) ([]entity.Call, error) {
 	calls := []entity.Call{}

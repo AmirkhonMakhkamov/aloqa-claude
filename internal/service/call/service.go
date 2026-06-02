@@ -549,6 +549,43 @@ func serviceError(message string, err error) error {
 }
 
 // StartCall creates a new call and adds the creator as the host participant.
+// activeCallInChannel returns the first non-ended call linked to channelID in
+// the workspace, or nil. One-call-per-channel guard (9b).
+func (s *Service) activeCallInChannel(ctx context.Context, workspaceID, channelID uuid.UUID) (*entity.Call, error) {
+	calls, err := s.calls.ListActiveByWorkspace(ctx, workspaceID)
+	if err != nil {
+		return nil, cerrors.Internal("failed to list active calls", err)
+	}
+	for i := range calls {
+		if calls[i].ChannelID != nil && *calls[i].ChannelID == channelID {
+			return &calls[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// userActiveCall returns the first non-ended call in the workspace where userID
+// is a connected participant, or nil. Single-call-per-user guard (9c).
+func (s *Service) userActiveCall(ctx context.Context, workspaceID, userID uuid.UUID) (*entity.Call, error) {
+	calls, err := s.calls.ListActiveByWorkspace(ctx, workspaceID)
+	if err != nil {
+		return nil, cerrors.Internal("failed to list active calls", err)
+	}
+	for i := range calls {
+		participant, err := s.calls.GetParticipant(ctx, calls[i].ID, userID)
+		if err != nil {
+			if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+				continue
+			}
+			return nil, cerrors.Internal("failed to check user participation", err)
+		}
+		if participant.Status == entity.ParticipantStatusConnected {
+			return &calls[i], nil
+		}
+	}
+	return nil, nil
+}
+
 func (s *Service) StartCall(
 	ctx context.Context,
 	workspaceID, userID uuid.UUID,
@@ -583,6 +620,27 @@ func (s *Service) StartCall(
 		if err := s.requireChannelAccess(ctx, ch, userID); err != nil {
 			return nil, err
 		}
+
+		// One active call per channel (9b): reject a second call so the FE joins
+		// the existing one. Channel-scoped only — calls without a channel are
+		// unrestricted.
+		existing, err := s.activeCallInChannel(ctx, workspaceID, *channelID)
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil {
+			return nil, cerrors.ChannelCallExists("channel already has an active call")
+		}
+	}
+
+	// A user may be in only one call at a time (9c): reject starting a new call
+	// while already connected to another.
+	otherCall, err := s.userActiveCall(ctx, workspaceID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if otherCall != nil {
+		return nil, cerrors.UserInCall("you are already in another call")
 	}
 
 	now := time.Now()

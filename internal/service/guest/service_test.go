@@ -289,6 +289,57 @@ func TestRedeemCallInviteRejectsEndedCall(t *testing.T) {
 	}
 }
 
+// A call-scoped invite (no channel IDs) redeems into a call-scoped grant: the
+// grant carries the target CallID and no channel IDs, so the guest gets access
+// to that one call only. (unified guest link)
+func TestRedeemCallScopedInviteCreatesCallScopedGrant(t *testing.T) {
+	workspaceID := uuid.New()
+	callID := uuid.New()
+
+	invites := &fakeInviteRepo{byToken: map[string]*entity.GuestInvite{
+		"call-token": {
+			ID:          uuid.New(),
+			WorkspaceID: workspaceID,
+			Token:       "call-token",
+			ChannelIDs:  nil, // call-scoped: no channel access
+			CallID:      &callID,
+			MaxUses:     100,
+			Status:      entity.GuestInviteStatusActive,
+			ExpiresAt:   time.Now().Add(time.Hour),
+		},
+	}}
+	grants := &fakeGuestAccessRepo{}
+	svc := NewService(
+		invites,
+		grants,
+		&fakeUserRepo{},
+		&fakeWorkspaceRepo{},
+		&fakeChannelRepo{},
+		nil,
+	)
+	svc.SetCallLookup(&fakeCallLookup{call: &entity.Call{ID: callID, WorkspaceID: workspaceID, Status: entity.CallStatusActive}})
+
+	result, err := svc.RedeemInvite(context.Background(), RedeemInviteInput{
+		Token:       "call-token",
+		DisplayName: "Guest User",
+	})
+	if err != nil {
+		t.Fatalf("RedeemInvite returned error: %v", err)
+	}
+	if result.CallID == nil || *result.CallID != callID {
+		t.Fatalf("result.CallID = %v, want %s", result.CallID, callID)
+	}
+	if grants.created == nil {
+		t.Fatalf("expected a guest access grant to be created")
+	}
+	if grants.created.CallID == nil || *grants.created.CallID != callID {
+		t.Fatalf("grant.CallID = %v, want %s", grants.created.CallID, callID)
+	}
+	if len(grants.created.ChannelIDs) != 0 {
+		t.Fatalf("grant.ChannelIDs = %v, want empty (call-scoped)", grants.created.ChannelIDs)
+	}
+}
+
 type fakeCallLookup struct {
 	call *entity.Call
 }

@@ -264,12 +264,17 @@ func (s *Service) RedeemInvite(ctx context.Context, input RedeemInviteInput) (*R
 		createdUser = true
 	}
 
+	// Scope the grant to the invite's call (if any) so a call-scoped guest link
+	// confers access to that one call only — never channels or workspace content.
+	// Both the tx and non-tx persistence paths below use this single literal, so
+	// CallID lands in either path. (unified guest link)
 	grant := &entity.GuestAccessGrant{
 		ID:          id.New(),
 		InviteID:    invite.ID,
 		WorkspaceID: invite.WorkspaceID,
 		UserID:      user.ID,
 		ChannelIDs:  append([]uuid.UUID(nil), invite.ChannelIDs...),
+		CallID:      invite.CallID,
 		ExpiresAt:   invite.ExpiresAt,
 		CreatedAt:   time.Now().UTC(),
 	}

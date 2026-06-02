@@ -60,8 +60,10 @@ type guestLinkResponse struct {
 }
 
 // CreateGuestLink mints a one-time-style guest link scoped to a specific call.
-// Host/co-host only; rejected for channel-less calls so the guest grant can
-// never be an empty (all-channels) scope (ALK-700).
+// Host/co-host only. Works for ANY call type — including channel-less group /
+// meeting / 1:1 calls — because the grant is scoped to the call itself, not a
+// channel: a redeeming guest reaches exactly that call (and its in-call chat)
+// and nothing else in the workspace. (unified guest link)
 func (h *CallHandler) CreateGuestLink(w http.ResponseWriter, r *http.Request) {
 	callID, err := id.Parse(chi.URLParam(r, "callID"))
 	if err != nil {
@@ -72,13 +74,10 @@ func (h *CallHandler) CreateGuestLink(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
 
-	c, err := h.svc.AuthorizeGuestLink(r.Context(), workspaceID, callID, userID)
-	if err != nil {
+	// AuthorizeGuestLink enforces the host/co-host + active-call gate; its return
+	// value is not needed since the grant is call-scoped, not channel-scoped.
+	if _, err := h.svc.AuthorizeGuestLink(r.Context(), workspaceID, callID, userID); err != nil {
 		writeErr(w, err)
-		return
-	}
-	if c.ChannelID == nil {
-		writeErr(w, cerrors.InvalidInput("guest links are only available for calls in a channel"))
 		return
 	}
 
@@ -86,7 +85,7 @@ func (h *CallHandler) CreateGuestLink(w http.ResponseWriter, r *http.Request) {
 		WorkspaceID: workspaceID,
 		CreatedBy:   userID,
 		CallID:      &callID,
-		ChannelIDs:  []uuid.UUID{*c.ChannelID},
+		ChannelIDs:  nil, // call-scoped: no channel/workspace access
 		MaxUses:     guestCallLinkMaxUses,
 		TTL:         guestCallLinkTTL,
 	})

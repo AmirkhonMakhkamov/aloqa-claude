@@ -242,7 +242,9 @@ func (s *Service) isGuestUser(ctx context.Context, workspaceID, userID uuid.UUID
 	if s.guests == nil {
 		return false
 	}
-	allowed, err := s.guests.HasWorkspaceAccess(ctx, workspaceID, userID)
+	// Any active guest grant (channel OR call scoped) marks a guest, so the
+	// forced-waiting rule applies to call-scoped guests too (unified guest link).
+	allowed, err := s.guests.IsGuest(ctx, workspaceID, userID)
 	if err != nil {
 		return false
 	}
@@ -329,6 +331,34 @@ func (s *Service) requireCallAccess(ctx context.Context, workspaceID, callID, us
 	call, err := s.getCallForWorkspace(ctx, workspaceID, callID)
 	if err != nil {
 		return nil, err
+	}
+	// Guest branch: only entered when the user actually holds a guest grant, so
+	// a workspace member never pays for the extra checks (member latency is
+	// unchanged — for a member isGuestUser short-circuits on GetMember). A
+	// call-scoped guest reaches exactly the call they were invited to (and its
+	// in-call chat, gated by this same check), regardless of the call's channel,
+	// with no channel/workspace-content access. A legacy channel-scoped guest
+	// (CallID == nil) keeps a non-call workspace grant, so falls through to the
+	// channel/workspace member logic below which honours it via HasChannelAccess.
+	// (unified guest link)
+	if s.isGuestUser(ctx, call.WorkspaceID, userID) {
+		hasCall, aerr := s.guests.HasCallAccess(ctx, call.WorkspaceID, callID, userID)
+		if aerr != nil {
+			return nil, aerr
+		}
+		if hasCall {
+			return call, nil
+		}
+		hasLegacy, werr := s.guests.HasWorkspaceAccess(ctx, call.WorkspaceID, userID)
+		if werr != nil {
+			return nil, werr
+		}
+		if !hasLegacy {
+			// Call-scoped guest on a call they were NOT invited to: hard-deny so
+			// they can never see any other call or channel.
+			return nil, cerrors.Forbidden("you do not have access to this call")
+		}
+		// Legacy channel guest: continue to the channel/workspace branches.
 	}
 	if call.ChannelID != nil {
 		ch, err := s.channels.GetByID(ctx, *call.ChannelID)

@@ -425,8 +425,8 @@ func TestMessageProfileShareMigrationUpDownIdempotent(t *testing.T) {
 		_ = tx.Rollback(context.Background())
 	})
 
-	up := readRepoRootFile(t, "migrations/044_messages_profile_share.sql")
-	down := readRepoRootFile(t, "migrations/down/044_messages_profile_share.down.sql")
+	up := readRepoRootFile(t, "migrations/047_messages_profile_share.sql")
+	down := readRepoRootFile(t, "migrations/down/047_messages_profile_share.down.sql")
 	if _, err := tx.Exec(ctx, down); err != nil {
 		t.Fatalf("reset migration down: %v", err)
 	}

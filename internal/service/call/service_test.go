@@ -782,6 +782,39 @@ func TestStartCallRequiresLiveKitRoomBeforePersist(t *testing.T) {
 	}
 }
 
+func TestStartCallDefaultsChatEnabled(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	userID := uuid.New()
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	calls := &fakeCallRepo{calls: map[uuid.UUID]*entity.Call{}, participants: map[[2]uuid.UUID]*entity.CallParticipant{}}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+	configureCleanupLiveKit(svc, nil)
+
+	// Empty settings → Settings.Chat is the Go zero value (false). StartCall must
+	// default it to true so the call-chat gate (message.go "call chat is disabled")
+	// never 403s for ad-hoc / channel calls. (hotfix)
+	callEntity, err := svc.StartCall(ctx, workspaceID, userID, entity.CallTypeOneToOne, "dm", nil, entity.CallSettings{})
+	if err != nil {
+		t.Fatalf("StartCall returned error: %v", err)
+	}
+	if callEntity == nil {
+		t.Fatalf("StartCall returned nil call")
+	}
+	if !callEntity.Settings.Chat {
+		t.Fatalf("StartCall Settings.Chat = false, want true (chat on by default)")
+	}
+	persisted, ok := calls.calls[callEntity.ID]
+	if !ok {
+		t.Fatalf("call was not persisted")
+	}
+	if !persisted.Settings.Chat {
+		t.Fatalf("persisted call Settings.Chat = false, want true")
+	}
+}
+
 func TestJoinCallRequiresLiveKitRoomBeforeParticipantInsert(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()

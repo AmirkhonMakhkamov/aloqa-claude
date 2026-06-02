@@ -391,6 +391,13 @@ func (r *fakeRecordingRepo) Create(context.Context, *entity.Recording) error { r
 func (r *fakeRecordingRepo) GetByID(context.Context, uuid.UUID) (*entity.Recording, error) {
 	return nil, cerrors.NotFound("recording not found")
 }
+func (r *fakeRecordingRepo) GetByEgressID(context.Context, string) (*entity.Recording, error) {
+	return nil, cerrors.NotFound("recording not found")
+}
+func (r *fakeRecordingRepo) GetActiveByCall(context.Context, uuid.UUID) (*entity.Recording, error) {
+	return nil, cerrors.NotFound("recording not found")
+}
+func (r *fakeRecordingRepo) SetEgressID(context.Context, uuid.UUID, string) error { return nil }
 func (r *fakeRecordingRepo) ListByCall(context.Context, uuid.UUID) ([]entity.Recording, error) {
 	return nil, nil
 }

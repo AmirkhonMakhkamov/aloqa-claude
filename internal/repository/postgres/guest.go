@@ -33,13 +33,13 @@ func (r *GuestInviteRepo) withTx(tx pgx.Tx) *GuestInviteRepo {
 
 func (r *GuestInviteRepo) Create(ctx context.Context, invite *entity.GuestInvite) error {
 	query := `
-		INSERT INTO guest_invites (id, workspace_id, created_by, token, email, channel_ids, max_uses, use_count, status, expires_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
+		INSERT INTO guest_invites (id, workspace_id, created_by, token, email, channel_ids, max_uses, use_count, status, expires_at, created_at, call_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`
 
 	_, err := r.db.Exec(ctx, query,
 		invite.ID, invite.WorkspaceID, invite.CreatedBy, invite.Token,
 		invite.Email, invite.ChannelIDs, invite.MaxUses, invite.UseCount,
-		invite.Status, invite.ExpiresAt, invite.CreatedAt,
+		invite.Status, invite.ExpiresAt, invite.CreatedAt, invite.CallID,
 	)
 	if err != nil {
 		return fmt.Errorf("postgres: create guest invite: %w", err)
@@ -49,7 +49,7 @@ func (r *GuestInviteRepo) Create(ctx context.Context, invite *entity.GuestInvite
 
 func (r *GuestInviteRepo) GetByToken(ctx context.Context, token string) (*entity.GuestInvite, error) {
 	query := `
-		SELECT id, workspace_id, created_by, token, email, channel_ids, max_uses, use_count, status, expires_at, created_at
+		SELECT id, workspace_id, created_by, token, email, channel_ids, max_uses, use_count, status, expires_at, created_at, call_id
 		FROM guest_invites WHERE token = $1`
 
 	return r.scanInvite(ctx, query, token)
@@ -57,7 +57,7 @@ func (r *GuestInviteRepo) GetByToken(ctx context.Context, token string) (*entity
 
 func (r *GuestInviteRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.GuestInvite, error) {
 	query := `
-		SELECT id, workspace_id, created_by, token, email, channel_ids, max_uses, use_count, status, expires_at, created_at
+		SELECT id, workspace_id, created_by, token, email, channel_ids, max_uses, use_count, status, expires_at, created_at, call_id
 		FROM guest_invites WHERE id = $1`
 
 	return r.scanInvite(ctx, query, id)
@@ -89,7 +89,7 @@ func (r *GuestInviteRepo) Revoke(ctx context.Context, id uuid.UUID) error {
 
 func (r *GuestInviteRepo) ListByWorkspace(ctx context.Context, workspaceID uuid.UUID) ([]entity.GuestInvite, error) {
 	query := `
-		SELECT id, workspace_id, created_by, token, email, channel_ids, max_uses, use_count, status, expires_at, created_at
+		SELECT id, workspace_id, created_by, token, email, channel_ids, max_uses, use_count, status, expires_at, created_at, call_id
 		FROM guest_invites WHERE workspace_id = $1 ORDER BY created_at DESC`
 
 	rows, err := r.db.Query(ctx, query, workspaceID)
@@ -121,7 +121,7 @@ func (r *GuestInviteRepo) scanInvite(ctx context.Context, query string, args ...
 	err := r.db.QueryRow(ctx, query, args...).Scan(
 		&inv.ID, &inv.WorkspaceID, &inv.CreatedBy, &inv.Token,
 		&inv.Email, &inv.ChannelIDs, &inv.MaxUses, &inv.UseCount,
-		&inv.Status, &inv.ExpiresAt, &inv.CreatedAt,
+		&inv.Status, &inv.ExpiresAt, &inv.CreatedAt, &inv.CallID,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

@@ -52,6 +52,10 @@ const (
 	ParticipantStatusJoining      ParticipantStatus = "joining"
 	ParticipantStatusConnected    ParticipantStatus = "connected"
 	ParticipantStatusDisconnected ParticipantStatus = "disconnected"
+	// ParticipantStatusDeclined is a terminal state for a (guest) participant the
+	// host rejected from the waiting room; a subsequent JoinCall is refused with
+	// WAITING_ROOM_DECLINED instead of re-creating a waiting row (ALK-700).
+	ParticipantStatusDeclined ParticipantStatus = "declined"
 )
 
 type ParticipantLeftReason string
@@ -124,19 +128,20 @@ type ActiveCallObservation struct {
 }
 
 type Call struct {
-	ID              uuid.UUID     `json:"id"`
-	WorkspaceID     uuid.UUID     `json:"workspace_id"`
-	ChannelID       *uuid.UUID    `json:"channel_id,omitempty"`
-	Type            CallType      `json:"type"`
-	Status          CallStatus    `json:"status"`
-	Title           string        `json:"title,omitempty"`
-	CreatedBy       uuid.UUID     `json:"created_by"`
-	ScheduledCallID *uuid.UUID    `json:"scheduled_call_id,omitempty"`
-	Settings        CallSettings  `json:"settings"`
-	StartedAt       *time.Time    `json:"started_at,omitempty"`
-	EndedAt         *time.Time    `json:"ended_at,omitempty"`
-	EndReason       CallEndReason `json:"end_reason,omitempty"`
-	CreatedAt       time.Time     `json:"created_at"`
+	ID                  uuid.UUID     `json:"id"`
+	WorkspaceID         uuid.UUID     `json:"workspace_id"`
+	ChannelID           *uuid.UUID    `json:"channel_id,omitempty"`
+	Type                CallType      `json:"type"`
+	Status              CallStatus    `json:"status"`
+	Title               string        `json:"title,omitempty"`
+	CreatedBy           uuid.UUID     `json:"created_by"`
+	ScheduledCallID     *uuid.UUID    `json:"scheduled_call_id,omitempty"`
+	Settings            CallSettings  `json:"settings"`
+	StartedAt           *time.Time    `json:"started_at,omitempty"`
+	EndedAt             *time.Time    `json:"ended_at,omitempty"`
+	EndReason           CallEndReason `json:"end_reason,omitempty"`
+	FeaturedShareUserID *uuid.UUID    `json:"featured_share_user_id,omitempty"`
+	CreatedAt           time.Time     `json:"created_at"`
 }
 
 type CallParticipant struct {
@@ -149,9 +154,16 @@ type CallParticipant struct {
 	AudioMuted     bool                  `json:"audio_muted"`
 	VideoMuted     bool                  `json:"video_muted"`
 	ScreenSharing  bool                  `json:"screen_sharing"`
+	CanScreenShare bool                  `json:"can_screen_share"`
 	JoinedAt       *time.Time            `json:"joined_at,omitempty"`
 	LeftAt         *time.Time            `json:"left_at,omitempty"`
 	LeftReason     ParticipantLeftReason `json:"left_reason,omitempty"`
+	// DisplayName and IsGuest are denormalized, read-time-only projections (not
+	// persisted on call_participants) so the FE can render "{name} (Guest)" for
+	// participants who are not workspace members and thus absent from the
+	// workspace-members lookup (ALK-700). Populated by the participant repo reads.
+	DisplayName string `json:"display_name,omitempty"`
+	IsGuest     bool   `json:"is_guest"`
 }
 
 type LiveKitWebhookEvent struct {

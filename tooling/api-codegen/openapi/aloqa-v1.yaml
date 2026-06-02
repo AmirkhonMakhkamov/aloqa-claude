@@ -1143,6 +1143,83 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
 
+  # Screen-share permission controls (ALK-697).
+  /api/v1/workspaces/{workspaceID}/calls/{callID}/share-requests:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/CallID'
+    post:
+      summary: Request permission to screen-share (self)
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Screen-share request broadcast to the host }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/workspaces/{workspaceID}/calls/{callID}/share-requests/{requesterUserID}/resolve:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/CallID'
+      - name: requesterUserID
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      summary: Approve or deny a screen-share request (host/co-host)
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResolveShareRequest' }
+      responses:
+        '204': { description: Screen-share request resolved }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/workspaces/{workspaceID}/calls/{callID}/participants/{userID}/revoke-screen-share:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/CallID'
+      - name: userID
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      summary: Revoke a participant's screen-share grant (host/co-host)
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Screen-share grant revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/workspaces/{workspaceID}/calls/{callID}/featured-share:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/CallID'
+    put:
+      summary: Feature one participant's screen-share for everyone (host/co-host)
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetFeaturedShareRequest' }
+      responses:
+        '204': { description: Featured share updated }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   # The /turn-credentials path was originally vendored straight into
   # _generated.ts (commit 5fef4db) without a corresponding YAML entry; re-add
   # the spec block so the codegen regen preserves the typed path consumed by
@@ -1947,6 +2024,11 @@ components:
             - $ref: '#/components/schemas/CallEndReason'
           nullable: true
           description: Why the call ended; absent/null until the first terminal transition wins.
+        featured_share_user_id:
+          allOf:
+            - $ref: '#/components/schemas/UUID'
+          nullable: true
+          description: User whose screen-share the host featured for everyone; absent/null when none. (ALK-697)
         created_at:
           allOf:
             - $ref: '#/components/schemas/IsoDatetime'
@@ -1991,6 +2073,9 @@ components:
         screen_sharing:
           type: boolean
           description: Participant is sharing their screen.
+        can_screen_share:
+          type: boolean
+          description: Participant has an explicit grant to publish a screen-share track. (ALK-697)
         joined_at:
           allOf:
             - $ref: '#/components/schemas/IsoDatetime'
@@ -2097,6 +2182,25 @@ components:
         screen_sharing:
           type: boolean
           description: Patch screen-sharing state; omitted means leave unchanged.
+
+    ResolveShareRequest:
+      type: object
+      description: Body for POST /calls/{callID}/share-requests/{requesterUserID}/resolve. (ALK-697)
+      required: [approved]
+      properties:
+        approved:
+          type: boolean
+          description: Whether the host grants (true) or denies (false) the screen-share request.
+
+    SetFeaturedShareRequest:
+      type: object
+      description: Body for PUT /calls/{callID}/featured-share; a null user_id clears the featured share. (ALK-697)
+      properties:
+        user_id:
+          allOf:
+            - $ref: '#/components/schemas/UUID'
+          nullable: true
+          description: Participant whose screen-share to feature for everyone; null clears it.
 
     TurnCredentials:
       type: object

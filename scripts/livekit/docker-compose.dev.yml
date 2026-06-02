@@ -21,5 +21,29 @@ services:
     volumes:
       - livekit-redis-data:/data
 
+  # ALK-701: LiveKit Egress records a room-composite (grid) MP4. It joins the
+  # compose network (reaches livekit at ws://livekit-server:7880 and redis:6379
+  # by DNS — no network_mode: host, which does not work on macOS Docker). For
+  # local file output it writes /out/recordings/<callId>/<recordingId>.mp4;
+  # EGRESS_OUTPUT_DIR MUST be the SAME host directory as the API's
+  # MEDIA_STORAGE_PATH so the API's local storage resolves the same key. For
+  # production set MEDIA_STORAGE_BACKEND=s3|minio instead and egress uploads to
+  # the bucket directly (see livekit.production.example.yaml).
+  egress:
+    image: livekit/egress:latest
+    restart: unless-stopped
+    environment:
+      - EGRESS_CONFIG_FILE=/etc/egress.yaml
+    volumes:
+      - ./egress.yaml:/etc/egress.yaml:ro
+      - ${EGRESS_OUTPUT_DIR:-../../storage}:/out
+    cap_add:
+      # Required for the headless Chrome sandbox used by room-composite egress.
+      - SYS_ADMIN
+    shm_size: 1gb
+    depends_on:
+      - redis
+      - livekit-server
+
 volumes:
   livekit-redis-data:

@@ -133,6 +133,9 @@ type UnreadSummary struct {
 type RecordingRepository interface {
 	Create(ctx context.Context, rec *entity.Recording) error
 	GetByID(ctx context.Context, id uuid.UUID) (*entity.Recording, error)
+	GetByEgressID(ctx context.Context, egressID string) (*entity.Recording, error)
+	GetActiveByCall(ctx context.Context, callID uuid.UUID) (*entity.Recording, error)
+	SetEgressID(ctx context.Context, id uuid.UUID, egressID string) error
 	ListByCall(ctx context.Context, callID uuid.UUID) ([]entity.Recording, error)
 	ListByWorkspace(ctx context.Context, workspaceID uuid.UUID, p pagination.Params) ([]entity.Recording, error)
 	ListByStatus(ctx context.Context, status entity.RecordingStatus, p pagination.Params) ([]entity.Recording, error)
@@ -226,7 +229,20 @@ type CallRepository interface {
 	ListParticipants(ctx context.Context, callID uuid.UUID) ([]entity.CallParticipant, error)
 	UpdateParticipantStatus(ctx context.Context, id uuid.UUID, status entity.ParticipantStatus) error
 	UpdateParticipantRole(ctx context.Context, id uuid.UUID, role entity.CallRole) error
+	// TransferHost atomically demotes the current host (fromUserID) to participant
+	// and promotes toUserID to host in a single all-or-nothing statement that only
+	// fires while fromUserID is still the host AND toUserID is still a participant
+	// of the call. Returns true when the swap happened, false when it was a no-op
+	// (host already changed / target gone). Enforces the single-host invariant
+	// under concurrency. (ALK-696)
+	TransferHost(ctx context.Context, callID, fromUserID, toUserID uuid.UUID) (bool, error)
 	UpdateParticipantMedia(ctx context.Context, id uuid.UUID, audioMuted, videoMuted, screenSharing bool) error
+	// SetCanScreenShare flips a participant's screen-share grant. Keyed by the
+	// participant id (uuid) to match UpdateParticipantMedia. (ALK-697)
+	SetCanScreenShare(ctx context.Context, id uuid.UUID, canShare bool) error
+	// SetFeaturedShareUserID sets (or clears with nil) the host-featured share
+	// pick on a call row. Keyed by callID since it's a calls-row update. (ALK-697)
+	SetFeaturedShareUserID(ctx context.Context, callID uuid.UUID, userID *uuid.UUID) error
 	RemoveParticipant(ctx context.Context, callID, userID uuid.UUID) error
 }
 

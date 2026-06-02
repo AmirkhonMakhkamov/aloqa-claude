@@ -24,6 +24,7 @@ type GuestInvite struct {
 	Token       string            `json:"token"`
 	Email       string            `json:"email,omitempty"`       // Optional pre-assigned email
 	ChannelIDs  []uuid.UUID       `json:"channel_ids,omitempty"` // Channels the guest can access
+	CallID      *uuid.UUID        `json:"call_id,omitempty"`     // Set for call-scoped guest links (ALK-700)
 	MaxUses     int               `json:"max_uses"`              // 0 = unlimited
 	UseCount    int               `json:"use_count"`
 	Status      GuestInviteStatus `json:"status"`

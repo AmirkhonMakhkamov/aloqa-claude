@@ -701,6 +701,88 @@ func TestReturnToMainRoomLiveKitUnconfiguredReturnsUnavailable(t *testing.T) {
 	}
 }
 
+// Regression (2026-06-03 prod): when the host closes breakout rooms, the server
+// clears breakout_room_id BEFORE clients drive themselves back to main. The
+// client's return then arrives with no assignment. Return must be idempotent —
+// re-issue a MAIN-room token instead of 409 — otherwise the client never
+// reconnects to main and rides the soon-deleted breakout room to call-end.
+func TestReturnToMainRoomIdempotentWhenAlreadyUnassigned(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	userID := uuid.New()
+
+	participant := connectedParticipant(callID, userID, entity.CallRoleParticipant)
+	participant.BreakoutRoomID = nil // already unassigned (host closed the room)
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: breakoutCall(callID, workspaceID, hostID)},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, userID}: participant,
+		},
+	}
+	repo := newStubBreakoutRepo()
+	pub := &capturingPublisher{}
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
+	svc.SetLiveKit(breakoutTestLiveKit())
+	svc.SetLiveKitRoomClient(&fakeLiveKitRoomClient{})
+
+	info, err := svc.ReturnToMainRoom(ctx, callID, userID)
+	if err != nil {
+		t.Fatalf("ReturnToMainRoom returned error: %v", err)
+	}
+	if info == nil || info.AccessToken == "" {
+		t.Fatalf("ReturnToMainRoom join info = %+v, want a non-empty main-room access token", info)
+	}
+	// Already in main: nothing to unassign and no move event.
+	if len(repo.assignments) != 0 {
+		t.Fatalf("assignments = %+v, want none when already in main", repo.assignments)
+	}
+	if got := countBreakoutEvents(t, pub.captures, event.TypeBreakoutParticipantMoved); got != 0 {
+		t.Fatalf("participant.moved events = %d, want 0 when already in main", got)
+	}
+}
+
+// Review follow-up: returning to main on an already-ended call must be rejected
+// (CALL_ENDED), so the FE roomDeleted safety net falls back to ending the call
+// instead of reconnecting to a dead main room.
+func TestReturnToMainRoomRejectsEndedCall(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	userID := uuid.New()
+	breakoutRoomID := uuid.New()
+
+	participant := connectedParticipant(callID, userID, entity.CallRoleParticipant)
+	participant.BreakoutRoomID = &breakoutRoomID
+	endedCall := breakoutCall(callID, workspaceID, hostID)
+	endedCall.Status = entity.CallStatusEnded
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: endedCall},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, userID}: participant,
+		},
+	}
+	repo := newStubBreakoutRepo()
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
+	svc.SetLiveKit(breakoutTestLiveKit())
+	svc.SetLiveKitRoomClient(&fakeLiveKitRoomClient{})
+
+	info, err := svc.ReturnToMainRoom(ctx, callID, userID)
+	if !hasCode(err, cerrors.CodeCallEnded) {
+		t.Fatalf("ReturnToMainRoom error = %v, want CALL_ENDED", err)
+	}
+	if info != nil {
+		t.Fatalf("ReturnToMainRoom info = %+v, want nil for an ended call", info)
+	}
+	if len(repo.assignments) != 0 {
+		t.Fatalf("assignments = %+v, want none for an ended call", repo.assignments)
+	}
+}
+
 // breakoutDeleteScheduled reports whether a deferred LiveKit delete is pending
 // for the given room name.
 func breakoutDeleteScheduled(svc *Service, name string) bool {

@@ -700,9 +700,13 @@ func TestSendMessageForwardedFromValidationAndPersistence(t *testing.T) {
 			messages := &fakeMessageRepo{messages: map[uuid.UUID]*entity.Message{}}
 			svc := NewService(channels, messages, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
 
+			var forwardedFrom *json.RawMessage
+			if tt.forwardedFrom != nil {
+				forwardedFrom = &tt.forwardedFrom
+			}
 			msg, err := svc.SendMessage(ctx, channelID, userID, SendMessageInput{
 				Content:         tt.content,
-				ForwardedFrom:   tt.forwardedFrom,
+				ForwardedFrom:   forwardedFrom,
 				QuotedMessageID: tt.quotedMessageID,
 				QuotedSnapshot:  tt.quotedSnapshot,
 			})

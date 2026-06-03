@@ -37,7 +37,7 @@ read_env() {
 	local default="${2:-}"
 	local value=""
 
-	if [[ -v "$key" ]]; then
+	if [ -n "${!key+x}" ]; then
 		printf '%s' "${!key}"
 		return
 	fi

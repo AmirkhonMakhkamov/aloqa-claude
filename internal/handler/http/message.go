@@ -28,7 +28,7 @@ func NewMessageHandler(svc *chat.Service) *MessageHandler {
 type sendMessageRequest struct {
 	Content         string                    `json:"content"`
 	ParentID        *string                   `json:"parent_id,omitempty"`
-	ForwardedFrom   json.RawMessage           `json:"forwarded_from,omitempty"`
+	ForwardedFrom   *json.RawMessage          `json:"forwarded_from,omitempty"`
 	QuotedMessageID *string                   `json:"quoted_message_id,omitempty"`
 	QuotedSnapshot  *chat.QuotedSnapshotInput `json:"quoted_snapshot,omitempty"`
 	ProfileShare    *profileShareRequest      `json:"profile_share,omitempty"`
@@ -39,6 +39,17 @@ type sendMessageRequest struct {
 
 type profileShareRequest struct {
 	UserID string `json:"user_id"`
+}
+
+func (p *profileShareRequest) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		UserID string `json:"user_id"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	p.UserID = wire.UserID
+	return nil
 }
 
 func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {

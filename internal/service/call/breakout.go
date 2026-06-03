@@ -279,6 +279,12 @@ func (s *Service) ReturnToMainRoom(ctx context.Context, callID, userID uuid.UUID
 		return nil, s.wrapCallError(ctx, err, callID, "return to main room")
 	}
 
+	// Reject an ended call so the client's roomDeleted safety net falls back to
+	// ending the call rather than reconnecting to a dead main room.
+	if call.Status == entity.CallStatusEnded {
+		return nil, cerrors.CallEnded("this call has already ended")
+	}
+
 	participant, err := s.calls.GetParticipant(ctx, callID, userID)
 	if err != nil {
 		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
@@ -287,12 +293,18 @@ func (s *Service) ReturnToMainRoom(ctx context.Context, callID, userID uuid.UUID
 		return nil, cerrors.Internal("failed to get participant", err)
 	}
 
-	if participant.BreakoutRoomID == nil {
-		return nil, cerrors.Conflict("participant is already in the main room")
-	}
-
 	if !s.livekit.IsConfigured() {
 		return nil, cerrors.Unavailable("livekit is not configured")
+	}
+
+	// Idempotent: the participant may already be unassigned — the host closes
+	// breakout rooms by clearing breakout_room_id BEFORE clients drive themselves
+	// back to main, so the client's return arrives with no assignment. Returning
+	// to main is the desired end state, so just re-issue a MAIN-room token and let
+	// the client reconnect, rather than failing with a conflict (which left the
+	// client stranded on the soon-deleted breakout room and ended its whole call).
+	if participant.BreakoutRoomID == nil {
+		return s.IssueLiveKitJoinInfo(ctx, call, userID, "")
 	}
 
 	// Remove from breakout SFU room.

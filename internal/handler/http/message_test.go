@@ -148,6 +148,49 @@ func TestMessagePostProfileShareBuildsCardPayload(t *testing.T) {
 	}
 }
 
+func TestMessagePostProfileShareAcceptsHydratedClientPayload(t *testing.T) {
+	f := newMessageHTTPFixture()
+	f.channels.channels[f.channelID].Type = entity.ChannelTypeDM
+	targetID := uuid.New()
+	position := "Finance Business Partner, R&D"
+	department := "Finance"
+	f.workspaces.members[[2]uuid.UUID{f.workspaceID, targetID}] = &entity.WorkspaceMember{
+		WorkspaceID: f.workspaceID,
+		UserID:      targetID,
+		Role:        entity.WorkspaceRoleMember,
+		User: &entity.User{
+			ID:          targetID,
+			DisplayName: "Frank Abdullayev",
+			Position:    &position,
+			Department:  &department,
+			Status:      entity.UserStatusActive,
+		},
+	}
+
+	res := f.serve(
+		http.MethodPost,
+		"/channels/"+f.channelID.String()+"/messages",
+		`{"content":"Frank Abdullayev","profile_share":{"user_id":"`+targetID.String()+`","workspace_id":"`+f.workspaceID.String()+`","snapshot":{"display_name":"Frank Abdullayev","role":"member","position":"Finance Business Partner, R&D","department":"Finance"}}}`,
+	)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", res.Code, res.Body.String())
+	}
+
+	var msg entity.Message
+	if err := json.Unmarshal(res.Body.Bytes(), &msg); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if msg.ProfileShare == nil {
+		t.Fatalf("profile_share = nil, want value")
+	}
+	if msg.ProfileShare.UserID != targetID || msg.ProfileShare.WorkspaceID != f.workspaceID {
+		t.Fatalf("profile_share ids = %s/%s, want %s/%s", msg.ProfileShare.UserID, msg.ProfileShare.WorkspaceID, targetID, f.workspaceID)
+	}
+	if msg.ProfileShare.Snapshot.DisplayName != "Frank Abdullayev" || msg.ProfileShare.Snapshot.Role != entity.WorkspaceRoleMember {
+		t.Fatalf("profile_share snapshot = %+v, want hydrated target profile", msg.ProfileShare.Snapshot)
+	}
+}
+
 func TestMessagePostProfileShareRejectsInvalidUserID(t *testing.T) {
 	f := newMessageHTTPFixture()
 	f.channels.channels[f.channelID].Type = entity.ChannelTypeDM

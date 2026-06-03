@@ -304,7 +304,7 @@ type CreateChannelInput struct {
 type SendMessageInput struct {
 	Content         string
 	ParentID        *uuid.UUID
-	ForwardedFrom   json.RawMessage
+	ForwardedFrom   *json.RawMessage
 	QuotedMessageID *uuid.UUID
 	QuotedSnapshot  *ParsedQuotedSnapshotInput
 	ProfileShare    *ProfileShareInput
@@ -1238,15 +1238,15 @@ func (s *Service) SendMessage(
 	// (ForwardedFrom) OR a quoted snapshot (Share message flow — the source
 	// message becomes a quote and the author may omit their own text) OR a
 	// profile share card (ALK-708).
-	if len(input.ForwardedFrom) == 0 && input.QuotedSnapshot == nil && input.ProfileShare == nil && contentLen < 1 {
+	if (input.ForwardedFrom == nil || len(*input.ForwardedFrom) == 0) && input.QuotedSnapshot == nil && input.ProfileShare == nil && contentLen < 1 {
 		return nil, cerrors.InvalidInput("content is required")
 	}
 	if contentLen > 40000 {
 		return nil, cerrors.InvalidInput("content must be at most 40000 characters")
 	}
-	if len(input.ForwardedFrom) > 0 {
+	if input.ForwardedFrom != nil && len(*input.ForwardedFrom) > 0 {
 		var probe interface{}
-		if err := json.Unmarshal(input.ForwardedFrom, &probe); err != nil {
+		if err := json.Unmarshal(*input.ForwardedFrom, &probe); err != nil {
 			return nil, cerrors.InvalidInput("forwarded_from must be valid JSON")
 		}
 	}
@@ -1304,6 +1304,10 @@ func (s *Service) SendMessage(
 	}
 
 	now := time.Now()
+	var forwardedFrom json.RawMessage
+	if input.ForwardedFrom != nil {
+		forwardedFrom = *input.ForwardedFrom
+	}
 	msg := &entity.Message{
 		ID:              id.New(),
 		ChannelID:       channelID,
@@ -1311,7 +1315,7 @@ func (s *Service) SendMessage(
 		ParentID:        input.ParentID,
 		Content:         input.Content,
 		Type:            entity.MessageTypeText,
-		ForwardedFrom:   input.ForwardedFrom,
+		ForwardedFrom:   forwardedFrom,
 		QuotedMessageID: input.QuotedMessageID,
 		QuotedSnapshot:  quotedSnapshot,
 		ProfileShare:    profileShare,

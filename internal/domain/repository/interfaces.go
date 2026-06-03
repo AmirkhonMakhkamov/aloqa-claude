@@ -177,6 +177,7 @@ type BreakoutRoomRepository interface {
 	Create(ctx context.Context, room *entity.BreakoutRoom) error
 	GetByID(ctx context.Context, id uuid.UUID) (*entity.BreakoutRoom, error)
 	ListByCall(ctx context.Context, callID uuid.UUID) ([]entity.BreakoutRoom, error)
+	ListCallsWithExpiredActiveBreakouts(ctx context.Context, before time.Time, limit int) ([]uuid.UUID, error)
 	Close(ctx context.Context, id uuid.UUID) error
 	CloseAllByCall(ctx context.Context, callID uuid.UUID) error
 
@@ -219,6 +220,7 @@ type CallRepository interface {
 	GetByID(ctx context.Context, id uuid.UUID) (*entity.Call, error)
 	ListActiveByWorkspace(ctx context.Context, workspaceID uuid.UUID) ([]entity.Call, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status entity.CallStatus) error
+	UpdateSettings(ctx context.Context, id uuid.UUID, settings entity.CallSettings) error
 	End(ctx context.Context, id uuid.UUID) error
 
 	AddParticipant(ctx context.Context, p *entity.CallParticipant) error

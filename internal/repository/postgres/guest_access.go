@@ -32,15 +32,24 @@ func (r *GuestAccessRepo) withTx(tx pgx.Tx) *GuestAccessRepo {
 }
 
 func (r *GuestAccessRepo) CreateGrant(ctx context.Context, grant *entity.GuestAccessGrant) error {
+	// channel_ids is NOT NULL: a nil Go slice binds as SQL NULL (bypassing the
+	// column default) and violates the constraint, so a call-scoped grant with no
+	// channels must persist as an empty array. Normalize at the DB boundary so
+	// every caller is protected, not only the service-layer construction.
+	channelIDs := grant.ChannelIDs
+	if channelIDs == nil {
+		channelIDs = []uuid.UUID{}
+	}
 	query := `
-		INSERT INTO guest_access_grants (id, invite_id, workspace_id, user_id, channel_ids, expires_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`
+		INSERT INTO guest_access_grants (id, invite_id, workspace_id, user_id, channel_ids, call_id, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
 	_, err := r.db.Exec(ctx, query,
 		grant.ID,
 		grant.InviteID,
 		grant.WorkspaceID,
 		grant.UserID,
-		grant.ChannelIDs,
+		channelIDs,
+		grant.CallID,
 		grant.ExpiresAt,
 		grant.CreatedAt,
 	)
@@ -56,7 +65,7 @@ func (r *GuestAccessRepo) CreateGrant(ctx context.Context, grant *entity.GuestAc
 
 func (r *GuestAccessRepo) ListActiveByUserWorkspace(ctx context.Context, userID, workspaceID uuid.UUID, now time.Time) ([]entity.GuestAccessGrant, error) {
 	query := `
-		SELECT id, invite_id, workspace_id, user_id, channel_ids, expires_at, created_at
+		SELECT id, invite_id, workspace_id, user_id, channel_ids, call_id, expires_at, created_at
 		FROM guest_access_grants
 		WHERE user_id = $1 AND workspace_id = $2 AND expires_at > $3
 		ORDER BY created_at DESC`
@@ -75,6 +84,7 @@ func (r *GuestAccessRepo) ListActiveByUserWorkspace(ctx context.Context, userID,
 			&grant.WorkspaceID,
 			&grant.UserID,
 			&grant.ChannelIDs,
+			&grant.CallID,
 			&grant.ExpiresAt,
 			&grant.CreatedAt,
 		); err != nil {

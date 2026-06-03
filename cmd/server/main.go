@@ -383,6 +383,7 @@ func run() error {
 	}, guestAccessChecker, collaborationAccessChecker)
 	callSvc.SetMediaControlPlane(mediaOpsSvc)
 	callSvc.SetCallMessageRepo(callMessageRepo)
+	callSvc.SetMessageRepo(messageRepo)
 	callSvc.SetTransactionManager(txManager)
 	callSvc.SetLiveKit(call.LiveKitSettings{
 		URL:       cfg.LiveKit.URL,
@@ -487,6 +488,9 @@ func run() error {
 	reliability.Supervise(ctx, "call_stale_cleanup", func(c context.Context) {
 		callSvc.RunStaleCallCleanupWorker(c, cfg.WebRTC.CallCleanupInterval, cfg.WebRTC.CallEmptyGrace, cfg.WebRTC.CallCleanupBatchSize)
 	})
+	reliability.Supervise(ctx, "breakout_auto_close", func(c context.Context) {
+		callSvc.RunBreakoutAutoCloseWorker(c, cfg.WebRTC.CallCleanupInterval, cfg.WebRTC.CallCleanupBatchSize)
+	})
 	reliability.Supervise(ctx, "recording_processor", func(c context.Context) {
 		recordingSvc.RunProcessingWorker(c, recordingProcessor, cfg.Media.RecordingProcessingInterval, 20)
 	})
@@ -565,6 +569,7 @@ func run() error {
 		WS:               wsHandler,
 		Validator:        authSvc,
 		PersonalResolver: authSvc,
+		SessionResolver:  authSvc,
 		Idempotency: middleware.Idempotency(rdb, middleware.IdempotencyConfig{
 			TTL:          cfg.Realtime.IdempotencyTTL,
 			MaxBodyBytes: cfg.Realtime.IdempotencyMaxBody,

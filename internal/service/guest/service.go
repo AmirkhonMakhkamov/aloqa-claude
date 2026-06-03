@@ -251,6 +251,7 @@ func (s *Service) RedeemInvite(ctx context.Context, input RedeemInviteInput) (*R
 			ID:          id.New(),
 			Email:       input.Email,
 			DisplayName: input.DisplayName,
+			AvatarColor: entity.AvatarColorForDisplayName(input.DisplayName),
 			Status:      entity.UserStatusActive,
 			Locale:      "en",
 			CreatedAt:   now,
@@ -264,14 +265,22 @@ func (s *Service) RedeemInvite(ctx context.Context, input RedeemInviteInput) (*R
 		createdUser = true
 	}
 
+	// Scope the grant to the invite's call (if any) so a call-scoped guest link
+	// confers access to that one call only — never channels or workspace content.
+	// Both the tx and non-tx persistence paths below use this single literal, so
+	// CallID lands in either path. (unified guest link)
 	grant := &entity.GuestAccessGrant{
 		ID:          id.New(),
 		InviteID:    invite.ID,
 		WorkspaceID: invite.WorkspaceID,
 		UserID:      user.ID,
-		ChannelIDs:  append([]uuid.UUID(nil), invite.ChannelIDs...),
-		ExpiresAt:   invite.ExpiresAt,
-		CreatedAt:   time.Now().UTC(),
+		// Non-nil empty slice when the invite has no channels (call-scoped links):
+		// guest_access_grants.channel_ids is NOT NULL and a nil []uuid.UUID binds as
+		// SQL NULL, which 500s the redeem (surfaced as a guest "Network error").
+		ChannelIDs: append(make([]uuid.UUID, 0, len(invite.ChannelIDs)), invite.ChannelIDs...),
+		CallID:     invite.CallID,
+		ExpiresAt:  invite.ExpiresAt,
+		CreatedAt:  time.Now().UTC(),
 	}
 	if s.tx != nil {
 		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
@@ -351,6 +360,84 @@ func (s *Service) RedeemInvite(ctx context.Context, input RedeemInviteInput) (*R
 		RefreshToken: refreshToken,
 		ExpiresIn:    expiresIn,
 	}, nil
+}
+
+// ResolveInviteResult is the public, read-only projection of a guest invite for
+// the unified /join/<token> link. It NEVER returns an error for an invalid /
+// expired / used / revoked token — Valid is false instead — so the FE can show
+// a friendly state. IsWorkspaceMember is reported only when an authenticated
+// member user is supplied. (unified guest link)
+type ResolveInviteResult struct {
+	Valid             bool
+	WorkspaceID       uuid.UUID
+	CallID            *uuid.UUID
+	CallTitle         string
+	ExpiresAt         time.Time
+	IsWorkspaceMember bool
+}
+
+// ResolveInvite looks up an invite token for the unified link page. optionalUserID
+// may be uuid.Nil for an anonymous visitor; when it is a real user, the result
+// reports whether that user is already a member of the invite's workspace (so
+// the FE can route a member straight to the call deep-link instead of the guest
+// name-entry form).
+func (s *Service) ResolveInvite(ctx context.Context, token string, optionalUserID uuid.UUID) (*ResolveInviteResult, error) {
+	if token == "" {
+		return &ResolveInviteResult{Valid: false}, nil
+	}
+
+	invite, err := s.invites.GetByToken(ctx, token)
+	if err != nil {
+		// A genuine not-found token is an expected invalid state, not a failure.
+		// Any OTHER error (transient DB / internal) must surface so the handler
+		// returns 5xx — collapsing it to valid:false would mask the outage and
+		// downgrade a member's good link to the guest entry form. (unified guest link)
+		if isNotFound(err) {
+			return &ResolveInviteResult{Valid: false}, nil
+		}
+		return nil, err
+	}
+	if !invite.IsValid() {
+		return &ResolveInviteResult{Valid: false}, nil
+	}
+
+	// Mirror RedeemInvite's call-status pre-check: a call-scoped invite whose
+	// target call has ended (or no longer exists) can never grant access, so it
+	// must resolve as invalid with NO call/workspace metadata leaked — otherwise
+	// the FE shows a joinable state for a dead link. Only a transient lookup error
+	// surfaces as an error. (unified guest link)
+	var callTitle string
+	if invite.CallID != nil && s.calls != nil {
+		call, callErr := s.calls.GetByID(ctx, *invite.CallID)
+		if callErr != nil {
+			if isNotFound(callErr) {
+				return &ResolveInviteResult{Valid: false}, nil
+			}
+			return nil, callErr
+		}
+		if call == nil || call.Status == entity.CallStatusEnded {
+			return &ResolveInviteResult{Valid: false}, nil
+		}
+		callTitle = call.Title
+	}
+
+	result := &ResolveInviteResult{
+		Valid:       true,
+		WorkspaceID: invite.WorkspaceID,
+		CallID:      invite.CallID,
+		CallTitle:   callTitle,
+		ExpiresAt:   invite.ExpiresAt,
+	}
+
+	// Membership is only meaningful (and only disclosed) for an authenticated
+	// user — anonymous visitors never get is_workspace_member: true.
+	if optionalUserID != uuid.Nil {
+		if _, mErr := s.workspaces.GetMember(ctx, invite.WorkspaceID, optionalUserID); mErr == nil {
+			result.IsWorkspaceMember = true
+		}
+	}
+
+	return result, nil
 }
 
 // RevokeInvite revokes an active invite.

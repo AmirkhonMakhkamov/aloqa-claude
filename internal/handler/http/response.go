@@ -91,3 +91,24 @@ func decodeJSON(r *http.Request, v any) error {
 
 	return nil
 }
+
+// decodeOptionalJSON decodes a JSON request body that may be absent. An empty
+// body leaves v at its zero value and returns nil; a present body is validated
+// exactly like decodeJSON (single JSON value, no unknown fields).
+func decodeOptionalJSON(r *http.Request, v any) error {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return cerrors.InvalidInput("invalid request body")
+	}
+
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return cerrors.InvalidInput("request body must contain a single JSON value")
+	}
+
+	return nil
+}

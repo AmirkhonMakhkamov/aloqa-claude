@@ -176,7 +176,7 @@ export function ContextSidebar() {
 
       {/* User footer with sign-out */}
       <div className="flex shrink-0 items-center gap-2 border-t border-white/5 px-3 py-2.5">
-        <Avatar name={user?.display_name} size={32} />
+        <Avatar name={user?.display_name} color={user?.avatar_color} size={32} />
         <div className="min-w-0 flex-1">
           <div className="truncate text-[13px] font-medium text-white">
             {user?.display_name}

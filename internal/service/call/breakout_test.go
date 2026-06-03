@@ -19,8 +19,10 @@ import (
 // stateless (GetByID always NotFound), which is unsuitable for asserting
 // assignment / lifecycle behavior.
 type stubBreakoutRepo struct {
-	rooms       map[uuid.UUID]*entity.BreakoutRoom
-	assignments []breakoutAssignment
+	rooms                  map[uuid.UUID]*entity.BreakoutRoom
+	assignments            []breakoutAssignment
+	closeAllByCallCount    int
+	unassignAllByRoomCount int
 }
 
 type breakoutAssignment struct {
@@ -46,10 +48,29 @@ func (r *stubBreakoutRepo) GetByID(_ context.Context, id uuid.UUID) (*entity.Bre
 }
 
 func (r *stubBreakoutRepo) ListByCall(_ context.Context, callID uuid.UUID) ([]entity.BreakoutRoom, error) {
-	var out []entity.BreakoutRoom
+	out := make([]entity.BreakoutRoom, 0)
 	for _, room := range r.rooms {
 		if room.CallID == callID {
 			out = append(out, *room)
+		}
+	}
+	return out, nil
+}
+
+func (r *stubBreakoutRepo) ListCallsWithExpiredActiveBreakouts(_ context.Context, before time.Time, limit int) ([]uuid.UUID, error) {
+	seen := map[uuid.UUID]bool{}
+	out := make([]uuid.UUID, 0)
+	for _, room := range r.rooms {
+		if room.Status != entity.BreakoutRoomStatusActive || room.ClosesAt == nil || room.ClosesAt.After(before) {
+			continue
+		}
+		if seen[room.CallID] {
+			continue
+		}
+		seen[room.CallID] = true
+		out = append(out, room.CallID)
+		if limit > 0 && len(out) >= limit {
+			break
 		}
 	}
 	return out, nil
@@ -63,6 +84,7 @@ func (r *stubBreakoutRepo) Close(_ context.Context, id uuid.UUID) error {
 }
 
 func (r *stubBreakoutRepo) CloseAllByCall(_ context.Context, callID uuid.UUID) error {
+	r.closeAllByCallCount++
 	for _, room := range r.rooms {
 		if room.CallID == callID {
 			room.Status = entity.BreakoutRoomStatusClosed
@@ -81,7 +103,10 @@ func (r *stubBreakoutRepo) UnassignParticipant(_ context.Context, callID, userID
 	return nil
 }
 
-func (r *stubBreakoutRepo) UnassignAllByRoom(context.Context, uuid.UUID) error { return nil }
+func (r *stubBreakoutRepo) UnassignAllByRoom(context.Context, uuid.UUID) error {
+	r.unassignAllByRoomCount++
+	return nil
+}
 
 func (r *stubBreakoutRepo) ListParticipants(context.Context, uuid.UUID) ([]entity.CallParticipant, error) {
 	return nil, nil
@@ -131,6 +156,60 @@ func breakoutCall(callID, workspaceID, hostID uuid.UUID) *entity.Call {
 		Status:      entity.CallStatusActive,
 		CreatedBy:   hostID,
 		Settings:    entity.CallSettings{BreakoutRooms: true},
+	}
+}
+
+func TestListBreakoutRoomsReturnsEmptySlice(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+
+	calls := &fakeCallRepo{calls: map[uuid.UUID]*entity.Call{
+		callID: breakoutCall(callID, workspaceID, hostID),
+	}}
+	svc := NewService(calls, newStubBreakoutRepo(), &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	rooms, err := svc.ListBreakoutRooms(ctx, callID)
+	if err != nil {
+		t.Fatalf("ListBreakoutRooms returned error: %v", err)
+	}
+	if rooms == nil {
+		t.Fatalf("ListBreakoutRooms returned nil slice, want empty slice")
+	}
+	if len(rooms) != 0 {
+		t.Fatalf("ListBreakoutRooms len = %d, want 0", len(rooms))
+	}
+}
+
+func TestListBreakoutRoomParticipantsReturnsEmptySlice(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	roomID := uuid.New()
+
+	repo := newStubBreakoutRepo()
+	repo.rooms[roomID] = &entity.BreakoutRoom{
+		ID:     roomID,
+		CallID: callID,
+		Name:   "Room A",
+		Status: entity.BreakoutRoomStatusActive,
+	}
+	calls := &fakeCallRepo{calls: map[uuid.UUID]*entity.Call{
+		callID: breakoutCall(callID, workspaceID, hostID),
+	}}
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	participants, err := svc.ListBreakoutRoomParticipants(ctx, callID, roomID)
+	if err != nil {
+		t.Fatalf("ListBreakoutRoomParticipants returned error: %v", err)
+	}
+	if participants == nil {
+		t.Fatalf("ListBreakoutRoomParticipants returned nil slice, want empty slice")
+	}
+	if len(participants) != 0 {
+		t.Fatalf("ListBreakoutRoomParticipants len = %d, want 0", len(participants))
 	}
 }
 
@@ -208,6 +287,254 @@ func TestCreateBreakoutRoomsAssignsConnectedParticipants(t *testing.T) {
 	}
 }
 
+func TestCreateBreakoutRoomsSetsClosesAtForTimeLimitedRooms(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	limitSeconds := 30
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: breakoutCall(callID, workspaceID, hostID)},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: connectedParticipant(callID, hostID, entity.CallRoleHost),
+		},
+	}
+	repo := newStubBreakoutRepo()
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
+
+	before := time.Now().Add(time.Duration(limitSeconds) * time.Second)
+	rooms, err := svc.CreateBreakoutRooms(ctx, callID, hostID, []CreateBreakoutRoomInput{
+		{Name: "Timed", TimeLimit: &limitSeconds},
+		{Name: "Untimed"},
+	})
+	after := time.Now().Add(time.Duration(limitSeconds) * time.Second)
+	if err != nil {
+		t.Fatalf("CreateBreakoutRooms returned error: %v", err)
+	}
+	if len(rooms) != 2 {
+		t.Fatalf("rooms = %d, want 2", len(rooms))
+	}
+	if rooms[0].ClosesAt == nil {
+		t.Fatalf("timed room closes_at = nil, want deadline")
+	}
+	if rooms[0].ClosesAt.Before(before) || rooms[0].ClosesAt.After(after) {
+		t.Fatalf("timed room closes_at = %s, want between %s and %s", rooms[0].ClosesAt, before, after)
+	}
+	if rooms[1].ClosesAt != nil {
+		t.Fatalf("untimed room closes_at = %s, want nil", rooms[1].ClosesAt)
+	}
+}
+
+func TestBreakoutAutoCloseSweeperClosesExpiredCall(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	now := time.Now().UTC()
+	past := now.Add(-time.Second)
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: breakoutCall(callID, workspaceID, hostID)},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: connectedParticipant(callID, hostID, entity.CallRoleHost),
+		},
+	}
+	repo := newStubBreakoutRepo()
+	room := &entity.BreakoutRoom{
+		ID:       uuid.New(),
+		CallID:   callID,
+		Name:     "A",
+		Status:   entity.BreakoutRoomStatusActive,
+		ClosesAt: &past,
+	}
+	repo.rooms[room.ID] = room
+	pub := &capturingPublisher{}
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
+
+	closed, err := svc.CloseExpiredBreakoutRooms(ctx, now, 10)
+	if err != nil {
+		t.Fatalf("CloseExpiredBreakoutRooms returned error: %v", err)
+	}
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1", closed)
+	}
+	if repo.rooms[room.ID].Status != entity.BreakoutRoomStatusClosed {
+		t.Fatalf("room status = %s, want closed", repo.rooms[room.ID].Status)
+	}
+	if got := countBreakoutEvents(t, pub.captures, event.TypeBreakoutRoomsAllClosed); got != 1 {
+		t.Fatalf("rooms.all_closed events = %d, want 1", got)
+	}
+}
+
+func TestBreakoutAutoCloseSweeperIgnoresFutureDeadlines(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	now := time.Now().UTC()
+	future := now.Add(time.Minute)
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: breakoutCall(callID, workspaceID, hostID)},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: connectedParticipant(callID, hostID, entity.CallRoleHost),
+		},
+	}
+	repo := newStubBreakoutRepo()
+	room := &entity.BreakoutRoom{
+		ID:       uuid.New(),
+		CallID:   callID,
+		Name:     "A",
+		Status:   entity.BreakoutRoomStatusActive,
+		ClosesAt: &future,
+	}
+	repo.rooms[room.ID] = room
+	pub := &capturingPublisher{}
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
+
+	closed, err := svc.CloseExpiredBreakoutRooms(ctx, now, 10)
+	if err != nil {
+		t.Fatalf("CloseExpiredBreakoutRooms returned error: %v", err)
+	}
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0", closed)
+	}
+	if repo.rooms[room.ID].Status != entity.BreakoutRoomStatusActive {
+		t.Fatalf("room status = %s, want active", repo.rooms[room.ID].Status)
+	}
+	if pub.called {
+		t.Fatalf("published event for future deadline, want none")
+	}
+}
+
+func TestBreakoutAutoCloseSweeperSkipsAlreadyClosedRooms(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	now := time.Now().UTC()
+	past := now.Add(-time.Second)
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: breakoutCall(callID, workspaceID, hostID)},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: connectedParticipant(callID, hostID, entity.CallRoleHost),
+		},
+	}
+	repo := newStubBreakoutRepo()
+	room := &entity.BreakoutRoom{
+		ID:       uuid.New(),
+		CallID:   callID,
+		Name:     "A",
+		Status:   entity.BreakoutRoomStatusClosed,
+		ClosesAt: &past,
+	}
+	repo.rooms[room.ID] = room
+	pub := &capturingPublisher{}
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
+
+	closed, err := svc.CloseExpiredBreakoutRooms(ctx, now, 10)
+	if err != nil {
+		t.Fatalf("CloseExpiredBreakoutRooms returned error: %v", err)
+	}
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0", closed)
+	}
+	if pub.called {
+		t.Fatalf("published event for already closed room, want none")
+	}
+}
+
+func TestStubBreakoutRepoListCallsWithExpiredActiveBreakouts(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	past := now.Add(-time.Second)
+	future := now.Add(time.Second)
+	callA := uuid.New()
+	callB := uuid.New()
+	callFuture := uuid.New()
+	callClosed := uuid.New()
+	callNoDeadline := uuid.New()
+
+	repo := newStubBreakoutRepo()
+	repo.rooms[uuid.New()] = &entity.BreakoutRoom{ID: uuid.New(), CallID: callA, Status: entity.BreakoutRoomStatusActive, ClosesAt: &past}
+	repo.rooms[uuid.New()] = &entity.BreakoutRoom{ID: uuid.New(), CallID: callA, Status: entity.BreakoutRoomStatusActive, ClosesAt: &past}
+	repo.rooms[uuid.New()] = &entity.BreakoutRoom{ID: uuid.New(), CallID: callB, Status: entity.BreakoutRoomStatusActive, ClosesAt: &past}
+	repo.rooms[uuid.New()] = &entity.BreakoutRoom{ID: uuid.New(), CallID: callFuture, Status: entity.BreakoutRoomStatusActive, ClosesAt: &future}
+	repo.rooms[uuid.New()] = &entity.BreakoutRoom{ID: uuid.New(), CallID: callClosed, Status: entity.BreakoutRoomStatusClosed, ClosesAt: &past}
+	repo.rooms[uuid.New()] = &entity.BreakoutRoom{ID: uuid.New(), CallID: callNoDeadline, Status: entity.BreakoutRoomStatusActive}
+
+	got, err := repo.ListCallsWithExpiredActiveBreakouts(ctx, now, 10)
+	if err != nil {
+		t.Fatalf("ListCallsWithExpiredActiveBreakouts returned error: %v", err)
+	}
+	if len(got) != 2 || !uuidSliceContains(got, callA) || !uuidSliceContains(got, callB) {
+		t.Fatalf("expired call ids = %v, want exactly %s and %s", got, callA, callB)
+	}
+
+	limited, err := repo.ListCallsWithExpiredActiveBreakouts(ctx, now, 1)
+	if err != nil {
+		t.Fatalf("ListCallsWithExpiredActiveBreakouts limited returned error: %v", err)
+	}
+	if len(limited) != 1 {
+		t.Fatalf("limited expired call ids len = %d, want 1", len(limited))
+	}
+}
+
+func TestPublishBreakoutEventPublishes(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	userID := uuid.New()
+
+	pub := &capturingPublisher{}
+	svc := NewService(nil, newStubBreakoutRepo(), nil, nil, pub, nil, mediaTestConfig(), nil, nil)
+	call := breakoutCall(callID, workspaceID, hostID)
+
+	svc.publishBreakoutEvent(ctx, event.TypeBreakoutParticipantMoved, call, event.BreakoutParticipantMovedPayload{
+		CallID: callID,
+		UserID: userID,
+	})
+
+	if !pub.called {
+		t.Fatalf("pubsub was not called")
+	}
+	if got := countBreakoutEvents(t, pub.captures, event.TypeBreakoutParticipantMoved); got != 1 {
+		t.Fatalf("participant.moved events = %d, want 1", got)
+	}
+}
+
+func TestPublishCallSettingsChangedPublishes(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+
+	pub := &capturingPublisher{}
+	svc := NewService(nil, newStubBreakoutRepo(), nil, nil, pub, nil, mediaTestConfig(), nil, nil)
+	call := breakoutCall(callID, workspaceID, hostID)
+
+	svc.publishCallSettingsChanged(ctx, call)
+
+	if !pub.called {
+		t.Fatalf("pubsub was not called")
+	}
+	if got := countBreakoutEvents(t, pub.captures, event.TypeCallSettingsChanged); got != 1 {
+		t.Fatalf("settings.changed events = %d, want 1", got)
+	}
+}
+
+func uuidSliceContains(items []uuid.UUID, want uuid.UUID) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestCreateBreakoutRoomsRejectsNonHost(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -271,6 +598,37 @@ func TestJoinBreakoutRoomReturnsLiveKitJoinInfo(t *testing.T) {
 	}
 }
 
+func TestJoinBreakoutRoomLiveKitUnconfiguredReturnsUnavailable(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	userID := uuid.New()
+
+	repo := newStubBreakoutRepo()
+	room := &entity.BreakoutRoom{ID: uuid.New(), CallID: callID, Name: "Room A", Status: entity.BreakoutRoomStatusActive}
+	repo.rooms[room.ID] = room
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: breakoutCall(callID, workspaceID, hostID)},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, userID}: connectedParticipant(callID, userID, entity.CallRoleParticipant),
+		},
+	}
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	info, err := svc.JoinBreakoutRoom(ctx, callID, userID, room.ID)
+	if !hasCode(err, cerrors.CodeUnavailable) {
+		t.Fatalf("JoinBreakoutRoom error = %v, want UNAVAILABLE", err)
+	}
+	if info != nil {
+		t.Fatalf("JoinBreakoutRoom info = %+v, want nil", info)
+	}
+	if len(repo.assignments) != 0 {
+		t.Fatalf("assignments = %+v, want none before livekit is configured", repo.assignments)
+	}
+}
+
 func TestReturnToMainRoomReturnsMainLiveKitJoinInfo(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -308,6 +666,120 @@ func TestReturnToMainRoomReturnsMainLiveKitJoinInfo(t *testing.T) {
 	}
 	if got := countBreakoutEvents(t, pub.captures, event.TypeBreakoutParticipantMoved); got != 1 {
 		t.Fatalf("participant.moved events = %d, want 1", got)
+	}
+}
+
+func TestReturnToMainRoomLiveKitUnconfiguredReturnsUnavailable(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	userID := uuid.New()
+	breakoutRoomID := uuid.New()
+
+	participant := connectedParticipant(callID, userID, entity.CallRoleParticipant)
+	participant.BreakoutRoomID = &breakoutRoomID
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: breakoutCall(callID, workspaceID, hostID)},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, userID}: participant,
+		},
+	}
+	repo := newStubBreakoutRepo()
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	info, err := svc.ReturnToMainRoom(ctx, callID, userID)
+	if !hasCode(err, cerrors.CodeUnavailable) {
+		t.Fatalf("ReturnToMainRoom error = %v, want UNAVAILABLE", err)
+	}
+	if info != nil {
+		t.Fatalf("ReturnToMainRoom info = %+v, want nil", info)
+	}
+	if len(repo.assignments) != 0 {
+		t.Fatalf("assignments = %+v, want none before livekit is configured", repo.assignments)
+	}
+}
+
+// Regression (2026-06-03 prod): when the host closes breakout rooms, the server
+// clears breakout_room_id BEFORE clients drive themselves back to main. The
+// client's return then arrives with no assignment. Return must be idempotent —
+// re-issue a MAIN-room token instead of 409 — otherwise the client never
+// reconnects to main and rides the soon-deleted breakout room to call-end.
+func TestReturnToMainRoomIdempotentWhenAlreadyUnassigned(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	userID := uuid.New()
+
+	participant := connectedParticipant(callID, userID, entity.CallRoleParticipant)
+	participant.BreakoutRoomID = nil // already unassigned (host closed the room)
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: breakoutCall(callID, workspaceID, hostID)},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, userID}: participant,
+		},
+	}
+	repo := newStubBreakoutRepo()
+	pub := &capturingPublisher{}
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
+	svc.SetLiveKit(breakoutTestLiveKit())
+	svc.SetLiveKitRoomClient(&fakeLiveKitRoomClient{})
+
+	info, err := svc.ReturnToMainRoom(ctx, callID, userID)
+	if err != nil {
+		t.Fatalf("ReturnToMainRoom returned error: %v", err)
+	}
+	if info == nil || info.AccessToken == "" {
+		t.Fatalf("ReturnToMainRoom join info = %+v, want a non-empty main-room access token", info)
+	}
+	// Already in main: nothing to unassign and no move event.
+	if len(repo.assignments) != 0 {
+		t.Fatalf("assignments = %+v, want none when already in main", repo.assignments)
+	}
+	if got := countBreakoutEvents(t, pub.captures, event.TypeBreakoutParticipantMoved); got != 0 {
+		t.Fatalf("participant.moved events = %d, want 0 when already in main", got)
+	}
+}
+
+// Review follow-up: returning to main on an already-ended call must be rejected
+// (CALL_ENDED), so the FE roomDeleted safety net falls back to ending the call
+// instead of reconnecting to a dead main room.
+func TestReturnToMainRoomRejectsEndedCall(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	userID := uuid.New()
+	breakoutRoomID := uuid.New()
+
+	participant := connectedParticipant(callID, userID, entity.CallRoleParticipant)
+	participant.BreakoutRoomID = &breakoutRoomID
+	endedCall := breakoutCall(callID, workspaceID, hostID)
+	endedCall.Status = entity.CallStatusEnded
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: endedCall},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, userID}: participant,
+		},
+	}
+	repo := newStubBreakoutRepo()
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
+	svc.SetLiveKit(breakoutTestLiveKit())
+	svc.SetLiveKitRoomClient(&fakeLiveKitRoomClient{})
+
+	info, err := svc.ReturnToMainRoom(ctx, callID, userID)
+	if !hasCode(err, cerrors.CodeCallEnded) {
+		t.Fatalf("ReturnToMainRoom error = %v, want CALL_ENDED", err)
+	}
+	if info != nil {
+		t.Fatalf("ReturnToMainRoom info = %+v, want nil for an ended call", info)
+	}
+	if len(repo.assignments) != 0 {
+		t.Fatalf("assignments = %+v, want none for an ended call", repo.assignments)
 	}
 }
 

@@ -129,7 +129,12 @@ export default function MembersAdminPage() {
                   <tr key={m.id} className="hover:bg-white/[0.02]">
                     <td className="py-2 pl-4 pr-2">
                       <div className="flex items-center gap-3">
-                        <Avatar name={u?.display_name} src={u?.avatar_url ?? null} size={28} />
+                        <Avatar
+                          name={u?.display_name}
+                          src={u?.avatar_url ?? null}
+                          color={u?.avatar_color}
+                          size={28}
+                        />
                         <span className="font-medium text-slate-100">
                           {u?.display_name ?? "—"}
                         </span>

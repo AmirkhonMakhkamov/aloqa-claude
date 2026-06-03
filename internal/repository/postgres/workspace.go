@@ -252,7 +252,7 @@ func (r *WorkspaceRepo) AddMember(ctx context.Context, m *entity.WorkspaceMember
 func (r *WorkspaceRepo) GetMember(ctx context.Context, workspaceID, userID uuid.UUID) (*entity.WorkspaceMember, error) {
 	query := `
 		SELECT wm.id, wm.workspace_id, wm.user_id, wm.role, wm.joined_at,
-		       u.id, u.email, u.display_name, u.avatar_url, u.position, u.department, u.status, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
+		       u.id, u.email, u.display_name, u.avatar_url, u.avatar_color, u.position, u.department, u.status, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
 		FROM workspace_members wm
 		JOIN users u ON u.id = wm.user_id
 		WHERE wm.workspace_id = $1 AND wm.user_id = $2`
@@ -269,6 +269,7 @@ func (r *WorkspaceRepo) GetMember(ctx context.Context, workspaceID, userID uuid.
 		&u.Email,
 		&u.DisplayName,
 		&u.AvatarURL,
+		&u.AvatarColor,
 		&u.Position,
 		&u.Department,
 		&u.Status,
@@ -301,7 +302,7 @@ func (r *WorkspaceRepo) ListMembers(ctx context.Context, workspaceID uuid.UUID, 
 	if p.Cursor != uuid.Nil {
 		query := `
 			SELECT wm.id, wm.workspace_id, wm.user_id, wm.role, wm.joined_at,
-			       u.id, u.email, u.display_name, u.avatar_url, u.position, u.department, u.status, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
+			       u.id, u.email, u.display_name, u.avatar_url, u.avatar_color, u.position, u.department, u.status, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
 			FROM workspace_members wm
 			JOIN users u ON u.id = wm.user_id
 			WHERE wm.workspace_id = $1 AND wm.id < $2
@@ -311,7 +312,7 @@ func (r *WorkspaceRepo) ListMembers(ctx context.Context, workspaceID uuid.UUID, 
 	} else {
 		query := `
 			SELECT wm.id, wm.workspace_id, wm.user_id, wm.role, wm.joined_at,
-			       u.id, u.email, u.display_name, u.avatar_url, u.position, u.department, u.status, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
+			       u.id, u.email, u.display_name, u.avatar_url, u.avatar_color, u.position, u.department, u.status, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
 			FROM workspace_members wm
 			JOIN users u ON u.id = wm.user_id
 			WHERE wm.workspace_id = $1
@@ -338,6 +339,7 @@ func (r *WorkspaceRepo) ListMembers(ctx context.Context, workspaceID uuid.UUID, 
 			&u.Email,
 			&u.DisplayName,
 			&u.AvatarURL,
+			&u.AvatarColor,
 			&u.Position,
 			&u.Department,
 			&u.Status,

@@ -48,6 +48,8 @@ const (
 	TypeCallQualityAdapted     Type = "call.quality.adapted"
 	TypeCallMessageCreated     Type = "call.message.created"
 	TypeCallMessageDeleted     Type = "call.message.deleted"
+	TypeCallTypingStarted      Type = "call.typing.started"
+	TypeCallSettingsChanged    Type = "call.settings.changed"
 	TypeCallHandRaised         Type = "call.participant.hand_raised"
 	TypeCallHandLowered        Type = "call.participant.hand_lowered"
 	TypeCallReaction           Type = "call.reaction.added"
@@ -117,9 +119,10 @@ type Definition struct {
 
 func DefinitionForType(t Type) Definition {
 	switch t {
-	case TypeTypingStarted, TypeSignalOffer, TypeSignalAnswer, TypeSignalCandidate,
+	case TypeTypingStarted, TypeCallTypingStarted, TypeSignalOffer, TypeSignalAnswer, TypeSignalCandidate,
 		TypeCallHandRaised, TypeCallHandLowered, TypeCallReaction,
-		TypeCallShareRequestCreated, TypeCallShareRequestResolved, TypeCallFeaturedShareUpdated:
+		TypeCallShareRequestCreated, TypeCallShareRequestResolved, TypeCallFeaturedShareUpdated,
+		TypeBreakoutBroadcast:
 		return Definition{
 			Version:          CurrentVersion,
 			DeliverySemantic: DeliveryEphemeral,
@@ -264,6 +267,11 @@ type CallPayload struct {
 	Call *entity.Call `json:"call"`
 }
 
+type CallSettingsChangedPayload struct {
+	CallID   uuid.UUID           `json:"call_id"`
+	Settings entity.CallSettings `json:"settings"`
+}
+
 type CallMessagePayload struct {
 	CallID  uuid.UUID          `json:"call_id"`
 	Message entity.CallMessage `json:"message"`
@@ -272,6 +280,11 @@ type CallMessagePayload struct {
 type CallMessageDeletedPayload struct {
 	CallID    uuid.UUID `json:"call_id"`
 	MessageID uuid.UUID `json:"message_id"`
+}
+
+type CallTypingPayload struct {
+	CallID uuid.UUID `json:"call_id"`
+	UserID uuid.UUID `json:"user_id"`
 }
 
 type CallParticipantPayload struct {

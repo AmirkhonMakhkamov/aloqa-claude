@@ -16,6 +16,7 @@ import (
 	"aloqa/internal/pkg/cerrors"
 	"aloqa/internal/pkg/pagination"
 	platformws "aloqa/internal/platform/ws"
+	calldomain "aloqa/internal/service/call"
 	chatdomain "aloqa/internal/service/chat"
 )
 
@@ -193,9 +194,156 @@ func TestRestoreSubscriptionsReplaysMissedEvents(t *testing.T) {
 	}
 }
 
+func newCallTypingHandler(t *testing.T, workspaceID, callID, userID uuid.UUID, member bool) (*Handler, *platformws.Client) {
+	t.Helper()
+
+	calls := &fakeCallRepo{calls: map[uuid.UUID]*entity.Call{
+		callID: {ID: callID, WorkspaceID: workspaceID, ChannelID: nil},
+	}}
+	workspaceMembers := map[[2]uuid.UUID]*entity.WorkspaceMember{}
+	if member {
+		workspaceMembers[[2]uuid.UUID{workspaceID, userID}] = &entity.WorkspaceMember{
+			WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember,
+		}
+	}
+	workspaces := &fakeWorkspaceRepo{members: workspaceMembers}
+	callSvc := calldomain.NewService(calls, nil, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, calldomain.MediaConfig{}, nil, nil)
+	chatSvc := chatdomain.NewService(
+		&fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{}, members: map[[2]uuid.UUID]*entity.ChannelMember{}},
+		nil, workspaces, nil, noopPublisher{}, nil, nil, nil, nil,
+	)
+
+	state := &fakeStateStore{rooms: map[string][]string{}, seq: map[string]int64{}}
+	hub := platformws.NewHub(state)
+	hubCtx, hubCancel := context.WithCancel(context.Background())
+	go hub.Run(hubCtx)
+	t.Cleanup(hubCancel)
+
+	client := &platformws.Client{
+		ID: uuid.New(), UserID: userID, SessionID: "session-1", ResumeKey: "resume-key",
+		Send: make(chan []byte, 8),
+	}
+	hub.Register(client)
+	hub.Subscribe(client.ID.String(), "aloqa.ws."+workspaceID.String())
+
+	handler := NewHandler(hub, chatSvc, callSvc, nil, nil, 0)
+	return handler, client
+}
+
+func TestHandleCallTypingBroadcastsWhenAccessGranted(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	userID := uuid.New()
+
+	handler, client := newCallTypingHandler(t, workspaceID, callID, userID, true)
+
+	payload := json.RawMessage(`{"workspace_id":"` + workspaceID.String() + `","call_id":"` + callID.String() + `"}`)
+	handler.handleMessage(ctx, client, ClientMessage{Type: "call_typing", Payload: payload})
+
+	select {
+	case data := <-client.Send:
+		var msg ServerMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			t.Fatalf("failed to unmarshal broadcast: %v", err)
+		}
+		if msg.Type != string(event.TypeCallTypingStarted) {
+			t.Fatalf("broadcast type = %q, want %q", msg.Type, event.TypeCallTypingStarted)
+		}
+		raw, err := json.Marshal(msg.Payload)
+		if err != nil {
+			t.Fatalf("failed to re-marshal payload: %v", err)
+		}
+		var p event.CallTypingPayload
+		if err := json.Unmarshal(raw, &p); err != nil {
+			t.Fatalf("failed to unmarshal call typing payload: %v", err)
+		}
+		if p.CallID != callID {
+			t.Fatalf("payload call_id = %s, want %s", p.CallID, callID)
+		}
+		if p.UserID != userID {
+			t.Fatalf("payload user_id = %s, want %s", p.UserID, userID)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected call.typing.started broadcast")
+	}
+}
+
+func TestHandleCallTypingDeniedWhenNoAccess(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	userID := uuid.New()
+
+	handler, client := newCallTypingHandler(t, workspaceID, callID, userID, false)
+
+	payload := json.RawMessage(`{"workspace_id":"` + workspaceID.String() + `","call_id":"` + callID.String() + `"}`)
+	handler.handleMessage(ctx, client, ClientMessage{Type: "call_typing", Payload: payload})
+
+	select {
+	case data := <-client.Send:
+		var msg ServerMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			t.Fatalf("failed to unmarshal client message: %v", err)
+		}
+		if msg.Type != "error" {
+			t.Fatalf("expected error message when access denied, got type %q", msg.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected an error message to be sent when access is denied")
+	}
+}
+
 type noopPublisher struct{}
 
 func (noopPublisher) Publish(context.Context, string, []byte) error { return nil }
+
+type fakeCallRepo struct {
+	calls map[uuid.UUID]*entity.Call
+}
+
+func (r *fakeCallRepo) Create(context.Context, *entity.Call) error { return nil }
+func (r *fakeCallRepo) GetByID(_ context.Context, id uuid.UUID) (*entity.Call, error) {
+	if call := r.calls[id]; call != nil {
+		return call, nil
+	}
+	return nil, cerrors.NotFound("call not found")
+}
+func (r *fakeCallRepo) ListActiveByWorkspace(context.Context, uuid.UUID) ([]entity.Call, error) {
+	return nil, nil
+}
+func (r *fakeCallRepo) UpdateStatus(context.Context, uuid.UUID, entity.CallStatus) error { return nil }
+func (r *fakeCallRepo) UpdateSettings(context.Context, uuid.UUID, entity.CallSettings) error {
+	return nil
+}
+func (r *fakeCallRepo) End(context.Context, uuid.UUID) error                             { return nil }
+func (r *fakeCallRepo) AddParticipant(context.Context, *entity.CallParticipant) error    { return nil }
+func (r *fakeCallRepo) AddParticipantIfCapacity(context.Context, *entity.CallParticipant, int) error {
+	return nil
+}
+func (r *fakeCallRepo) GetParticipant(context.Context, uuid.UUID, uuid.UUID) (*entity.CallParticipant, error) {
+	return nil, cerrors.NotFound("participant not found")
+}
+func (r *fakeCallRepo) ListParticipants(context.Context, uuid.UUID) ([]entity.CallParticipant, error) {
+	return nil, nil
+}
+func (r *fakeCallRepo) UpdateParticipantStatus(context.Context, uuid.UUID, entity.ParticipantStatus) error {
+	return nil
+}
+func (r *fakeCallRepo) UpdateParticipantRole(context.Context, uuid.UUID, entity.CallRole) error {
+	return nil
+}
+func (r *fakeCallRepo) TransferHost(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error) {
+	return false, nil
+}
+func (r *fakeCallRepo) UpdateParticipantMedia(context.Context, uuid.UUID, bool, bool, bool) error {
+	return nil
+}
+func (r *fakeCallRepo) SetCanScreenShare(context.Context, uuid.UUID, bool) error { return nil }
+func (r *fakeCallRepo) SetFeaturedShareUserID(context.Context, uuid.UUID, *uuid.UUID) error {
+	return nil
+}
+func (r *fakeCallRepo) RemoveParticipant(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 
 type fakeStateStore struct {
 	rooms map[string][]string

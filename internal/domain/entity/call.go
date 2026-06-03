@@ -24,6 +24,32 @@ const (
 	CallStatusEnded   CallStatus = "ended"
 )
 
+// EntryMode controls how a non-guest member enters a call (set at creation, #4):
+//   - EntryModeManualAdmit: the member is held in the waiting room until a host
+//     admits them. This is the default for new group/meeting calls.
+//   - EntryModePassword: the member must supply the correct join password.
+//   - EntryModeOpen: the member joins directly.
+//
+// Guests (one-time link) always pass through the waiting room regardless of the
+// mode (ALK-700), and bypass the password (the link is the host's approval).
+type EntryMode string
+
+const (
+	EntryModeManualAdmit EntryMode = "manual_admit"
+	EntryModePassword    EntryMode = "password"
+	EntryModeOpen        EntryMode = "open"
+)
+
+// Valid reports whether m is a recognised entry mode.
+func (m EntryMode) Valid() bool {
+	switch m {
+	case EntryModeManualAdmit, EntryModePassword, EntryModeOpen:
+		return true
+	default:
+		return false
+	}
+}
+
 type CallEndReason string
 
 const (
@@ -77,16 +103,35 @@ type CallSettings struct {
 	MaxParticipants int  `json:"max_participants"`
 	E2EE            bool `json:"e2ee"`
 	Watermark       bool `json:"watermark"`
+	// EntryMode is stored in the settings JSONB. Empty on rows created before
+	// migration 051 — ResolvedEntryMode derives it from WaitingRoom so legacy
+	// calls behave exactly as before. The service normalises this to a concrete
+	// value before persisting (StartCall) and after loading (repo reads), so the
+	// API always returns one of the three EntryMode values.
+	EntryMode EntryMode `json:"entry_mode"`
+}
+
+// ResolvedEntryMode returns the concrete entry mode, deriving it from the legacy
+// WaitingRoom flag when EntryMode is unset (pre-#4 calls): waiting_room=true maps
+// to manual_admit, otherwise open.
+func (c CallSettings) ResolvedEntryMode() EntryMode {
+	if c.EntryMode.Valid() {
+		return c.EntryMode
+	}
+	if c.WaitingRoom {
+		return EntryModeManualAdmit
+	}
+	return EntryModeOpen
 }
 
 // TopParticipant is a thin user projection used by ActiveCallSummary to
-// render avatar stacks on the Calls Home Live Now section. ColorSeed is
-// optional and reserved for the FE to derive deterministic avatar fallback
-// colors (kept nullable so the BE can omit it without breaking the schema).
+// render avatar stacks on the Calls Home Live Now section. AvatarColor is the
+// persisted fallback color; ColorSeed is kept for older clients.
 type TopParticipant struct {
 	UserID      uuid.UUID `json:"user_id"`
 	DisplayName string    `json:"display_name"`
 	AvatarURL   *string   `json:"avatar_url"`
+	AvatarColor string    `json:"avatar_color"`
 	ColorSeed   *int      `json:"color_seed"`
 }
 
@@ -128,15 +173,20 @@ type ActiveCallObservation struct {
 }
 
 type Call struct {
-	ID                  uuid.UUID     `json:"id"`
-	WorkspaceID         uuid.UUID     `json:"workspace_id"`
-	ChannelID           *uuid.UUID    `json:"channel_id,omitempty"`
-	Type                CallType      `json:"type"`
-	Status              CallStatus    `json:"status"`
-	Title               string        `json:"title,omitempty"`
-	CreatedBy           uuid.UUID     `json:"created_by"`
-	ScheduledCallID     *uuid.UUID    `json:"scheduled_call_id,omitempty"`
-	Settings            CallSettings  `json:"settings"`
+	ID              uuid.UUID    `json:"id"`
+	WorkspaceID     uuid.UUID    `json:"workspace_id"`
+	ChannelID       *uuid.UUID   `json:"channel_id,omitempty"`
+	Type            CallType     `json:"type"`
+	Status          CallStatus   `json:"status"`
+	Title           string       `json:"title,omitempty"`
+	CreatedBy       uuid.UUID    `json:"created_by"`
+	ScheduledCallID *uuid.UUID   `json:"scheduled_call_id,omitempty"`
+	Settings        CallSettings `json:"settings"`
+	// JoinPasswordHash is the bcrypt hash of the password-mode join password. It
+	// is stored in a dedicated calls column (migration 051), never in the
+	// settings JSONB, and is marshalled with json:"-" so it is never exposed by
+	// the API. Only JoinCall reads it (bcrypt compare). Hydrated by GetByID.
+	JoinPasswordHash    string        `json:"-"`
 	StartedAt           *time.Time    `json:"started_at,omitempty"`
 	EndedAt             *time.Time    `json:"ended_at,omitempty"`
 	EndReason           CallEndReason `json:"end_reason,omitempty"`
@@ -203,6 +253,7 @@ type BreakoutRoom struct {
 	Name      string             `json:"name"`
 	CreatedBy uuid.UUID          `json:"created_by"`
 	TimeLimit *int               `json:"time_limit,omitempty"` // seconds; nil = no limit
+	ClosesAt  *time.Time         `json:"closes_at"`
 	Status    BreakoutRoomStatus `json:"status"`
 	CreatedAt time.Time          `json:"created_at"`
 	ClosedAt  *time.Time         `json:"closed_at,omitempty"`

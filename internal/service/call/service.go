@@ -526,6 +526,23 @@ func endCallWithReason(ctx context.Context, repo repository.CallRepository, call
 }
 
 func endCallWithReasonIfNotEnded(ctx context.Context, repo repository.CallRepository, callID uuid.UUID, reason entity.CallEndReason) (bool, error) {
+	ended, err := transitionCallEnded(ctx, repo, callID, reason)
+	if err != nil || !ended {
+		return ended, err
+	}
+	// A call cannot end with participants still marked connected — that is the
+	// "zombie call" leak: the active-call surfaces (and the FE in-call surface)
+	// keep resurfacing an ended call for anyone left as status='connected' with
+	// left_at=NULL. Disconnect them on the SAME repo so it shares the caller's
+	// transaction when one is scoped. Every end path funnels through here, so a
+	// single converge point keeps the invariant. (zombie-calls)
+	if err := disconnectRemainingParticipants(ctx, repo, callID, entity.ParticipantLeftReasonTimeout); err != nil {
+		return ended, err
+	}
+	return ended, nil
+}
+
+func transitionCallEnded(ctx context.Context, repo repository.CallRepository, callID uuid.UUID, reason entity.CallEndReason) (bool, error) {
 	if transitionRepo, ok := repo.(callEndTransitionRepository); ok {
 		return transitionRepo.EndWithReasonIfNotEnded(ctx, callID, reason)
 	}
@@ -536,6 +553,19 @@ func endCallWithReasonIfNotEnded(ctx context.Context, repo repository.CallReposi
 }
 
 func cancelRingingWithReason(ctx context.Context, repo repository.CallRepository, callID uuid.UUID, reason entity.CallEndReason) (bool, error) {
+	ended, err := transitionRingingCancelled(ctx, repo, callID, reason)
+	if err != nil || !ended {
+		return ended, err
+	}
+	// Same zombie-call invariant as endCallWithReasonIfNotEnded: a cancelled
+	// ringing call must not leave invited/connected callees lingering. (zombie-calls)
+	if err := disconnectRemainingParticipants(ctx, repo, callID, entity.ParticipantLeftReasonMissed); err != nil {
+		return ended, err
+	}
+	return ended, nil
+}
+
+func transitionRingingCancelled(ctx context.Context, repo repository.CallRepository, callID uuid.UUID, reason entity.CallEndReason) (bool, error) {
 	if transitionRepo, ok := repo.(callCancelTransitionRepository); ok {
 		return transitionRepo.CancelRingingWithReason(ctx, callID, reason)
 	}
@@ -543,6 +573,20 @@ func cancelRingingWithReason(ctx context.Context, repo repository.CallRepository
 		return false, err
 	}
 	return true, nil
+}
+
+// disconnectRemainingParticipants marks every still-connected participant of an
+// ended/cancelled call as disconnected (left_at set), so nobody is left as
+// status='connected' with left_at=NULL — the zombie-call leak. Shares the
+// caller's repo (and thus its transaction when scoped). Idempotent: already
+// disconnected rows are skipped, so a leaver who set their own left_reason
+// keeps it. (zombie-calls)
+func disconnectRemainingParticipants(ctx context.Context, repo repository.CallRepository, callID uuid.UUID, reason entity.ParticipantLeftReason) error {
+	participants, err := repo.ListParticipants(ctx, callID)
+	if err != nil {
+		return err
+	}
+	return disconnectStaleParticipants(ctx, repo, participants, reason)
 }
 
 func activateRingingCall(ctx context.Context, repo repository.CallRepository, callID uuid.UUID) (bool, error) {

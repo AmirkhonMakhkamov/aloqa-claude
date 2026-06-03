@@ -247,6 +247,49 @@ func TestRedeemCallInviteMintsFreshGuestAndEchoesCall(t *testing.T) {
 	}
 }
 
+// Regression (2026-06-03 prod): a call-scoped guest link carries NO channels, so the
+// redeemed grant's channel_ids is built from an empty invite list. The grant must still
+// persist a NON-NIL empty slice: guest_access_grants.channel_ids is NOT NULL, and a nil
+// []uuid.UUID binds as SQL NULL — which violated the constraint and 500'd every redeem
+// (the FE folded the 500 into a "Network error" so guests could never join the call).
+func TestRedeemCallInviteWithoutChannelsGrantsNonNilChannelIDs(t *testing.T) {
+	workspaceID := uuid.New()
+	callID := uuid.New()
+
+	invites := &fakeInviteRepo{byToken: map[string]*entity.GuestInvite{
+		"call-token": {
+			ID:          uuid.New(),
+			WorkspaceID: workspaceID,
+			Token:       "call-token",
+			ChannelIDs:  nil, // call-scoped link grants access to the call only — no channels
+			CallID:      &callID,
+			MaxUses:     100,
+			Status:      entity.GuestInviteStatusActive,
+			ExpiresAt:   time.Now().Add(time.Hour),
+		},
+	}}
+	grants := &fakeGuestAccessRepo{}
+	svc := NewService(invites, grants, &fakeUserRepo{}, &fakeWorkspaceRepo{}, &fakeChannelRepo{}, nil)
+	svc.SetCallLookup(&fakeCallLookup{call: &entity.Call{ID: callID, WorkspaceID: workspaceID, Status: entity.CallStatusActive}})
+
+	_, err := svc.RedeemInvite(context.Background(), RedeemInviteInput{
+		Token:       "call-token",
+		DisplayName: "Guest User",
+	})
+	if err != nil {
+		t.Fatalf("RedeemInvite returned error: %v", err)
+	}
+	if grants.created == nil {
+		t.Fatalf("expected a guest access grant to be created")
+	}
+	if grants.created.ChannelIDs == nil {
+		t.Fatalf("grant channel_ids is nil; guest_access_grants.channel_ids is NOT NULL, so a nil slice binds as SQL NULL and 500s the redeem")
+	}
+	if len(grants.created.ChannelIDs) != 0 {
+		t.Fatalf("call-scoped grant should carry no channels, got %v", grants.created.ChannelIDs)
+	}
+}
+
 // ALK-700: redeeming a call link for an ended call is rejected before any
 // user/session/grant is minted.
 func TestRedeemCallInviteRejectsEndedCall(t *testing.T) {

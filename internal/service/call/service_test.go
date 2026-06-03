@@ -867,6 +867,49 @@ func TestLiveKitWebhookIgnoresParticipantLeftAfterRoomFinished(t *testing.T) {
 	}
 }
 
+// Regression (2026-06-03 prod): breakout rooms are separate LiveKit rooms, so
+// moving a participant into one disconnects them from the MAIN room and LiveKit
+// fires participant_left for main. While the participant is assigned to a
+// breakout room this is a transition, NOT a call leave — it must not mark them
+// disconnected, emit participant.left, or count toward auto-end. Without this the
+// host saw 0 participants in each breakout room and the movers "fell out".
+func TestLiveKitWebhookParticipantLeftIgnoredWhileInBreakoutRoom(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	userID := uuid.New()
+	breakoutRoomID := uuid.New()
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			// Two participants so the (irrelevant) auto-end path can't fire even if reached.
+			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive, CreatedBy: hostID},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: {ID: uuid.New(), CallID: callID, UserID: hostID, Role: entity.CallRoleHost, Status: entity.ParticipantStatusConnected},
+			{callID, userID}: {ID: uuid.New(), CallID: callID, UserID: userID, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected, BreakoutRoomID: &breakoutRoomID},
+		},
+		liveKitWebhookEvents: map[string]*entity.LiveKitWebhookEvent{},
+	}
+	pub := &capturingPublisher{}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+
+	if err := svc.HandleLiveKitWebhook(ctx, liveKitWebhookEvent(uuid.New().String(), "participant_left", callID, userID)); err != nil {
+		t.Fatalf("participant_left HandleLiveKitWebhook returned error: %v", err)
+	}
+
+	if got := calls.participants[[2]uuid.UUID{callID, userID}].Status; got != entity.ParticipantStatusConnected {
+		t.Fatalf("participant status = %v, want connected (a breakout transition must not disconnect)", got)
+	}
+	if got := len(pub.captures); got != 0 {
+		t.Fatalf("publish count = %d, want 0 (no participant.left for a breakout transition)", got)
+	}
+	if calls.calls[callID].Status != entity.CallStatusActive {
+		t.Fatalf("call status = %v, want still active", calls.calls[callID].Status)
+	}
+}
+
 func TestLiveKitTrackChangedDoesNotPublishWhenScreenShareStateAlreadyMatches(t *testing.T) {
 	ctx := context.Background()
 	callID := uuid.New()

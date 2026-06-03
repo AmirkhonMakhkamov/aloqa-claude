@@ -287,12 +287,18 @@ func (s *Service) ReturnToMainRoom(ctx context.Context, callID, userID uuid.UUID
 		return nil, cerrors.Internal("failed to get participant", err)
 	}
 
-	if participant.BreakoutRoomID == nil {
-		return nil, cerrors.Conflict("participant is already in the main room")
-	}
-
 	if !s.livekit.IsConfigured() {
 		return nil, cerrors.Unavailable("livekit is not configured")
+	}
+
+	// Idempotent: the participant may already be unassigned — the host closes
+	// breakout rooms by clearing breakout_room_id BEFORE clients drive themselves
+	// back to main, so the client's return arrives with no assignment. Returning
+	// to main is the desired end state, so just re-issue a MAIN-room token and let
+	// the client reconnect, rather than failing with a conflict (which left the
+	// client stranded on the soon-deleted breakout room and ended its whole call).
+	if participant.BreakoutRoomID == nil {
+		return s.IssueLiveKitJoinInfo(ctx, call, userID, "")
 	}
 
 	// Remove from breakout SFU room.

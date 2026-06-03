@@ -548,6 +548,20 @@ func (s *Service) handleLiveKitParticipantLeft(ctx context.Context, callID uuid.
 		}
 		return cerrors.Internal("failed to load participant for livekit participant_left", err)
 	}
+
+	// Breakout transition, not a call leave: breakout rooms are separate LiveKit
+	// rooms, so moving a participant into one disconnects them from the MAIN room
+	// and fires participant_left here. While they are assigned to a breakout room
+	// we must NOT mark them disconnected, emit participant.left, or count this
+	// toward auto-end — doing so emptied the host's roster ("0 in each room", movers
+	// "fell out") and could even auto-end the call. Their real call leave is handled
+	// by the breakout-room participant_left webhook (handleLiveKitBreakoutWebhook).
+	if participant.BreakoutRoomID != nil {
+		slog.InfoContext(ctx, "livekit participant_left ignored while in breakout room",
+			"call_id", callID, "user_id", userID, "breakout_room_id", *participant.BreakoutRoomID)
+		return nil
+	}
+
 	if participant.Status != entity.ParticipantStatusDisconnected {
 		disconnected, err := disconnectParticipantIfConnected(ctx, s.calls, participant.ID, entity.ParticipantLeftReasonLeft)
 		if err != nil {

@@ -6,33 +6,40 @@ import (
 	"unicode"
 )
 
+// AvatarColorPalette holds 26 perceptually distinct colours, one per Latin
+// initial (A..Z). Hues are spread across 11 perceptual bands with the muddy
+// dark-yellow band deliberately under-sampled, lightness is tiered so same-band
+// neighbours differ, and the index order is permuted so alphabet-adjacent
+// letters land far apart on the colour wheel. Every colour keeps white-text
+// contrast >= 4.5 (WCAG AA). Keep in sync with the frontend fallback
+// (packages/core/src/theme/tokens.ts:avatarPalette) and migration 053.
 var AvatarColorPalette = [...]string{
-	"#2D7D6A",
-	"#7C3AED",
-	"#D97706",
-	"#2454D8",
-	"#DB2777",
-	"#059669",
-	"#9333EA",
-	"#0EA5E9",
-	"#DC2626",
-	"#16A34A",
-	"#CA8A04",
-	"#C026D3",
-	"#0891B2",
-	"#4F46E5",
-	"#BE123C",
-	"#047857",
-	"#B45309",
-	"#4338CA",
-	"#0F766E",
-	"#A21CAF",
-	"#1D4ED8",
-	"#B91C1C",
-	"#15803D",
-	"#854D0E",
-	"#6D28D9",
-	"#0369A1",
+	"#C92642", // A
+	"#298113", // B
+	"#2D75BE", // C
+	"#A926C9", // D
+	"#CA4E2F", // E
+	"#18813F", // F
+	"#1D2DBF", // G
+	"#CA2FB1", // H
+	"#976817", // I
+	"#1F847C", // J
+	"#5729D6", // K
+	"#B11B52", // L
+	"#5E8118", // M
+	"#15638A", // N
+	"#9235D0", // O
+	"#B11B1B", // P
+	"#1F8427", // Q
+	"#295DD6", // R
+	"#AC1BB1", // S
+	"#B05D21", // T
+	"#13815C", // U
+	"#4D41D2", // V
+	"#C9268E", // W
+	"#84771F", // X
+	"#1C8292", // Y
+	"#571BB1", // Z
 }
 
 func AvatarColorForDisplayName(displayName string) string {

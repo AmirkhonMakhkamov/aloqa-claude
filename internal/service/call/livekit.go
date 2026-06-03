@@ -658,8 +658,26 @@ func (s *Service) handleLiveKitBreakoutWebhook(ctx context.Context, ev *livekitp
 		UserID:         userID,
 		BreakoutRoomID: nil,
 	})
+
+	// Reaching here means the participant was STILL assigned to this breakout room
+	// when LiveKit dropped them — a hard client disconnect (tab close/crash), not a
+	// clean return to main (which clears the assignment first and short-circuits
+	// above). So this is a real call leave: mark them disconnected, emit
+	// participant.left, and auto-end the call if they were the last one, mirroring
+	// the main-room participant_left handler.
+	if participant.Status != entity.ParticipantStatusDisconnected {
+		disconnected, err := disconnectParticipantIfConnected(ctx, s.calls, participant.ID, entity.ParticipantLeftReasonLeft)
+		if err != nil {
+			return cerrors.Internal("failed to mark participant disconnected on breakout leave", err)
+		}
+		if disconnected {
+			markParticipantDisconnected(participant, entity.ParticipantLeftReasonLeft)
+			s.publishParticipantEvent(ctx, event.TypeCallParticipantLeft, call, participant)
+		}
+	}
+
 	slog.InfoContext(ctx, "livekit breakout participant_left bridged", "call_id", callID, "breakout_room_id", breakoutRoomID, "user_id", userID)
-	return nil
+	return s.autoEndAfterLiveKitParticipantLeft(ctx, call, callID, userID, p.GetDisconnectReason().String())
 }
 
 func (s *Service) handleLiveKitTrackChanged(ctx context.Context, callID uuid.UUID, p *livekitpb.ParticipantInfo, track *livekitpb.TrackInfo, screenSharing bool) error {

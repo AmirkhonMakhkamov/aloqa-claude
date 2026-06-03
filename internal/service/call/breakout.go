@@ -279,6 +279,12 @@ func (s *Service) ReturnToMainRoom(ctx context.Context, callID, userID uuid.UUID
 		return nil, s.wrapCallError(ctx, err, callID, "return to main room")
 	}
 
+	// Reject an ended call so the client's roomDeleted safety net falls back to
+	// ending the call rather than reconnecting to a dead main room.
+	if call.Status == entity.CallStatusEnded {
+		return nil, cerrors.CallEnded("this call has already ended")
+	}
+
 	participant, err := s.calls.GetParticipant(ctx, callID, userID)
 	if err != nil {
 		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {

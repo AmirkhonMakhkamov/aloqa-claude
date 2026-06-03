@@ -910,6 +910,56 @@ func TestLiveKitWebhookParticipantLeftIgnoredWhileInBreakoutRoom(t *testing.T) {
 	}
 }
 
+// Review follow-up: a participant who HARD-leaves (tab close/crash) while still
+// assigned to a breakout room must be marked disconnected and emit
+// participant.left. Their breakout-room participant_left is the real call leave —
+// a clean return-to-main clears the assignment first and short-circuits the
+// handler, so reaching the unassign means a genuine drop.
+func TestLiveKitBreakoutParticipantLeftMarksHardLeaveDisconnected(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	userID := uuid.New()
+	breakoutRoomID := uuid.New()
+
+	leaver := connectedParticipant(callID, userID, entity.CallRoleParticipant)
+	leaver.BreakoutRoomID = &breakoutRoomID
+	host := connectedParticipant(callID, hostID, entity.CallRoleHost)
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: breakoutCall(callID, workspaceID, hostID)},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, userID}: leaver,
+			{callID, hostID}: host,
+		},
+		liveKitWebhookEvents: map[string]*entity.LiveKitWebhookEvent{},
+	}
+	pub := &capturingPublisher{}
+	svc := NewService(calls, newStubBreakoutRepo(), &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+
+	ev := &livekitpb.WebhookEvent{
+		Id:          uuid.New().String(),
+		Event:       "participant_left",
+		Room:        &livekitpb.Room{Name: breakoutLiveKitRoomName(callID, breakoutRoomID)},
+		Participant: &livekitpb.ParticipantInfo{Identity: userID.String()},
+	}
+	if err := svc.HandleLiveKitWebhook(ctx, ev); err != nil {
+		t.Fatalf("HandleLiveKitWebhook returned error: %v", err)
+	}
+
+	if leaver.Status != entity.ParticipantStatusDisconnected {
+		t.Fatalf("leaver status = %v, want disconnected", leaver.Status)
+	}
+	if got := countBreakoutEvents(t, pub.captures, event.TypeCallParticipantLeft); got != 1 {
+		t.Fatalf("call.participant.left events = %d, want 1", got)
+	}
+	// Host is still connected, so the call must NOT auto-end.
+	if calls.calls[callID].Status == entity.CallStatusEnded {
+		t.Fatalf("call ended despite the host still being connected")
+	}
+}
+
 func TestLiveKitTrackChangedDoesNotPublishWhenScreenShareStateAlreadyMatches(t *testing.T) {
 	ctx := context.Background()
 	callID := uuid.New()

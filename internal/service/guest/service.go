@@ -274,10 +274,13 @@ func (s *Service) RedeemInvite(ctx context.Context, input RedeemInviteInput) (*R
 		InviteID:    invite.ID,
 		WorkspaceID: invite.WorkspaceID,
 		UserID:      user.ID,
-		ChannelIDs:  append([]uuid.UUID(nil), invite.ChannelIDs...),
-		CallID:      invite.CallID,
-		ExpiresAt:   invite.ExpiresAt,
-		CreatedAt:   time.Now().UTC(),
+		// Non-nil empty slice when the invite has no channels (call-scoped links):
+		// guest_access_grants.channel_ids is NOT NULL and a nil []uuid.UUID binds as
+		// SQL NULL, which 500s the redeem (surfaced as a guest "Network error").
+		ChannelIDs: append(make([]uuid.UUID, 0, len(invite.ChannelIDs)), invite.ChannelIDs...),
+		CallID:     invite.CallID,
+		ExpiresAt:  invite.ExpiresAt,
+		CreatedAt:  time.Now().UTC(),
 	}
 	if s.tx != nil {
 		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {

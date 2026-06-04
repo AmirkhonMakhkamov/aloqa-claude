@@ -351,11 +351,16 @@ func (s *Service) RedeemInvite(ctx context.Context, input RedeemInviteInput) (*R
 	)
 
 	return &RedeemResult{
-		User:         user,
-		WorkspaceID:  invite.WorkspaceID,
-		CallID:       invite.CallID,
-		SessionID:    sessionID,
-		ChannelIDs:   invite.ChannelIDs,
+		User:        user,
+		WorkspaceID: invite.WorkspaceID,
+		CallID:      invite.CallID,
+		SessionID:   sessionID,
+		// Non-nil empty slice when the invite has no channels (call-scoped
+		// links): a nil []uuid.UUID marshals as JSON `null`, which the web
+		// client's strict channel_ids schema (z.array) rejects with a ZodError
+		// surfaced as a guest "Network error" — never letting the guest reach
+		// the call. Mirrors the guest_access_grants insert guard above.
+		ChannelIDs:   append(make([]uuid.UUID, 0, len(invite.ChannelIDs)), invite.ChannelIDs...),
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
 		ExpiresIn:    expiresIn,

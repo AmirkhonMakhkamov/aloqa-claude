@@ -525,6 +525,12 @@ func endCallWithReason(ctx context.Context, repo repository.CallRepository, call
 	return repo.End(ctx, callID)
 }
 
+// endCallWithReasonIfNotEnded ends a call if it is not already ended. The
+// transition repo implementation (postgres EndWithReasonIfNotEnded) atomically
+// disconnects any still-live participants in the SAME statement, so a call can
+// never be left 'ended' with participants still 'connected' — the zombie-call
+// leak. The fallback path (no transition repo) is used only by minimal stubs.
+// (zombie-calls)
 func endCallWithReasonIfNotEnded(ctx context.Context, repo repository.CallRepository, callID uuid.UUID, reason entity.CallEndReason) (bool, error) {
 	if transitionRepo, ok := repo.(callEndTransitionRepository); ok {
 		return transitionRepo.EndWithReasonIfNotEnded(ctx, callID, reason)

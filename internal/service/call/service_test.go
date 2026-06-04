@@ -862,8 +862,16 @@ func TestLiveKitWebhookIgnoresParticipantLeftAfterRoomFinished(t *testing.T) {
 	if got := len(pub.captures); got != 1 {
 		t.Fatalf("publish count after out-of-order delivery = %d, want 1", got)
 	}
-	if calls.participants[[2]uuid.UUID{callID, userID}].Status != entity.ParticipantStatusConnected {
-		t.Fatalf("participant status changed after ended call")
+	// room_finished ends the call AND disconnects its remaining participants (the
+	// zombie-call fix), so userID is already disconnected. The point of this test
+	// is that the LATE participant_left is ignored — proven by the single publish
+	// above — and that it does not mutate the already-disconnected row further.
+	left := calls.participants[[2]uuid.UUID{callID, userID}]
+	if left.Status != entity.ParticipantStatusDisconnected {
+		t.Fatalf("participant status = %q after room_finished, want disconnected", left.Status)
+	}
+	if left.LeftReason != entity.ParticipantLeftReasonTimeout {
+		t.Fatalf("participant left_reason = %q, want timeout (set by room_finished, not the late participant_left)", left.LeftReason)
 	}
 }
 
@@ -1661,6 +1669,13 @@ func TestLeaveCallIsIdempotentAndAutoEndsOneToOne(t *testing.T) {
 	if participant.Status != entity.ParticipantStatusDisconnected || participant.LeftReason != entity.ParticipantLeftReasonLeft {
 		t.Fatalf("participant lifecycle = status %q reason %q, want disconnected/left", participant.Status, participant.LeftReason)
 	}
+	// The non-leaving party (the host here) must NOT linger as status='connected'
+	// once the auto-end fires — otherwise it becomes the zombie call that the
+	// active-call surfaces resurface for the other user. (zombie-calls)
+	host := calls.participants[[2]uuid.UUID{callID, hostID}]
+	if host.Status != entity.ParticipantStatusDisconnected || host.LeftAt == nil {
+		t.Fatalf("host lifecycle = status %q left_at %v, want disconnected with left_at set", host.Status, host.LeftAt)
+	}
 	callEntity := calls.calls[callID]
 	if callEntity.Status != entity.CallStatusEnded || callEntity.EndReason != entity.CallEndReasonAllLeft {
 		t.Fatalf("call lifecycle = status %q reason %q, want ended/all_left", callEntity.Status, callEntity.EndReason)
@@ -1709,6 +1724,90 @@ func TestLeaveCallAfterEndedIsAlreadyLeftNoMutation(t *testing.T) {
 	}
 	if participant.Status != entity.ParticipantStatusConnected || participant.LeftReason != "" || participant.LeftAt != nil {
 		t.Fatalf("participant mutated after ended leave: %+v", participant)
+	}
+}
+
+// Ending a call must disconnect every still-connected participant, not just the
+// caller. Otherwise the non-ending participants linger as status='connected'
+// with left_at=NULL forever — the "zombie call" the active-call surfaces keep
+// resurfacing for them. (zombie-calls)
+func TestEndCallDisconnectsRemainingParticipants(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	otherID := uuid.New()
+	startedAt := time.Now().Add(-5 * time.Minute)
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, hostID}:  {WorkspaceID: workspaceID, UserID: hostID, Role: entity.WorkspaceRoleMember},
+		{workspaceID, otherID}: {WorkspaceID: workspaceID, UserID: otherID, Role: entity.WorkspaceRoleMember},
+	}}
+	host := &entity.CallParticipant{
+		ID: uuid.New(), CallID: callID, UserID: hostID,
+		Role: entity.CallRoleHost, Status: entity.ParticipantStatusConnected, JoinedAt: &startedAt,
+	}
+	other := &entity.CallParticipant{
+		ID: uuid.New(), CallID: callID, UserID: otherID,
+		Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected, JoinedAt: &startedAt,
+	}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeGroup, Status: entity.CallStatusActive, CreatedBy: hostID, StartedAt: &startedAt},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}:  host,
+			{callID, otherID}: other,
+		},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	if err := svc.EndCall(ctx, workspaceID, callID, hostID); err != nil {
+		t.Fatalf("EndCall returned error: %v", err)
+	}
+
+	for name, p := range map[string]*entity.CallParticipant{"host": host, "other": other} {
+		if p.Status != entity.ParticipantStatusDisconnected {
+			t.Fatalf("%s status = %q, want disconnected", name, p.Status)
+		}
+		if p.LeftAt == nil {
+			t.Fatalf("%s left_at is nil, want set", name)
+		}
+	}
+}
+
+// Cancelling a ringing call must also disconnect its live participants (the
+// caller), with reason 'missed' — same zombie-call invariant on the cancel path.
+// (zombie-calls)
+func TestCancelCallDisconnectsLiveParticipants(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	callerID := uuid.New()
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, callerID}: {WorkspaceID: workspaceID, UserID: callerID, Role: entity.WorkspaceRoleMember},
+	}}
+	caller := &entity.CallParticipant{
+		ID: uuid.New(), CallID: callID, UserID: callerID,
+		Role: entity.CallRoleHost, Status: entity.ParticipantStatusConnected,
+	}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeOneToOne, Status: entity.CallStatusRinging, CreatedBy: callerID},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, callerID}: caller,
+		},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	if _, err := svc.CancelCall(ctx, workspaceID, callID, callerID); err != nil {
+		t.Fatalf("CancelCall returned error: %v", err)
+	}
+	if caller.Status != entity.ParticipantStatusDisconnected || caller.LeftReason != entity.ParticipantLeftReasonMissed {
+		t.Fatalf("caller lifecycle = status %q reason %q, want disconnected/missed", caller.Status, caller.LeftReason)
+	}
+	if caller.LeftAt == nil {
+		t.Fatalf("caller left_at is nil, want set")
 	}
 }
 
@@ -2403,6 +2502,9 @@ func (r *fakeCallRepo) EndWithReasonIfNotEnded(_ context.Context, id uuid.UUID, 
 	if call.EndReason == "" {
 		call.EndReason = reason
 	}
+	// Mirror postgres EndWithReasonIfNotEnded: ending a call atomically
+	// disconnects its still-live participants in the same statement. (zombie-calls)
+	r.disconnectLiveParticipants(id, entity.ParticipantLeftReasonTimeout)
 	return true, nil
 }
 func (r *fakeCallRepo) CancelRingingWithReason(_ context.Context, id uuid.UUID, reason entity.CallEndReason) (bool, error) {
@@ -2423,7 +2525,31 @@ func (r *fakeCallRepo) CancelRingingWithReason(_ context.Context, id uuid.UUID, 
 	if call.EndReason == "" {
 		call.EndReason = reason
 	}
+	// Mirror postgres CancelRingingWithReason. (zombie-calls)
+	r.disconnectLiveParticipants(id, entity.ParticipantLeftReasonMissed)
 	return true, nil
+}
+
+// disconnectLiveParticipants mirrors the CTE in postgres endCallAndDisconnect:
+// every joining/connected/waiting participant of the call becomes disconnected,
+// preserving any left_at/left_reason already set (COALESCE semantics).
+func (r *fakeCallRepo) disconnectLiveParticipants(callID uuid.UUID, reason entity.ParticipantLeftReason) {
+	now := time.Now().UTC()
+	for key, p := range r.participants {
+		if key[0] != callID {
+			continue
+		}
+		switch p.Status {
+		case entity.ParticipantStatusJoining, entity.ParticipantStatusConnected, entity.ParticipantStatusWaiting:
+			p.Status = entity.ParticipantStatusDisconnected
+			if p.LeftAt == nil {
+				p.LeftAt = &now
+			}
+			if p.LeftReason == "" {
+				p.LeftReason = reason
+			}
+		}
+	}
 }
 func (r *fakeCallRepo) AddParticipant(_ context.Context, p *entity.CallParticipant) error {
 	if r.participants == nil {

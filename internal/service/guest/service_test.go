@@ -2,6 +2,8 @@ package guest
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -287,6 +289,55 @@ func TestRedeemCallInviteWithoutChannelsGrantsNonNilChannelIDs(t *testing.T) {
 	}
 	if len(grants.created.ChannelIDs) != 0 {
 		t.Fatalf("call-scoped grant should carry no channels, got %v", grants.created.ChannelIDs)
+	}
+}
+
+// The redeem RESPONSE must serialize channel_ids as a JSON array (`[]`), never
+// `null`. The web client parses the response with a strict z.array() schema
+// (packages/core/src/api/guests.ts), so a `null` here throws a ZodError that the
+// guest-entry form folds into a generic "Network error" — the guest can never
+// reach the call. Call-scoped links carry no channels, so the nil invite slice
+// must still echo as `[]`. The sibling grant test above guards the DB insert;
+// this guards the wire contract the browser depends on.
+func TestRedeemCallInviteResponseChannelIDsAreNonNilArray(t *testing.T) {
+	workspaceID := uuid.New()
+	callID := uuid.New()
+
+	invites := &fakeInviteRepo{byToken: map[string]*entity.GuestInvite{
+		"call-token": {
+			ID:          uuid.New(),
+			WorkspaceID: workspaceID,
+			Token:       "call-token",
+			ChannelIDs:  nil, // call-scoped link — no channels
+			CallID:      &callID,
+			MaxUses:     100,
+			Status:      entity.GuestInviteStatusActive,
+			ExpiresAt:   time.Now().Add(time.Hour),
+		},
+	}}
+	svc := NewService(invites, &fakeGuestAccessRepo{}, &fakeUserRepo{}, &fakeWorkspaceRepo{}, &fakeChannelRepo{}, nil)
+	svc.SetCallLookup(&fakeCallLookup{call: &entity.Call{ID: callID, WorkspaceID: workspaceID, Status: entity.CallStatusActive}})
+
+	result, err := svc.RedeemInvite(context.Background(), RedeemInviteInput{
+		Token:       "call-token",
+		DisplayName: "Guest User",
+	})
+	if err != nil {
+		t.Fatalf("RedeemInvite returned error: %v", err)
+	}
+	if result.ChannelIDs == nil {
+		t.Fatalf("result.ChannelIDs is nil; it serializes as JSON null and breaks the web client's strict channel_ids schema")
+	}
+
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("failed to marshal redeem result: %v", err)
+	}
+	if strings.Contains(string(encoded), `"channel_ids":null`) {
+		t.Fatalf("redeem response serialized channel_ids as null: %s", encoded)
+	}
+	if !strings.Contains(string(encoded), `"channel_ids":[]`) {
+		t.Fatalf("redeem response should serialize channel_ids as [], got: %s", encoded)
 	}
 }
 

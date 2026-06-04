@@ -150,6 +150,44 @@ func TestMessagePostProfileShareBuildsCardPayload(t *testing.T) {
 	}
 }
 
+func TestMessagePostProfileShareWorksInPublicChannel(t *testing.T) {
+	f := newMessageHTTPFixture()
+	targetID := uuid.New()
+	f.workspaces.members[[2]uuid.UUID{f.workspaceID, targetID}] = &entity.WorkspaceMember{
+		WorkspaceID: f.workspaceID,
+		UserID:      targetID,
+		Role:        entity.WorkspaceRoleMember,
+		User: &entity.User{
+			ID:          targetID,
+			DisplayName: "Alice Sharipova",
+			Status:      entity.UserStatusActive,
+		},
+	}
+
+	res := f.serve(
+		http.MethodPost,
+		"/channels/"+f.channelID.String()+"/messages",
+		`{"content":"Alice Sharipova","profile_share":{"user_id":"`+targetID.String()+`"}}`,
+	)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", res.Code, res.Body.String())
+	}
+
+	var msg entity.Message
+	if err := json.Unmarshal(res.Body.Bytes(), &msg); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if msg.ProfileShare == nil {
+		t.Fatalf("profile_share = nil, want value")
+	}
+	if msg.ProfileShare.UserID != targetID || msg.ProfileShare.WorkspaceID != f.workspaceID {
+		t.Fatalf("profile_share ids = %s/%s, want %s/%s", msg.ProfileShare.UserID, msg.ProfileShare.WorkspaceID, targetID, f.workspaceID)
+	}
+	if msg.ProfileShare.Snapshot.DisplayName != "Alice Sharipova" || msg.ProfileShare.Snapshot.Role != entity.WorkspaceRoleMember {
+		t.Fatalf("profile_share snapshot = %+v, want hydrated target profile", msg.ProfileShare.Snapshot)
+	}
+}
+
 func TestMessagePostProfileShareAcceptsHydratedClientPayload(t *testing.T) {
 	f := newMessageHTTPFixture()
 	f.channels.channels[f.channelID].Type = entity.ChannelTypeDM

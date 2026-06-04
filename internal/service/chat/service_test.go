@@ -800,6 +800,63 @@ func TestSendMessageProfileShareBuildsSnapshotAndValidatesWorkspace(t *testing.T
 			inputUserID: targetID,
 		},
 		{
+			name:        "public channel share persists authoritative profile snapshot",
+			channelType: entity.ChannelTypePublic,
+			targetMember: &entity.WorkspaceMember{
+				WorkspaceID: workspaceID,
+				UserID:      targetID,
+				Role:        entity.WorkspaceRoleAdmin,
+				User: &entity.User{
+					ID:          targetID,
+					DisplayName: "Madina Karimova",
+					AvatarURL:   "https://cdn.test/madina.png",
+					AvatarColor: "#0EA5E9",
+					Position:    &position,
+					Department:  &department,
+					Status:      entity.UserStatusActive,
+				},
+			},
+			inputUserID: targetID,
+		},
+		{
+			name:        "private channel share persists authoritative profile snapshot",
+			channelType: entity.ChannelTypePrivate,
+			targetMember: &entity.WorkspaceMember{
+				WorkspaceID: workspaceID,
+				UserID:      targetID,
+				Role:        entity.WorkspaceRoleAdmin,
+				User: &entity.User{
+					ID:          targetID,
+					DisplayName: "Madina Karimova",
+					AvatarURL:   "https://cdn.test/madina.png",
+					AvatarColor: "#0EA5E9",
+					Position:    &position,
+					Department:  &department,
+					Status:      entity.UserStatusActive,
+				},
+			},
+			inputUserID: targetID,
+		},
+		{
+			name:        "group dm share persists authoritative profile snapshot",
+			channelType: entity.ChannelTypeGroupDM,
+			targetMember: &entity.WorkspaceMember{
+				WorkspaceID: workspaceID,
+				UserID:      targetID,
+				Role:        entity.WorkspaceRoleAdmin,
+				User: &entity.User{
+					ID:          targetID,
+					DisplayName: "Madina Karimova",
+					AvatarURL:   "https://cdn.test/madina.png",
+					AvatarColor: "#0EA5E9",
+					Position:    &position,
+					Department:  &department,
+					Status:      entity.UserStatusActive,
+				},
+			},
+			inputUserID: targetID,
+		},
+		{
 			name:           "target must be in workspace",
 			channelType:    entity.ChannelTypeDM,
 			inputUserID:    targetID,
@@ -807,8 +864,8 @@ func TestSendMessageProfileShareBuildsSnapshotAndValidatesWorkspace(t *testing.T
 			wantErrMessage: "shared profile is not a member of this workspace",
 		},
 		{
-			name:        "profile share is dm only",
-			channelType: entity.ChannelTypePublic,
+			name:        "profile share is not allowed in saved channel",
+			channelType: entity.ChannelTypeSaved,
 			targetMember: &entity.WorkspaceMember{
 				WorkspaceID: workspaceID,
 				UserID:      targetID,
@@ -821,7 +878,7 @@ func TestSendMessageProfileShareBuildsSnapshotAndValidatesWorkspace(t *testing.T
 			},
 			inputUserID:    targetID,
 			wantErrCode:    cerrors.CodeForbidden,
-			wantErrMessage: "profile shares can only be sent to a direct message",
+			wantErrMessage: "profile shares cannot be sent to this channel",
 		},
 		{
 			name:        "inactive profile cannot be shared",

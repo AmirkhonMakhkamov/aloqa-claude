@@ -148,6 +148,12 @@ func (s *Service) endStaleOpenCallTx(ctx context.Context, callID uuid.UUID) (boo
 			return nil
 		}
 
+		// endStaleCallStatus already atomically disconnected the live
+		// (joining/connected/waiting) participants via the repo CTE. This pass is
+		// NOT dead code: it is the only path that also clears never-joined
+		// 'invited' rows (which the CTE intentionally leaves), and it is idempotent
+		// for the already-disconnected rows (COALESCE + status<>'disconnected'
+		// guard preserve the CTE-written values). Keep it. (zombie-calls)
 		participants, err := repo.ListParticipants(ctx, call.ID)
 		if err != nil {
 			return err
@@ -196,6 +202,9 @@ func (s *Service) endStaleOpenCallDirect(ctx context.Context, callID uuid.UUID) 
 		return false, nil
 	}
 
+	// See endStaleOpenCall: endStaleCallStatus already disconnected the live
+	// participants via the CTE; this pass additionally clears 'invited' rows the
+	// CTE skips and is idempotent for the rest. Keep it. (zombie-calls)
 	participants, err := s.calls.ListParticipants(ctx, call.ID)
 	if err != nil {
 		return false, err

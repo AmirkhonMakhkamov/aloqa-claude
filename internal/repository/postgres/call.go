@@ -677,20 +677,73 @@ func (r *CallRepo) EndWithReason(ctx context.Context, id uuid.UUID, reason entit
 	return err
 }
 
-func (r *CallRepo) EndWithReasonIfNotEnded(ctx context.Context, id uuid.UUID, reason entity.CallEndReason) (bool, error) {
-	now := time.Now().UTC()
-	query := `
+// endCallQuery / cancelRingingQuery atomically end a call AND disconnect its
+// still-live participants in a SINGLE statement. Ending the call and clearing
+// the participants must be atomic on every path — including the non-transactional
+// LiveKit webhook path — otherwise a disconnect failure after the status flip
+// would strand participants as status='connected'/left_at=NULL on an ended call
+// (the zombie-call leak), and a LiveKit retry would short-circuit on the already
+// 'ended' status and never re-run the cleanup. A single CTE also collapses what
+// would otherwise be N per-participant round-trips inside the end transaction.
+// The participant set (joining/connected/waiting) matches migration 054's backfill
+// and never touches terminal 'declined'/'disconnected' or never-joined 'invited'
+// rows. (zombie-calls)
+const endCallQuery = `
+	WITH ended AS (
 		UPDATE calls
-		SET status = 'ended',
-		    ended_at = COALESCE(ended_at, $2),
-		    end_reason = COALESCE(end_reason, $3)
-		WHERE id = $1 AND status <> 'ended'`
+		   SET status = 'ended',
+		       ended_at = COALESCE(ended_at, $2),
+		       end_reason = COALESCE(end_reason, $3)
+		 WHERE id = $1 AND status <> 'ended'
+		RETURNING id
+	),
+	disconnected AS (
+		UPDATE call_participants cp
+		   SET status = 'disconnected',
+		       left_at = COALESCE(cp.left_at, $2),
+		       left_reason = COALESCE(cp.left_reason, $4)
+		  FROM ended
+		 WHERE cp.call_id = ended.id
+		   AND cp.status IN ('joining', 'connected', 'waiting')
+		RETURNING cp.id
+	)
+	SELECT (SELECT count(*) FROM ended), (SELECT count(*) FROM disconnected)`
 
-	tag, err := r.db.Exec(ctx, query, id, now, nullableCallEndReason(reason))
-	if err != nil {
-		return false, fmt.Errorf("postgres: end call: %w", err)
+const cancelRingingQuery = `
+	WITH ended AS (
+		UPDATE calls
+		   SET status = 'ended',
+		       ended_at = COALESCE(ended_at, $2),
+		       end_reason = COALESCE(end_reason, $3)
+		 WHERE id = $1 AND status = 'ringing'
+		RETURNING id
+	),
+	disconnected AS (
+		UPDATE call_participants cp
+		   SET status = 'disconnected',
+		       left_at = COALESCE(cp.left_at, $2),
+		       left_reason = COALESCE(cp.left_reason, $4)
+		  FROM ended
+		 WHERE cp.call_id = ended.id
+		   AND cp.status IN ('joining', 'connected', 'waiting')
+		RETURNING cp.id
+	)
+	SELECT (SELECT count(*) FROM ended), (SELECT count(*) FROM disconnected)`
+
+func (r *CallRepo) endCallAndDisconnect(
+	ctx context.Context,
+	id uuid.UUID,
+	query string,
+	reason entity.CallEndReason,
+	participantReason entity.ParticipantLeftReason,
+) (bool, error) {
+	now := time.Now().UTC()
+	var endedCount, disconnectedCount int64
+	if err := r.db.QueryRow(ctx, query, id, now, nullableCallEndReason(reason), string(participantReason)).
+		Scan(&endedCount, &disconnectedCount); err != nil {
+		return false, fmt.Errorf("postgres: end call and disconnect participants: %w", err)
 	}
-	if tag.RowsAffected() > 0 {
+	if endedCount > 0 {
 		return true, nil
 	}
 	if err := r.ensureCallExists(ctx, id); err != nil {
@@ -699,26 +752,12 @@ func (r *CallRepo) EndWithReasonIfNotEnded(ctx context.Context, id uuid.UUID, re
 	return false, nil
 }
 
-func (r *CallRepo) CancelRingingWithReason(ctx context.Context, id uuid.UUID, reason entity.CallEndReason) (bool, error) {
-	now := time.Now().UTC()
-	query := `
-		UPDATE calls
-		SET status = 'ended',
-		    ended_at = COALESCE(ended_at, $2),
-		    end_reason = COALESCE(end_reason, $3)
-		WHERE id = $1 AND status = 'ringing'`
+func (r *CallRepo) EndWithReasonIfNotEnded(ctx context.Context, id uuid.UUID, reason entity.CallEndReason) (bool, error) {
+	return r.endCallAndDisconnect(ctx, id, endCallQuery, reason, entity.ParticipantLeftReasonTimeout)
+}
 
-	tag, err := r.db.Exec(ctx, query, id, now, nullableCallEndReason(reason))
-	if err != nil {
-		return false, fmt.Errorf("postgres: cancel ringing call: %w", err)
-	}
-	if tag.RowsAffected() > 0 {
-		return true, nil
-	}
-	if err := r.ensureCallExists(ctx, id); err != nil {
-		return false, err
-	}
-	return false, nil
+func (r *CallRepo) CancelRingingWithReason(ctx context.Context, id uuid.UUID, reason entity.CallEndReason) (bool, error) {
+	return r.endCallAndDisconnect(ctx, id, cancelRingingQuery, reason, entity.ParticipantLeftReasonMissed)
 }
 
 func (r *CallRepo) ensureCallExists(ctx context.Context, id uuid.UUID) error {

@@ -1194,8 +1194,8 @@ func (s *Service) buildProfileShare(
 	if input.UserID == uuid.Nil {
 		return nil, cerrors.InvalidInput("profile_share.user_id is required")
 	}
-	if ch.Type != entity.ChannelTypeDM {
-		return nil, cerrors.Forbidden("profile shares can only be sent to a direct message")
+	if !canSendProfileShareToChannel(ch.Type) {
+		return nil, cerrors.Forbidden("profile shares cannot be sent to this channel")
 	}
 
 	member, err := s.members.GetMember(ctx, workspaceID, input.UserID)
@@ -1225,6 +1225,15 @@ func (s *Service) buildProfileShare(
 			Department:  member.User.Department,
 		},
 	}, nil
+}
+
+func canSendProfileShareToChannel(channelType entity.ChannelType) bool {
+	switch channelType {
+	case entity.ChannelTypeDM, entity.ChannelTypeGroupDM, entity.ChannelTypePublic, entity.ChannelTypePrivate:
+		return true
+	default:
+		return false
+	}
 }
 
 // SendMessage creates a new message in a channel after verifying membership.

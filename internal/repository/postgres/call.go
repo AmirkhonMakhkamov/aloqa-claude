@@ -716,7 +716,9 @@ const endCallQuery = `
 		-- 400+ hour zombie). Matched by the call id embedded in the event body
 		-- and compared AS TEXT, so a malformed body can never raise a uuid cast
 		-- error on the call-end path. Data-modifying CTEs run to completion
-		-- even though this clause is not read by the final SELECT.
+		-- even though this clause is not read by the final SELECT. call.started
+		-- is enqueued exactly once at call creation with a fresh per-call id and
+		-- ids are never reused, so a single tombstone at end is sufficient.
 		UPDATE realtime_events re
 		   SET replayable = false
 		  FROM ended
@@ -755,7 +757,9 @@ const cancelRingingQuery = `
 		-- 400+ hour zombie). Matched by the call id embedded in the event body
 		-- and compared AS TEXT, so a malformed body can never raise a uuid cast
 		-- error on the call-end path. Data-modifying CTEs run to completion
-		-- even though this clause is not read by the final SELECT.
+		-- even though this clause is not read by the final SELECT. call.started
+		-- is enqueued exactly once at call creation with a fresh per-call id and
+		-- ids are never reused, so a single tombstone at end is sufficient.
 		UPDATE realtime_events re
 		   SET replayable = false
 		  FROM ended

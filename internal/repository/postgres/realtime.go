@@ -254,13 +254,15 @@ func (r *RealtimeRepo) ReplayRoom(ctx context.Context, room string, afterSequenc
 		  AND replayable = true
 		  AND subject = $1
 		  AND sequence > $2
-		  -- (zombie-calls) Never replay ancient events to a (re)subscribing
-		  -- client. A fresh tab has no cursor (afterSequence = 0) and would
-		  -- otherwise receive the entire replayable backlog — including
-		  -- weeks-old call.started events that seed phantom in-call surfaces.
-		  -- A reconnecting client only needs to catch up on the recent gap;
-		  -- older state is rehydrated by the normal on-load REST queries.
-		  AND created_at > now() - $4::interval
+		  -- (zombie-calls) Bound the freshness ONLY for call.started, the single
+		  -- durable type that seeds an in-call surface on the client. A fresh tab
+		  -- has no cursor (afterSequence = 0) and would otherwise replay weeks-old
+		  -- call.started events and render phantom "zombie" calls; this window is
+		  -- defense-in-depth on top of the end-path tombstone. Every other
+		  -- replayable type (message.created/updated/deleted, calendar, call
+		  -- lifecycle) is left UNBOUNDED so a client reconnecting after a long
+		  -- offline gap still catches up on real events it missed.
+		  AND (type <> 'call.started' OR created_at > now() - $4::interval)
 		ORDER BY sequence ASC
 		LIMIT $3
 	`, subject, afterSequence, limit, realtimeReplayWindow)

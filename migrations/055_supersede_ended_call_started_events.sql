@@ -24,6 +24,12 @@ WHERE re.type = 'call.started'
 -- call.started row by the call id embedded in the event body, scoped to the
 -- small set of still-replayable call.started events. A partial expression index
 -- makes that an index probe instead of a scan as realtime_events grows.
+-- Built non-CONCURRENTLY on purpose: realtime_events is a drained outbox
+-- (verified ~2.5k rows / ~4.5 MB in prod) and the partial index covers only
+-- still-replayable call.started rows, so the build and its brief write lock are
+-- sub-second. The migration runner applies files in autocommit (no wrapping
+-- transaction), so CONCURRENTLY would be possible, but it is unnecessary at this
+-- table size and risks leaving an INVALID index on interruption.
 CREATE INDEX IF NOT EXISTS idx_realtime_events_call_started_replayable
     ON realtime_events ((body #>> '{payload,call,id}'))
     WHERE type = 'call.started' AND replayable = true;

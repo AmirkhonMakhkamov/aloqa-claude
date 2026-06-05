@@ -2731,6 +2731,20 @@ func (c *fakeLiveKitRoomClient) MutePublishedTrack(_ context.Context, room, iden
 		return c.mutePublishedTrackErr
 	}
 	c.mutedTracks = append(c.mutedTracks, mutedLiveKitTrack{room: room, identity: identity, trackSID: trackSID})
+	// Reflect the mute so a subsequent ListParticipants sees the track muted (the
+	// real RoomService does this), letting an idempotent reconcile pass skip it.
+	for _, parts := range c.participantsByCall {
+		for _, p := range parts {
+			if p.GetIdentity() != identity {
+				continue
+			}
+			for _, tr := range p.GetTracks() {
+				if tr.GetSid() == trackSID {
+					tr.Muted = true
+				}
+			}
+		}
+	}
 	return nil
 }
 

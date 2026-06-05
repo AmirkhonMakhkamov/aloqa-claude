@@ -87,6 +87,20 @@ func (h *SavedHandler) UnsaveMessage(w http.ResponseWriter, r *http.Request) {
 	writeNoContent(w)
 }
 
+func (h *SavedHandler) HardDeleteMessage(w http.ResponseWriter, r *http.Request) {
+	savedMsgID, err := id.Parse(chi.URLParam(r, "savedMsgID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	userID := middleware.UserIDFromContext(r.Context())
+	if err := h.svc.HardDeleteMessage(r.Context(), userID, savedMsgID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeNoContent(w)
+}
+
 func (h *SavedHandler) ListMessages(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	mode := entity.SavedMessagesMode(q.Get("mode"))

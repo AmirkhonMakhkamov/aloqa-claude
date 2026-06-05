@@ -147,6 +147,7 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 				r.Post("/me/saved-messages", deps.Saved.SaveMessage)
 				r.Get("/me/saved-messages", deps.Saved.ListMessages)
 				r.Delete("/me/saved-messages/{savedMsgID}", deps.Saved.UnsaveMessage)
+				r.Delete("/me/saved-messages/{savedMsgID}/hard", deps.Saved.HardDeleteMessage)
 			}
 		})
 

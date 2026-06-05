@@ -107,11 +107,22 @@ func (s *Service) SaveMessage(ctx context.Context, userID, messageID, workspaceI
 	if sourceChannel.Type == entity.ChannelTypeSavedGlobal {
 		sourceWorkspaceID = uuid.Nil
 	}
+
+	// Fetch the original message author's details
+	originalAuthor, err := s.users.GetByID(ctx, src.UserID)
+	if err != nil {
+		return nil, err
+	}
+
 	savedFrom := entity.SavedFrom{
-		UserID:    src.UserID,
-		MessageID: src.ID,
-		ChannelID: src.ChannelID,
-		CreatedAt: src.CreatedAt,
+		UserID:      src.UserID,
+		DisplayName: originalAuthor.DisplayName,
+		AvatarColor: originalAuthor.AvatarColor,
+		Department:  originalAuthor.Department,
+		Position:    originalAuthor.Position,
+		MessageID:   src.ID,
+		ChannelID:   src.ChannelID,
+		CreatedAt:   src.CreatedAt,
 	}
 	if sourceWorkspaceID != uuid.Nil {
 		savedFrom.WorkspaceID = &sourceWorkspaceID
@@ -163,6 +174,26 @@ func (s *Service) UnsaveMessage(ctx context.Context, userID, savedMsgID uuid.UUI
 		return err
 	}
 	s.publishMessageEvent(ctx, event.TypeMessageDeleted, ch, deletedMsg, userID)
+	return nil
+}
+
+func (s *Service) HardDeleteMessage(ctx context.Context, userID, savedMsgID uuid.UUID) error {
+	msg, err := s.messages.GetByID(ctx, savedMsgID)
+	if err != nil {
+		return err
+	}
+	ch, err := s.channels.GetByID(ctx, msg.ChannelID)
+	if err != nil {
+		return err
+	}
+
+	if !ch.Type.IsSelfChannel() || ch.OwnerUserID == nil || *ch.OwnerUserID != userID {
+		return cerrors.NotFound("saved message not found")
+	}
+	if err := s.messages.HardDelete(ctx, savedMsgID); err != nil {
+		return err
+	}
+	s.publishMessageEvent(ctx, event.TypeMessageDeleted, ch, msg, userID)
 	return nil
 }
 

@@ -93,6 +93,7 @@ type MessageRepository interface {
 	Update(ctx context.Context, msg *entity.Message) error
 	SoftDelete(ctx context.Context, id uuid.UUID) error
 	SoftDeleteWithCascade(ctx context.Context, id uuid.UUID) ([]uuid.UUID, error)
+	HardDelete(ctx context.Context, id uuid.UUID) error
 
 	Pin(ctx context.Context, messageID, userID uuid.UUID) error
 	Unpin(ctx context.Context, messageID uuid.UUID) error

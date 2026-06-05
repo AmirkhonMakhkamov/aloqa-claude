@@ -539,6 +539,20 @@ func (r *MessageRepo) SoftDeleteWithCascade(ctx context.Context, id uuid.UUID) (
 	return affected, nil
 }
 
+func (r *MessageRepo) HardDelete(ctx context.Context, id uuid.UUID) error {
+	query := `DELETE FROM messages WHERE id = $1`
+
+	tag, err := r.db.Exec(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("postgres: hard delete message: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return cerrors.NotFound("message not found")
+	}
+
+	return nil
+}
+
 // --- Pin methods ---
 
 func (r *MessageRepo) Pin(ctx context.Context, messageID, userID uuid.UUID) error {

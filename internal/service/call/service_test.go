@@ -2672,6 +2672,14 @@ type fakeLiveKitRoomClient struct {
 	listParticipantsCalls int
 	updatedParticipants   []updatedLiveKitParticipant
 	updateParticipantErr  error
+	mutedTracks           []mutedLiveKitTrack
+	mutePublishedTrackErr error
+}
+
+type mutedLiveKitTrack struct {
+	room     string
+	identity string
+	trackSID string
 }
 
 func (c *fakeLiveKitRoomClient) EnsureRoom(_ context.Context, args LiveKitEnsureRoomArgs) error {
@@ -2715,6 +2723,14 @@ func (c *fakeLiveKitRoomClient) UpdateParticipant(_ context.Context, room, ident
 		return c.updateParticipantErr
 	}
 	c.updatedParticipants = append(c.updatedParticipants, updatedLiveKitParticipant{room: room, identity: identity, perm: perm})
+	return nil
+}
+
+func (c *fakeLiveKitRoomClient) MutePublishedTrack(_ context.Context, room, identity, trackSID string) error {
+	if c.mutePublishedTrackErr != nil {
+		return c.mutePublishedTrackErr
+	}
+	c.mutedTracks = append(c.mutedTracks, mutedLiveKitTrack{room: room, identity: identity, trackSID: trackSID})
 	return nil
 }
 

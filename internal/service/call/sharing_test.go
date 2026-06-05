@@ -43,7 +43,10 @@ func shareTestHarness(t *testing.T, callStatus entity.CallStatus) (
 	}}
 	calls := &fakeCallRepo{
 		calls: map[uuid.UUID]*entity.Call{
-			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: callStatus, CreatedAt: time.Now()},
+			// ScreenSharing=true: the meeting permits screen-share at the meeting
+			// level, so a per-participant ALK-697 grant resolves to a real screen
+			// source (the grant is ANDed with the meeting toggle under ALK-812).
+			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: callStatus, CreatedAt: time.Now(), Settings: entity.CallSettings{ScreenSharing: true}},
 		},
 		participants: map[[2]uuid.UUID]*entity.CallParticipant{
 			{callID, hostID}:        {ID: uuid.New(), CallID: callID, UserID: hostID, Role: entity.CallRoleHost, Status: entity.ParticipantStatusConnected},

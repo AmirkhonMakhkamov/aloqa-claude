@@ -31,6 +31,10 @@ type LiveKitRoomClient interface {
 	// UpdateParticipant replaces a connected participant's LiveKit permission so
 	// a grant/revoke applies at the media plane with no rejoin. (ALK-697)
 	UpdateParticipant(ctx context.Context, room, identity string, perm *livekitpb.ParticipantPermission) error
+	// MutePublishedTrack force-mutes an already-published track so a meeting-policy
+	// flip stops a live mic/camera/screen track immediately (revoking the publish
+	// source via UpdateParticipant only blocks future publishes). (ALK-812)
+	MutePublishedTrack(ctx context.Context, room, identity, trackSID string) error
 }
 
 type LiveKitEnsureRoomArgs struct {
@@ -168,6 +172,19 @@ func (c *liveKitRoomServiceClient) UpdateParticipant(ctx context.Context, room, 
 	})
 	if err != nil {
 		return mapTwirpErrorToAppError(err, "failed to update livekit participant")
+	}
+	return nil
+}
+
+func (c *liveKitRoomServiceClient) MutePublishedTrack(ctx context.Context, room, identity, trackSID string) error {
+	_, err := c.client.MutePublishedTrack(ctx, &livekitpb.MuteRoomTrackRequest{
+		Room:     room,
+		Identity: identity,
+		TrackSid: trackSID,
+		Muted:    true,
+	})
+	if err != nil {
+		return mapTwirpErrorToAppError(err, "failed to mute livekit published track")
 	}
 	return nil
 }

@@ -919,7 +919,6 @@ func (r *messageHTTPMessageRepo) HasActiveMessage(context.Context, uuid.UUID) (b
 	return false, nil
 }
 func (r *messageHTTPMessageRepo) Update(context.Context, *entity.Message) error { return nil }
-func (r *messageHTTPMessageRepo) HardDelete(context.Context, uuid.UUID) error   { return nil }
 func (r *messageHTTPMessageRepo) SoftDelete(_ context.Context, id uuid.UUID) error {
 	msg := r.messages[id]
 	if msg == nil {
@@ -958,6 +957,13 @@ func (r *messageHTTPMessageRepo) SoftDeleteWithCascade(ctx context.Context, id u
 		affected = append(affected, msg.ID)
 	}
 	return affected, nil
+}
+func (r *messageHTTPMessageRepo) HardDelete(_ context.Context, id uuid.UUID) error {
+	if r.messages[id] == nil {
+		return cerrors.NotFound("message not found")
+	}
+	delete(r.messages, id)
+	return nil
 }
 func (r *messageHTTPMessageRepo) Pin(context.Context, uuid.UUID, uuid.UUID) error {
 	return nil

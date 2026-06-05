@@ -220,6 +220,10 @@ type broadcastRequest struct {
 	Message string `json:"message"`
 }
 
+type breakoutUserRequest struct {
+	UserID string `json:"user_id"`
+}
+
 func (h *BreakoutHandler) Broadcast(w http.ResponseWriter, r *http.Request) {
 	callID, err := id.Parse(chi.URLParam(r, "callID"))
 	if err != nil {
@@ -241,6 +245,84 @@ func (h *BreakoutHandler) Broadcast(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.svc.BroadcastToBreakoutRooms(r.Context(), callID, userID, req.Message); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
+func (h *BreakoutHandler) Assign(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	roomID, err := id.Parse(chi.URLParam(r, "breakoutRoomID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	var req breakoutUserRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	targetUserID, err := id.Parse(req.UserID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+	if err := h.svc.CanAccessCall(r.Context(), workspaceID, callID, userID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	if err := h.svc.AssignParticipantToRoom(r.Context(), callID, userID, targetUserID, roomID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
+func (h *BreakoutHandler) Invite(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	roomID, err := id.Parse(chi.URLParam(r, "breakoutRoomID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	var req breakoutUserRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	inviteeUserID, err := id.Parse(req.UserID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+	if err := h.svc.CanAccessCall(r.Context(), workspaceID, callID, userID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	if err := h.svc.InviteToBreakoutRoom(r.Context(), callID, userID, inviteeUserID, roomID); err != nil {
 		writeErr(w, err)
 		return
 	}

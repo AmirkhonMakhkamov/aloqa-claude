@@ -635,6 +635,8 @@ type updateSettingsRequest struct {
 	EntryMode              *string `json:"entry_mode,omitempty"`
 	MuteOnJoin             *bool   `json:"mute_on_join,omitempty"`
 	BreakoutRooms          *bool   `json:"breakout_rooms,omitempty"`
+	BreakoutCreation       *string `json:"breakout_creation,omitempty"`
+	MaxBreakoutRooms       *int    `json:"max_breakout_rooms,omitempty"`
 	ScreenSharing          *bool   `json:"screen_sharing,omitempty"`
 	Chat                   *bool   `json:"chat,omitempty"`
 	MembersCanUnmuteMic    *bool   `json:"members_can_unmute_mic,omitempty"`
@@ -665,6 +667,7 @@ func (h *CallHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	patch := call.CallSettingsPatch{
 		MuteOnJoin:             req.MuteOnJoin,
 		BreakoutRooms:          req.BreakoutRooms,
+		MaxBreakoutRooms:       req.MaxBreakoutRooms,
 		ScreenSharing:          req.ScreenSharing,
 		Chat:                   req.Chat,
 		MembersCanUnmuteMic:    req.MembersCanUnmuteMic,
@@ -673,6 +676,10 @@ func (h *CallHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if req.EntryMode != nil {
 		mode := entity.EntryMode(*req.EntryMode)
 		patch.EntryMode = &mode
+	}
+	if req.BreakoutCreation != nil {
+		policy := entity.BreakoutCreationPolicy(*req.BreakoutCreation)
+		patch.BreakoutCreation = &policy
 	}
 
 	updated, err := h.svc.UpdateCallSettings(r.Context(), callID, userID, patch)

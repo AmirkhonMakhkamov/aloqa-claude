@@ -445,6 +445,16 @@ func validateCallSettings(callType entity.CallType, settings entity.CallSettings
 	if settings.EntryMode != "" && !settings.EntryMode.Valid() {
 		return cerrors.InvalidInput("invalid entry_mode")
 	}
+	// breakout_creation / max_breakout_rooms are validated only when explicitly
+	// set (zero values mean "unset" and are normalised to host / 8 on read),
+	// mirroring the entry_mode tolerance above so legacy/omitting clients keep
+	// working while the PATCH and create paths reject genuinely invalid input.
+	if settings.BreakoutCreation != "" && !settings.BreakoutCreation.Valid() {
+		return cerrors.InvalidInput("invalid breakout_creation")
+	}
+	if settings.MaxBreakoutRooms != 0 && (settings.MaxBreakoutRooms < 1 || settings.MaxBreakoutRooms > 8) {
+		return cerrors.InvalidInput("max_breakout_rooms must be between 1 and 8")
+	}
 	return nil
 }
 
@@ -732,6 +742,8 @@ func (s *Service) StartCall(
 	entryMode := settings.ResolvedEntryMode()
 	settings.EntryMode = entryMode
 	settings.WaitingRoom = entryMode == entity.EntryModeManualAdmit
+	settings.BreakoutCreation = settings.ResolvedBreakoutCreation()
+	settings.MaxBreakoutRooms = settings.ResolvedMaxBreakoutRooms()
 
 	var joinPasswordHash string
 	if entryMode == entity.EntryModePassword {

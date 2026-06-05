@@ -22,6 +22,8 @@ type CallSettingsPatch struct {
 	EntryMode              *entity.EntryMode
 	MuteOnJoin             *bool
 	BreakoutRooms          *bool
+	BreakoutCreation       *entity.BreakoutCreationPolicy
+	MaxBreakoutRooms       *int
 	ScreenSharing          *bool
 	Chat                   *bool
 	MembersCanUnmuteMic    *bool
@@ -47,6 +49,7 @@ func (s *Service) UpdateCallSettings(ctx context.Context, callID, actorID uuid.U
 	// No-op when the patch carries no fields — avoid a spurious settings write
 	// and broadcast.
 	if patch.EntryMode == nil && patch.MuteOnJoin == nil && patch.BreakoutRooms == nil &&
+		patch.BreakoutCreation == nil && patch.MaxBreakoutRooms == nil &&
 		patch.ScreenSharing == nil && patch.Chat == nil &&
 		patch.MembersCanUnmuteMic == nil && patch.MembersCanEnableCamera == nil {
 		return call, nil
@@ -94,6 +97,22 @@ func (s *Service) UpdateCallSettings(ctx context.Context, callID, actorID uuid.U
 		// lobby. Changing entry_mode is forward-only — it never retroactively
 		// admits or rejects participants already in the waiting room.
 		settings.WaitingRoom = mode == entity.EntryModeManualAdmit
+	}
+
+	if patch.BreakoutCreation != nil {
+		policy := *patch.BreakoutCreation
+		if !policy.Valid() {
+			return nil, cerrors.InvalidInput("invalid breakout_creation")
+		}
+		settings.BreakoutCreation = policy
+	}
+
+	if patch.MaxBreakoutRooms != nil {
+		maxRooms := *patch.MaxBreakoutRooms
+		if maxRooms < 1 || maxRooms > 8 {
+			return nil, cerrors.InvalidInput("max_breakout_rooms must be between 1 and 8")
+		}
+		settings.MaxBreakoutRooms = maxRooms
 	}
 
 	if patch.BreakoutRooms != nil {

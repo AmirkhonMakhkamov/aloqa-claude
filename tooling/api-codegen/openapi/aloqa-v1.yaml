@@ -1031,6 +1031,30 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /api/v1/workspaces/{workspaceID}/calls/{callID}/settings:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/CallID'
+    patch:
+      summary: Update call settings
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateCallSettingsRequest' }
+      responses:
+        '200':
+          description: Updated call
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Call' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /api/v1/workspaces/{workspaceID}/calls/{callID}/participants:
     parameters:
       - $ref: '#/components/parameters/WorkspaceID'
@@ -1958,6 +1982,11 @@ components:
         the password.
       enum: [manual_admit, password, open]
 
+    BreakoutCreationPolicy:
+      type: string
+      description: Who may open breakout rooms.
+      enum: [host, everyone]
+
     CallSettings:
       type: object
       description: Per-call feature toggles. Mirrors aloqa-claude entity.CallSettings.
@@ -1969,6 +1998,8 @@ components:
           screen_sharing,
           chat,
           breakout_rooms,
+          breakout_creation,
+          max_breakout_rooms,
           max_participants,
           e2ee,
           watermark,
@@ -1995,6 +2026,13 @@ components:
         breakout_rooms:
           type: boolean
           description: Breakout-rooms are enabled.
+        breakout_creation:
+          $ref: '#/components/schemas/BreakoutCreationPolicy'
+        max_breakout_rooms:
+          type: integer
+          minimum: 1
+          maximum: 8
+          description: Maximum simultaneous active breakout rooms.
         max_participants:
           type: integer
           description: Hard cap on simultaneous participants.
@@ -2039,6 +2077,13 @@ components:
         breakout_rooms:
           type: boolean
           description: Breakout-rooms are enabled.
+        breakout_creation:
+          $ref: '#/components/schemas/BreakoutCreationPolicy'
+        max_breakout_rooms:
+          type: integer
+          minimum: 1
+          maximum: 8
+          description: Maximum simultaneous active breakout rooms.
         max_participants:
           type: integer
           description: Hard cap on simultaneous participants.
@@ -2067,6 +2112,26 @@ components:
           description: |
             Join password for password entry mode (write-only, hashed
             server-side, never returned). Required when entry_mode is "password".
+
+    UpdateCallSettingsRequest:
+      type: object
+      description: Partial call settings accepted by PATCH /workspaces/{workspaceID}/calls/{callID}/settings.
+      properties:
+        entry_mode:
+          $ref: '#/components/schemas/CallEntryMode'
+        mute_on_join:
+          type: boolean
+          description: Force participants to join muted.
+        breakout_rooms:
+          type: boolean
+          description: Breakout-rooms are enabled.
+        breakout_creation:
+          $ref: '#/components/schemas/BreakoutCreationPolicy'
+        max_breakout_rooms:
+          type: integer
+          minimum: 1
+          maximum: 8
+          description: Maximum simultaneous active breakout rooms.
 
     Call:
       type: object

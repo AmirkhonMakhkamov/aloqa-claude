@@ -59,6 +59,31 @@ func TestCallUpdateSettingsHTTPRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestCallUpdateSettingsHTTPDecodesEntryModeAndMuteOnJoin(t *testing.T) {
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	handler, calls := newCallSettingsHTTPHandler(workspaceID, callID, hostID)
+
+	res := httptest.NewRecorder()
+	req := callSettingsHTTPRequest(workspaceID, hostID, callID, `{"entry_mode":"manual_admit","mute_on_join":true}`)
+	handler.UpdateSettings(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", res.Code, res.Body.String())
+	}
+	stored := calls.calls[callID].Settings
+	if stored.EntryMode != entity.EntryModeManualAdmit {
+		t.Fatalf("stored entry_mode = %s, want manual_admit", stored.EntryMode)
+	}
+	if !stored.WaitingRoom {
+		t.Fatalf("stored waiting_room = false, want true (derived from manual_admit)")
+	}
+	if !stored.MuteOnJoin {
+		t.Fatalf("stored mute_on_join = false, want true")
+	}
+}
+
 func newCallSettingsHTTPHandler(workspaceID, callID, hostID uuid.UUID) (*CallHandler, *httpCallRepo) {
 	calls := &httpCallRepo{
 		calls: map[uuid.UUID]*entity.Call{

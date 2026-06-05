@@ -632,7 +632,9 @@ type updateMediaRequest struct {
 }
 
 type updateSettingsRequest struct {
-	BreakoutRooms *bool `json:"breakout_rooms,omitempty"`
+	EntryMode     *string `json:"entry_mode,omitempty"`
+	MuteOnJoin    *bool   `json:"mute_on_join,omitempty"`
+	BreakoutRooms *bool   `json:"breakout_rooms,omitempty"`
 }
 
 func (h *CallHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
@@ -656,9 +658,16 @@ func (h *CallHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated, err := h.svc.UpdateCallSettings(r.Context(), callID, userID, call.CallSettingsPatch{
+	patch := call.CallSettingsPatch{
+		MuteOnJoin:    req.MuteOnJoin,
 		BreakoutRooms: req.BreakoutRooms,
-	})
+	}
+	if req.EntryMode != nil {
+		mode := entity.EntryMode(*req.EntryMode)
+		patch.EntryMode = &mode
+	}
+
+	updated, err := h.svc.UpdateCallSettings(r.Context(), callID, userID, patch)
 	if err != nil {
 		writeErr(w, err)
 		return

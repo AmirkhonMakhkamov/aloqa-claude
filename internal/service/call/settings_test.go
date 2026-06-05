@@ -140,6 +140,224 @@ func TestUpdateCallSettingsNilPatchLeavesSettingsUntouched(t *testing.T) {
 	}
 }
 
+func TestUpdateCallSettingsMuteOnJoinPersistsAndPublishes(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: breakoutCall(callID, workspaceID, hostID)},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: connectedParticipant(callID, hostID, entity.CallRoleHost),
+		},
+	}
+	pub := &capturingPublisher{}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+
+	updated, err := svc.UpdateCallSettings(ctx, callID, hostID, CallSettingsPatch{MuteOnJoin: boolPtr(true)})
+	if err != nil {
+		t.Fatalf("UpdateCallSettings returned error: %v", err)
+	}
+	if !updated.Settings.MuteOnJoin || !calls.calls[callID].Settings.MuteOnJoin {
+		t.Fatalf("mute_on_join not persisted: updated=%v stored=%v", updated.Settings.MuteOnJoin, calls.calls[callID].Settings.MuteOnJoin)
+	}
+	if calls.settingsUpdates != 1 {
+		t.Fatalf("settingsUpdates = %d, want 1", calls.settingsUpdates)
+	}
+	// breakout_rooms is unchanged (still the fixture default true).
+	assertSettingsChangedEvent(t, pub, callID, true)
+}
+
+func TestUpdateCallSettingsEntryModeManualAdmitSetsWaitingRoom(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+
+	callEntity := breakoutCall(callID, workspaceID, hostID)
+	callEntity.Settings.EntryMode = entity.EntryModeOpen
+	callEntity.Settings.WaitingRoom = false
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: callEntity},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: connectedParticipant(callID, hostID, entity.CallRoleHost),
+		},
+	}
+	pub := &capturingPublisher{}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+
+	mode := entity.EntryModeManualAdmit
+	updated, err := svc.UpdateCallSettings(ctx, callID, hostID, CallSettingsPatch{EntryMode: &mode})
+	if err != nil {
+		t.Fatalf("UpdateCallSettings returned error: %v", err)
+	}
+	if updated.Settings.EntryMode != entity.EntryModeManualAdmit {
+		t.Fatalf("entry_mode = %s, want manual_admit", updated.Settings.EntryMode)
+	}
+	if !updated.Settings.WaitingRoom || !calls.calls[callID].Settings.WaitingRoom {
+		t.Fatalf("waiting_room not derived true for manual_admit: updated=%v stored=%v", updated.Settings.WaitingRoom, calls.calls[callID].Settings.WaitingRoom)
+	}
+	assertSettingsChangedEvent(t, pub, callID, true)
+}
+
+func TestUpdateCallSettingsEntryModeOpenClearsWaitingRoom(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+
+	callEntity := breakoutCall(callID, workspaceID, hostID)
+	callEntity.Settings.EntryMode = entity.EntryModeManualAdmit
+	callEntity.Settings.WaitingRoom = true
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: callEntity},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: connectedParticipant(callID, hostID, entity.CallRoleHost),
+		},
+	}
+	pub := &capturingPublisher{}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+
+	mode := entity.EntryModeOpen
+	updated, err := svc.UpdateCallSettings(ctx, callID, hostID, CallSettingsPatch{EntryMode: &mode})
+	if err != nil {
+		t.Fatalf("UpdateCallSettings returned error: %v", err)
+	}
+	if updated.Settings.EntryMode != entity.EntryModeOpen {
+		t.Fatalf("entry_mode = %s, want open", updated.Settings.EntryMode)
+	}
+	if updated.Settings.WaitingRoom || calls.calls[callID].Settings.WaitingRoom {
+		t.Fatalf("waiting_room not cleared for open: updated=%v stored=%v", updated.Settings.WaitingRoom, calls.calls[callID].Settings.WaitingRoom)
+	}
+}
+
+func TestUpdateCallSettingsEntryModePasswordWithoutHashRejected(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+
+	callEntity := breakoutCall(callID, workspaceID, hostID)
+	callEntity.JoinPasswordHash = ""
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: callEntity},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: connectedParticipant(callID, hostID, entity.CallRoleHost),
+		},
+	}
+	pub := &capturingPublisher{}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+
+	mode := entity.EntryModePassword
+	_, err := svc.UpdateCallSettings(ctx, callID, hostID, CallSettingsPatch{EntryMode: &mode})
+	if !hasCode(err, cerrors.CodeInvalidInput) {
+		t.Fatalf("entry_mode=password without hash error = %v, want INVALID_INPUT", err)
+	}
+	if calls.settingsUpdates != 0 {
+		t.Fatalf("settingsUpdates = %d, want 0", calls.settingsUpdates)
+	}
+	if pub.called {
+		t.Fatalf("published event on rejected patch, want no-op")
+	}
+}
+
+func TestUpdateCallSettingsEntryModePasswordWithHashAccepted(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+
+	callEntity := breakoutCall(callID, workspaceID, hostID)
+	callEntity.JoinPasswordHash = "bcrypt-hash"
+	callEntity.Settings.WaitingRoom = true
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: callEntity},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: connectedParticipant(callID, hostID, entity.CallRoleHost),
+		},
+	}
+	pub := &capturingPublisher{}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+
+	mode := entity.EntryModePassword
+	updated, err := svc.UpdateCallSettings(ctx, callID, hostID, CallSettingsPatch{EntryMode: &mode})
+	if err != nil {
+		t.Fatalf("UpdateCallSettings returned error: %v", err)
+	}
+	if updated.Settings.EntryMode != entity.EntryModePassword {
+		t.Fatalf("entry_mode = %s, want password", updated.Settings.EntryMode)
+	}
+	// password mode is not the lobby mode → waiting_room derives false.
+	if updated.Settings.WaitingRoom {
+		t.Fatalf("waiting_room = true, want false for password mode")
+	}
+	if calls.calls[callID].JoinPasswordHash != "bcrypt-hash" {
+		t.Fatalf("join password hash mutated: %q", calls.calls[callID].JoinPasswordHash)
+	}
+}
+
+func TestUpdateCallSettingsInvalidEntryModeRejected(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: breakoutCall(callID, workspaceID, hostID)},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: connectedParticipant(callID, hostID, entity.CallRoleHost),
+		},
+	}
+	pub := &capturingPublisher{}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+
+	mode := entity.EntryMode("bogus")
+	_, err := svc.UpdateCallSettings(ctx, callID, hostID, CallSettingsPatch{EntryMode: &mode})
+	if !hasCode(err, cerrors.CodeInvalidInput) {
+		t.Fatalf("invalid entry_mode error = %v, want INVALID_INPUT", err)
+	}
+	if calls.settingsUpdates != 0 {
+		t.Fatalf("settingsUpdates = %d, want 0", calls.settingsUpdates)
+	}
+}
+
+func TestUpdateCallSettingsRejectedEntryModeLeavesOtherFieldsUntouched(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: breakoutCall(callID, workspaceID, hostID)},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: connectedParticipant(callID, hostID, entity.CallRoleHost),
+		},
+	}
+	pub := &capturingPublisher{}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+
+	mode := entity.EntryMode("bogus")
+	_, err := svc.UpdateCallSettings(ctx, callID, hostID, CallSettingsPatch{
+		MuteOnJoin: boolPtr(true),
+		EntryMode:  &mode,
+	})
+	if !hasCode(err, cerrors.CodeInvalidInput) {
+		t.Fatalf("error = %v, want INVALID_INPUT", err)
+	}
+	// The invalid entry_mode aborts before persist — the same-request mute_on_join
+	// must not leak into stored settings.
+	if calls.calls[callID].Settings.MuteOnJoin {
+		t.Fatalf("mute_on_join leaked despite the rejected entry_mode")
+	}
+	if calls.settingsUpdates != 0 {
+		t.Fatalf("settingsUpdates = %d, want 0", calls.settingsUpdates)
+	}
+	if pub.called {
+		t.Fatalf("published event on rejected patch, want no-op")
+	}
+}
+
 func assertSettingsChangedEvent(t *testing.T, pub *capturingPublisher, callID uuid.UUID, breakoutRooms bool) {
 	t.Helper()
 	if !pub.called {

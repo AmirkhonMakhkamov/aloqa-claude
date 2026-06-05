@@ -51,7 +51,11 @@ func TestIssueLiveKitJoinInfoGatesScreenShareSources(t *testing.T) {
 
 			calls := &fakeCallRepo{
 				calls: map[uuid.UUID]*entity.Call{
-					callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive},
+					// ScreenSharing=true: the meeting allows screen-share at the meeting
+					// level (ALK-812); a member's screen source is the AND of this toggle
+					// and their per-participant ALK-697 grant, while host/co-host always
+					// share. (Consistent with the existing UpdateMedia ScreenSharing gate.)
+					callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive, Settings: entity.CallSettings{ScreenSharing: true}},
 				},
 				participants: map[[2]uuid.UUID]*entity.CallParticipant{
 					{callID, userID}: {

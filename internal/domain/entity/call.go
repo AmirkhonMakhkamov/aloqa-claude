@@ -1,6 +1,7 @@
 package entity
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -127,6 +128,50 @@ type CallSettings struct {
 	// value before persisting (StartCall) and after loading (repo reads), so the
 	// API always returns one of the three EntryMode values.
 	EntryMode EntryMode `json:"entry_mode"`
+	// MembersCanUnmuteMic / MembersCanEnableCamera are the meeting-level member
+	// permission policies (ALK-812 / S4). Pointers so a row created before this
+	// feature (no key in the settings JSONB) resolves to the permissive default
+	// (true) rather than the bool zero value (false): a nil pointer means "unset".
+	// The call response serialises the resolved booleans (see MarshalJSON) so the
+	// wire is always a concrete bool; the persisted JSONB keeps the pointer.
+	MembersCanUnmuteMic    *bool `json:"members_can_unmute_mic"`
+	MembersCanEnableCamera *bool `json:"members_can_enable_camera"`
+}
+
+// ResolvedMembersCanUnmuteMic reports whether members may unmute their mic,
+// defaulting to true (permissive) for legacy calls that predate the field.
+func (c CallSettings) ResolvedMembersCanUnmuteMic() bool {
+	return c.MembersCanUnmuteMic == nil || *c.MembersCanUnmuteMic
+}
+
+// ResolvedMembersCanEnableCamera reports whether members may enable their
+// camera, defaulting to true (permissive) for legacy calls.
+func (c CallSettings) ResolvedMembersCanEnableCamera() bool {
+	return c.MembersCanEnableCamera == nil || *c.MembersCanEnableCamera
+}
+
+// MarshalJSON emits the member-permission policies as concrete booleans (via the
+// Resolved* accessors) so neither the API wire nor a re-persisted row ever carries
+// null for these fields. The type alias drops CallSettings' own MarshalJSON to
+// avoid infinite recursion and preserves every other field; the json-tag collision
+// between the embedded alias' *bool fields (depth 1) and the outer bool fields
+// (depth 0) resolves in favour of the shallower outer fields, so the resolved
+// bool wins. The postgres repo persists settings via json.Marshal(call.Settings)
+// (call.go:150/630), so this marshaler also governs persistence — that is benign:
+// a legacy nil simply backfills to the permissive default (true) on its next
+// write, and StartCall creates new calls with explicit pointers, so the
+// unset-vs-explicit-true distinction is never load-bearing (both mean permissive).
+func (c CallSettings) MarshalJSON() ([]byte, error) {
+	type alias CallSettings
+	return json.Marshal(struct {
+		alias
+		MembersCanUnmuteMic    bool `json:"members_can_unmute_mic"`
+		MembersCanEnableCamera bool `json:"members_can_enable_camera"`
+	}{
+		alias:                  alias(c),
+		MembersCanUnmuteMic:    c.ResolvedMembersCanUnmuteMic(),
+		MembersCanEnableCamera: c.ResolvedMembersCanEnableCamera(),
+	})
 }
 
 // ResolvedEntryMode returns the concrete entry mode, deriving it from the legacy

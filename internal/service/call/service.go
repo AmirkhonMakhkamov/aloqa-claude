@@ -718,6 +718,19 @@ func (s *Service) StartCall(
 	// the default rather than an unconditional override.
 	settings.Chat = true
 
+	// Default the member-permission policies to permissive (true) at creation so
+	// every new call carries concrete pointer values; a legacy row that predates
+	// these fields keeps nil and resolves to true via the entity accessors. A
+	// caller that set an explicit value is respected. (ALK-812 / S4.)
+	if settings.MembersCanUnmuteMic == nil {
+		permissive := true
+		settings.MembersCanUnmuteMic = &permissive
+	}
+	if settings.MembersCanEnableCamera == nil {
+		permissive := true
+		settings.MembersCanEnableCamera = &permissive
+	}
+
 	// Resolve the entry mode at creation so the persisted row (and every API read)
 	// carries a concrete value. When the caller omits entry_mode we derive it from
 	// the legacy waiting_room flag (backwards-compatible: existing/programmatic
@@ -1658,6 +1671,20 @@ func (s *Service) UpdateMedia(ctx context.Context, workspaceID, callID, userID u
 	// before, but evaluated against the effective state, not raw inputs.
 	if participant.Role == entity.CallRoleViewer && (!nextAudio || !nextVideo || nextScreen) {
 		return cerrors.Forbidden("viewers cannot publish media")
+	}
+	// Member-permission policy (ALK-812): a non host/co-host member may not unmute
+	// their mic or enable their camera when the meeting policy forbids it. Reject
+	// the explicit request (audio_muted=false → unmuted; video_muted=false → camera
+	// on) so the service-of-record row and the WS roster never advertise a publish
+	// the join-token CanPublishSources gate is already blocking. Host/co-host and
+	// patches that don't touch the denied field are unaffected.
+	if participant.Role != entity.CallRoleHost && participant.Role != entity.CallRoleCoHost {
+		if audioMuted != nil && !*audioMuted && !call.Settings.ResolvedMembersCanUnmuteMic() {
+			return cerrors.Forbidden("members cannot unmute the microphone in this call")
+		}
+		if videoMuted != nil && !*videoMuted && !call.Settings.ResolvedMembersCanEnableCamera() {
+			return cerrors.Forbidden("members cannot enable the camera in this call")
+		}
 	}
 	// Capacity check only when the patch flips screen-sharing ON. Toggling
 	// off, or leaving it untouched, never trips capacity.

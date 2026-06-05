@@ -2185,3 +2185,5 @@ func (s *fakeChatTxScope) EnqueueRealtime(_ context.Context, evt eventpkg.Event,
 	s.events = append(s.events, evt)
 	return nil
 }
+
+func (r *fakeMessageRepo) HardDelete(context.Context, uuid.UUID) error { return nil }

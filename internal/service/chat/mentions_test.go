@@ -121,3 +121,5 @@ func TestListMentionsReturnsEmptySliceForNilRepoResponse(t *testing.T) {
 		t.Fatalf("len(rows) = %d, want 0", len(rows))
 	}
 }
+
+func (r *fakeMentionsRepo) HardDelete(context.Context, uuid.UUID) error { return nil }

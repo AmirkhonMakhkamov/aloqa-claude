@@ -322,6 +322,42 @@ func TestUpdateCallSettingsInvalidEntryModeRejected(t *testing.T) {
 	}
 }
 
+func TestUpdateCallSettingsRejectedEntryModeLeavesOtherFieldsUntouched(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: breakoutCall(callID, workspaceID, hostID)},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: connectedParticipant(callID, hostID, entity.CallRoleHost),
+		},
+	}
+	pub := &capturingPublisher{}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+
+	mode := entity.EntryMode("bogus")
+	_, err := svc.UpdateCallSettings(ctx, callID, hostID, CallSettingsPatch{
+		MuteOnJoin: boolPtr(true),
+		EntryMode:  &mode,
+	})
+	if !hasCode(err, cerrors.CodeInvalidInput) {
+		t.Fatalf("error = %v, want INVALID_INPUT", err)
+	}
+	// The invalid entry_mode aborts before persist — the same-request mute_on_join
+	// must not leak into stored settings.
+	if calls.calls[callID].Settings.MuteOnJoin {
+		t.Fatalf("mute_on_join leaked despite the rejected entry_mode")
+	}
+	if calls.settingsUpdates != 0 {
+		t.Fatalf("settingsUpdates = %d, want 0", calls.settingsUpdates)
+	}
+	if pub.called {
+		t.Fatalf("published event on rejected patch, want no-op")
+	}
+}
+
 func assertSettingsChangedEvent(t *testing.T, pub *capturingPublisher, callID uuid.UUID, breakoutRooms bool) {
 	t.Helper()
 	if !pub.called {

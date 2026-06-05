@@ -1660,6 +1660,20 @@ func (s *Service) UpdateMedia(ctx context.Context, workspaceID, callID, userID u
 	if participant.Role == entity.CallRoleViewer && (!nextAudio || !nextVideo || nextScreen) {
 		return cerrors.Forbidden("viewers cannot publish media")
 	}
+	// Member-permission policy (ALK-812): a non host/co-host member may not unmute
+	// their mic or enable their camera when the meeting policy forbids it. Reject
+	// the explicit request (audio_muted=false → unmuted; video_muted=false → camera
+	// on) so the service-of-record row and the WS roster never advertise a publish
+	// the join-token CanPublishSources gate is already blocking. Host/co-host and
+	// patches that don't touch the denied field are unaffected.
+	if participant.Role != entity.CallRoleHost && participant.Role != entity.CallRoleCoHost {
+		if audioMuted != nil && !*audioMuted && !call.Settings.ResolvedMembersCanUnmuteMic() {
+			return cerrors.Forbidden("members cannot unmute the microphone in this call")
+		}
+		if videoMuted != nil && !*videoMuted && !call.Settings.ResolvedMembersCanEnableCamera() {
+			return cerrors.Forbidden("members cannot enable the camera in this call")
+		}
+	}
 	// Capacity check only when the patch flips screen-sharing ON. Toggling
 	// off, or leaving it untouched, never trips capacity.
 	if screenSharing != nil && *screenSharing && !participant.ScreenSharing {

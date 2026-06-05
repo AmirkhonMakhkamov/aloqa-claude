@@ -312,6 +312,44 @@ func TestUpdateMediaRejectsUngrantedScreenShare(t *testing.T) {
 	}
 }
 
+func TestUpdateMediaRejectsMemberUnmuteWhenPolicyDenies(t *testing.T) {
+	ctx := context.Background()
+	svc, _, _, _, workspaceID, callID, _, participantID := shareTestHarness(t, entity.CallStatusActive)
+	denied := false
+	svc.calls.(*fakeCallRepo).calls[callID].Settings.MembersCanUnmuteMic = &denied
+
+	unmute := false // audio_muted=false → attempting to unmute
+	if err := svc.UpdateMedia(ctx, workspaceID, callID, participantID, &unmute, nil, nil); !hasCode(err, cerrors.CodeForbidden) {
+		t.Fatalf("member unmute under deny policy error = %v, want FORBIDDEN", err)
+	}
+}
+
+func TestUpdateMediaRejectsMemberCameraWhenPolicyDenies(t *testing.T) {
+	ctx := context.Background()
+	svc, _, _, _, workspaceID, callID, _, participantID := shareTestHarness(t, entity.CallStatusActive)
+	denied := false
+	svc.calls.(*fakeCallRepo).calls[callID].Settings.MembersCanEnableCamera = &denied
+
+	cameraOn := false // video_muted=false → attempting to enable the camera
+	if err := svc.UpdateMedia(ctx, workspaceID, callID, participantID, nil, &cameraOn, nil); !hasCode(err, cerrors.CodeForbidden) {
+		t.Fatalf("member camera under deny policy error = %v, want FORBIDDEN", err)
+	}
+}
+
+func TestUpdateMediaAllowsHostUnmuteWhenMemberPolicyDenies(t *testing.T) {
+	ctx := context.Background()
+	svc, _, _, _, workspaceID, callID, hostID, _ := shareTestHarness(t, entity.CallStatusActive)
+	denied := false
+	svc.calls.(*fakeCallRepo).calls[callID].Settings.MembersCanUnmuteMic = &denied
+	svc.calls.(*fakeCallRepo).calls[callID].Settings.MembersCanEnableCamera = &denied
+
+	unmute := false
+	cameraOn := false
+	if err := svc.UpdateMedia(ctx, workspaceID, callID, hostID, &unmute, &cameraOn, nil); err != nil {
+		t.Fatalf("host should be exempt from the member-permission policy, got %v", err)
+	}
+}
+
 func TestHandleLiveKitTrackUnpublishClearsFeaturedShare(t *testing.T) {
 	ctx := context.Background()
 	svc, calls, _, pub, _, callID, _, participantID := shareTestHarness(t, entity.CallStatusActive)

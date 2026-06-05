@@ -220,6 +220,8 @@ func (r *CallRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Call, err
 		return nil, fmt.Errorf("postgres: unmarshal call settings: %w", err)
 	}
 	call.Settings.EntryMode = call.Settings.ResolvedEntryMode()
+	call.Settings.BreakoutCreation = call.Settings.ResolvedBreakoutCreation()
+	call.Settings.MaxBreakoutRooms = call.Settings.ResolvedMaxBreakoutRooms()
 
 	return call, nil
 }
@@ -265,6 +267,8 @@ func (r *CallRepo) ListActiveByWorkspace(ctx context.Context, workspaceID uuid.U
 			return nil, fmt.Errorf("postgres: unmarshal call settings: %w", err)
 		}
 		call.Settings.EntryMode = call.Settings.ResolvedEntryMode()
+		call.Settings.BreakoutCreation = call.Settings.ResolvedBreakoutCreation()
+		call.Settings.MaxBreakoutRooms = call.Settings.ResolvedMaxBreakoutRooms()
 
 		calls = append(calls, call)
 	}
@@ -328,6 +332,8 @@ func (r *CallRepo) ListStaleOpen(ctx context.Context, before time.Time, limit in
 			return nil, fmt.Errorf("postgres: unmarshal stale call settings: %w", err)
 		}
 		call.Settings.EntryMode = call.Settings.ResolvedEntryMode()
+		call.Settings.BreakoutCreation = call.Settings.ResolvedBreakoutCreation()
+		call.Settings.MaxBreakoutRooms = call.Settings.ResolvedMaxBreakoutRooms()
 
 		calls = append(calls, call)
 	}
@@ -601,6 +607,8 @@ func (r *CallRepo) ListRecentByWorkspace(ctx context.Context, workspaceID uuid.U
 			return nil, fmt.Errorf("postgres: unmarshal recent call settings: %w", err)
 		}
 		call.Settings.EntryMode = call.Settings.ResolvedEntryMode()
+		call.Settings.BreakoutCreation = call.Settings.ResolvedBreakoutCreation()
+		call.Settings.MaxBreakoutRooms = call.Settings.ResolvedMaxBreakoutRooms()
 		calls = append(calls, call)
 	}
 	if err := rows.Err(); err != nil {

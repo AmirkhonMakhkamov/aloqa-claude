@@ -719,6 +719,8 @@ func (s *Service) StartCall(
 	entryMode := settings.ResolvedEntryMode()
 	settings.EntryMode = entryMode
 	settings.WaitingRoom = entryMode == entity.EntryModeManualAdmit
+	settings.BreakoutCreation = settings.ResolvedBreakoutCreation()
+	settings.MaxBreakoutRooms = settings.ResolvedMaxBreakoutRooms()
 
 	var joinPasswordHash string
 	if entryMode == entity.EntryModePassword {

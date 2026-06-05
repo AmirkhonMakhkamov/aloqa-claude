@@ -139,6 +139,26 @@ func (r *breakoutHTTPRepo) Create(_ context.Context, room *entity.BreakoutRoom) 
 	return nil
 }
 
+func (r *breakoutHTTPRepo) CreateRoomsWithinCap(_ context.Context, callID uuid.UUID, maxRooms int, rooms []entity.BreakoutRoom) error {
+	if r.rooms == nil {
+		r.rooms = map[uuid.UUID]*entity.BreakoutRoom{}
+	}
+	activeCount := 0
+	for _, room := range r.rooms {
+		if room.CallID == callID && room.Status == entity.BreakoutRoomStatusActive {
+			activeCount++
+		}
+	}
+	if activeCount+len(rooms) > maxRooms {
+		return cerrors.InvalidInput("breakout room limit reached")
+	}
+	for i := range rooms {
+		room := rooms[i]
+		r.rooms[room.ID] = &room
+	}
+	return nil
+}
+
 func (r *breakoutHTTPRepo) GetByID(_ context.Context, id uuid.UUID) (*entity.BreakoutRoom, error) {
 	if r != nil {
 		if room := r.rooms[id]; room != nil {

@@ -140,6 +140,95 @@ func TestUpdateCallSettingsNilPatchLeavesSettingsUntouched(t *testing.T) {
 	}
 }
 
+func TestUpdateCallSettingsBreakoutCreationAndMaxRoomsCoHostCanPatch(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	coHostID := uuid.New()
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: breakoutCall(callID, workspaceID, hostID)},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, coHostID}: connectedParticipant(callID, coHostID, entity.CallRoleCoHost),
+		},
+	}
+	pub := &capturingPublisher{}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+
+	policy := entity.BreakoutCreationEveryone
+	updated, err := svc.UpdateCallSettings(ctx, callID, coHostID, CallSettingsPatch{
+		BreakoutCreation: &policy,
+		MaxBreakoutRooms: intPtr(3),
+	})
+	if err != nil {
+		t.Fatalf("UpdateCallSettings returned error: %v", err)
+	}
+	if updated.Settings.BreakoutCreation != entity.BreakoutCreationEveryone {
+		t.Fatalf("breakout_creation = %s, want everyone", updated.Settings.BreakoutCreation)
+	}
+	if updated.Settings.MaxBreakoutRooms != 3 {
+		t.Fatalf("max_breakout_rooms = %d, want 3", updated.Settings.MaxBreakoutRooms)
+	}
+	if calls.settingsUpdates != 1 {
+		t.Fatalf("settingsUpdates = %d, want 1", calls.settingsUpdates)
+	}
+}
+
+func TestUpdateCallSettingsBreakoutCreationValidation(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+
+	for _, tc := range []struct {
+		name  string
+		patch CallSettingsPatch
+	}{
+		{
+			name: "invalid breakout_creation",
+			patch: func() CallSettingsPatch {
+				policy := entity.BreakoutCreationPolicy("bogus")
+				return CallSettingsPatch{BreakoutCreation: &policy}
+			}(),
+		},
+		{name: "max zero", patch: CallSettingsPatch{MaxBreakoutRooms: intPtr(0)}},
+		{name: "max nine", patch: CallSettingsPatch{MaxBreakoutRooms: intPtr(9)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := &fakeCallRepo{
+				calls: map[uuid.UUID]*entity.Call{callID: breakoutCall(callID, workspaceID, hostID)},
+				participants: map[[2]uuid.UUID]*entity.CallParticipant{
+					{callID, hostID}: connectedParticipant(callID, hostID, entity.CallRoleHost),
+				},
+			}
+			pub := &capturingPublisher{}
+			svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+
+			_, err := svc.UpdateCallSettings(ctx, callID, hostID, tc.patch)
+			if !hasCode(err, cerrors.CodeInvalidInput) {
+				t.Fatalf("UpdateCallSettings error = %v, want INVALID_INPUT", err)
+			}
+			if calls.settingsUpdates != 0 {
+				t.Fatalf("settingsUpdates = %d, want 0", calls.settingsUpdates)
+			}
+			if pub.called {
+				t.Fatalf("published event on rejected patch, want no-op")
+			}
+		})
+	}
+}
+
+func TestCallSettingsBreakoutDefaultsResolveLegacyZeroValues(t *testing.T) {
+	settings := entity.CallSettings{}
+	if got := settings.ResolvedBreakoutCreation(); got != entity.BreakoutCreationHost {
+		t.Fatalf("ResolvedBreakoutCreation = %s, want host", got)
+	}
+	if got := settings.ResolvedMaxBreakoutRooms(); got != 8 {
+		t.Fatalf("ResolvedMaxBreakoutRooms = %d, want 8", got)
+	}
+}
+
 func TestUpdateCallSettingsMuteOnJoinPersistsAndPublishes(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()

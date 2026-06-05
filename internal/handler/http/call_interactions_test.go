@@ -493,6 +493,9 @@ func (r *httpCallRepo) RemoveParticipant(context.Context, uuid.UUID, uuid.UUID) 
 type httpBreakoutRepo struct{}
 
 func (httpBreakoutRepo) Create(context.Context, *entity.BreakoutRoom) error { return nil }
+func (httpBreakoutRepo) CreateRoomsWithinCap(context.Context, uuid.UUID, int, []entity.BreakoutRoom) error {
+	return nil
+}
 func (httpBreakoutRepo) GetByID(context.Context, uuid.UUID) (*entity.BreakoutRoom, error) {
 	return nil, cerrors.NotFound("breakout room not found")
 }

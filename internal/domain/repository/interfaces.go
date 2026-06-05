@@ -176,6 +176,7 @@ type MediaRepository interface {
 // BreakoutRoomRepository manages breakout room persistence.
 type BreakoutRoomRepository interface {
 	Create(ctx context.Context, room *entity.BreakoutRoom) error
+	CreateRoomsWithinCap(ctx context.Context, callID uuid.UUID, maxRooms int, rooms []entity.BreakoutRoom) error
 	GetByID(ctx context.Context, id uuid.UUID) (*entity.BreakoutRoom, error)
 	ListByCall(ctx context.Context, callID uuid.UUID) ([]entity.BreakoutRoom, error)
 	ListCallsWithExpiredActiveBreakouts(ctx context.Context, before time.Time, limit int) ([]uuid.UUID, error)

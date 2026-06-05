@@ -50,6 +50,22 @@ func (m EntryMode) Valid() bool {
 	}
 }
 
+type BreakoutCreationPolicy string
+
+const (
+	BreakoutCreationHost     BreakoutCreationPolicy = "host"
+	BreakoutCreationEveryone BreakoutCreationPolicy = "everyone"
+)
+
+func (p BreakoutCreationPolicy) Valid() bool {
+	switch p {
+	case BreakoutCreationHost, BreakoutCreationEveryone:
+		return true
+	default:
+		return false
+	}
+}
+
 type CallEndReason string
 
 const (
@@ -94,15 +110,17 @@ const (
 )
 
 type CallSettings struct {
-	WaitingRoom     bool `json:"waiting_room"`
-	MuteOnJoin      bool `json:"mute_on_join"`
-	Recording       bool `json:"recording"`
-	ScreenSharing   bool `json:"screen_sharing"`
-	Chat            bool `json:"chat"`
-	BreakoutRooms   bool `json:"breakout_rooms"`
-	MaxParticipants int  `json:"max_participants"`
-	E2EE            bool `json:"e2ee"`
-	Watermark       bool `json:"watermark"`
+	WaitingRoom      bool                   `json:"waiting_room"`
+	MuteOnJoin       bool                   `json:"mute_on_join"`
+	Recording        bool                   `json:"recording"`
+	ScreenSharing    bool                   `json:"screen_sharing"`
+	Chat             bool                   `json:"chat"`
+	BreakoutRooms    bool                   `json:"breakout_rooms"`
+	BreakoutCreation BreakoutCreationPolicy `json:"breakout_creation"`
+	MaxBreakoutRooms int                    `json:"max_breakout_rooms"`
+	MaxParticipants  int                    `json:"max_participants"`
+	E2EE             bool                   `json:"e2ee"`
+	Watermark        bool                   `json:"watermark"`
 	// EntryMode is stored in the settings JSONB. Empty on rows created before
 	// migration 051 — ResolvedEntryMode derives it from WaitingRoom so legacy
 	// calls behave exactly as before. The service normalises this to a concrete
@@ -122,6 +140,26 @@ func (c CallSettings) ResolvedEntryMode() EntryMode {
 		return EntryModeManualAdmit
 	}
 	return EntryModeOpen
+}
+
+func (c CallSettings) ResolvedBreakoutCreation() BreakoutCreationPolicy {
+	if c.BreakoutCreation == BreakoutCreationEveryone {
+		return BreakoutCreationEveryone
+	}
+	return BreakoutCreationHost
+}
+
+func (c CallSettings) ResolvedMaxBreakoutRooms() int {
+	if c.MaxBreakoutRooms <= 0 {
+		return 8
+	}
+	if c.MaxBreakoutRooms > 8 {
+		return 8
+	}
+	if c.MaxBreakoutRooms < 1 {
+		return 1
+	}
+	return c.MaxBreakoutRooms
 }
 
 // TopParticipant is a thin user projection used by ActiveCallSummary to

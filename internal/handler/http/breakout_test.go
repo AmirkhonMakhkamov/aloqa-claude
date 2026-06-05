@@ -74,6 +74,89 @@ func TestBreakoutJoinReturnHTTPUnconfiguredLiveKitReturnsUnavailable(t *testing.
 	}
 }
 
+func TestBreakoutAssignInviteHTTPDecodeUserAndReturnNoContent(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		method     func(*BreakoutHandler, http.ResponseWriter, *http.Request)
+		wantAssign bool
+	}{
+		{name: "assign", method: (*BreakoutHandler).Assign, wantAssign: true},
+		{name: "invite", method: (*BreakoutHandler).Invite},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspaceID := uuid.New()
+			callID := uuid.New()
+			userID := uuid.New()
+			targetID := uuid.New()
+			roomID := uuid.New()
+
+			repo := &breakoutHTTPRepo{
+				rooms: map[uuid.UUID]*entity.BreakoutRoom{
+					roomID: {ID: roomID, CallID: callID, Name: "Room A", Status: entity.BreakoutRoomStatusActive},
+				},
+				participants: map[uuid.UUID]*entity.CallParticipant{
+					targetID: {
+						ID:     uuid.New(),
+						CallID: callID,
+						UserID: targetID,
+						Role:   entity.CallRoleParticipant,
+						Status: entity.ParticipantStatusConnected,
+					},
+				},
+			}
+			handler := newBreakoutHTTPHandler(workspaceID, callID, userID, repo)
+
+			res := httptest.NewRecorder()
+			req := breakoutHTTPRequestWithBody(http.MethodPost, workspaceID, userID, callID, roomID, `{"user_id":"`+targetID.String()+`"}`)
+			tc.method(handler, res, req)
+
+			if res.Code != http.StatusNoContent {
+				t.Fatalf("status = %d, want 204, body=%s", res.Code, res.Body.String())
+			}
+			if tc.wantAssign {
+				if len(repo.assignments) != 1 {
+					t.Fatalf("assignments = %+v, want one assignment", repo.assignments)
+				}
+				if got := repo.assignments[0]; got.userID != targetID || got.breakoutRoomID != roomID {
+					t.Fatalf("assignment = %+v, want user %s -> room %s", got, targetID, roomID)
+				}
+			} else if len(repo.assignments) != 0 {
+				t.Fatalf("assignments = %+v, want none", repo.assignments)
+			}
+		})
+	}
+}
+
+func TestBreakoutAssignInviteHTTPBadBodyReturnsBadRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		method func(*BreakoutHandler, http.ResponseWriter, *http.Request)
+	}{
+		{name: "assign", method: (*BreakoutHandler).Assign},
+		{name: "invite", method: (*BreakoutHandler).Invite},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspaceID := uuid.New()
+			callID := uuid.New()
+			userID := uuid.New()
+			roomID := uuid.New()
+
+			repo := &breakoutHTTPRepo{rooms: map[uuid.UUID]*entity.BreakoutRoom{
+				roomID: {ID: roomID, CallID: callID, Name: "Room A", Status: entity.BreakoutRoomStatusActive},
+			}}
+			handler := newBreakoutHTTPHandler(workspaceID, callID, userID, repo)
+
+			res := httptest.NewRecorder()
+			req := breakoutHTTPRequestWithBody(http.MethodPost, workspaceID, userID, callID, roomID, `{"user_id":`)
+			tc.method(handler, res, req)
+
+			if res.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400, body=%s", res.Code, res.Body.String())
+			}
+		})
+	}
+}
+
 func newBreakoutHTTPHandler(workspaceID, callID, userID uuid.UUID, repo *breakoutHTTPRepo) *BreakoutHandler {
 	breakoutRoomID := uuid.Nil
 	if repo != nil {
@@ -107,6 +190,17 @@ func newBreakoutHTTPHandler(workspaceID, callID, userID uuid.UUID, repo *breakou
 			{callID, userID}: participant,
 		},
 	}
+	if repo != nil {
+		for participantID, participant := range repo.participants {
+			if participant.CallID == uuid.Nil {
+				participant.CallID = callID
+			}
+			if participant.UserID == uuid.Nil {
+				participant.UserID = participantID
+			}
+			calls.participants[[2]uuid.UUID{participant.CallID, participant.UserID}] = participant
+		}
+	}
 	workspaces := &httpWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
 		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
 	}}
@@ -115,7 +209,11 @@ func newBreakoutHTTPHandler(workspaceID, callID, userID uuid.UUID, repo *breakou
 }
 
 func breakoutHTTPRequest(method string, workspaceID, userID, callID, breakoutRoomID uuid.UUID) *http.Request {
-	req := httptest.NewRequest(method, "/", nil)
+	return breakoutHTTPRequestWithBody(method, workspaceID, userID, callID, breakoutRoomID, "")
+}
+
+func breakoutHTTPRequestWithBody(method string, workspaceID, userID, callID, breakoutRoomID uuid.UUID, body string) *http.Request {
+	req := httptest.NewRequest(method, "/", strings.NewReader(body))
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("callID", callID.String())
 	if breakoutRoomID != uuid.Nil {
@@ -127,8 +225,16 @@ func breakoutHTTPRequest(method string, workspaceID, userID, callID, breakoutRoo
 	return req.WithContext(ctx)
 }
 
+type breakoutHTTPAssignment struct {
+	callID         uuid.UUID
+	userID         uuid.UUID
+	breakoutRoomID uuid.UUID
+}
+
 type breakoutHTTPRepo struct {
-	rooms map[uuid.UUID]*entity.BreakoutRoom
+	rooms        map[uuid.UUID]*entity.BreakoutRoom
+	participants map[uuid.UUID]*entity.CallParticipant
+	assignments  []breakoutHTTPAssignment
 }
 
 func (r *breakoutHTTPRepo) Create(_ context.Context, room *entity.BreakoutRoom) error {
@@ -189,7 +295,12 @@ func (r *breakoutHTTPRepo) Close(context.Context, uuid.UUID) error { return nil 
 func (r *breakoutHTTPRepo) CloseAllByCall(context.Context, uuid.UUID) error {
 	return nil
 }
-func (r *breakoutHTTPRepo) AssignParticipant(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error {
+func (r *breakoutHTTPRepo) AssignParticipant(_ context.Context, callID, userID, breakoutRoomID uuid.UUID) error {
+	r.assignments = append(r.assignments, breakoutHTTPAssignment{
+		callID:         callID,
+		userID:         userID,
+		breakoutRoomID: breakoutRoomID,
+	})
 	return nil
 }
 func (r *breakoutHTTPRepo) UnassignParticipant(context.Context, uuid.UUID, uuid.UUID) error {

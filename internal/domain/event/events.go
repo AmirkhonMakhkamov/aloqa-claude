@@ -71,6 +71,7 @@ const (
 	TypeBreakoutRoomsAllClosed   Type = "breakout.rooms.all_closed"
 	TypeBreakoutParticipantMoved Type = "breakout.participant.moved"
 	TypeBreakoutBroadcast        Type = "breakout.broadcast"
+	TypeBreakoutRoomInvite       Type = "breakout.room.invite"
 
 	// Signaling events (WebRTC).
 	TypeSignalOffer     Type = "signal.offer"
@@ -122,7 +123,7 @@ func DefinitionForType(t Type) Definition {
 	case TypeTypingStarted, TypeCallTypingStarted, TypeSignalOffer, TypeSignalAnswer, TypeSignalCandidate,
 		TypeCallHandRaised, TypeCallHandLowered, TypeCallReaction,
 		TypeCallShareRequestCreated, TypeCallShareRequestResolved, TypeCallFeaturedShareUpdated,
-		TypeBreakoutBroadcast:
+		TypeBreakoutBroadcast, TypeBreakoutRoomInvite:
 		return Definition{
 			Version:          CurrentVersion,
 			DeliverySemantic: DeliveryEphemeral,
@@ -372,6 +373,14 @@ type BreakoutBroadcastPayload struct {
 	CallID  uuid.UUID `json:"call_id"`
 	UserID  uuid.UUID `json:"user_id"`
 	Message string    `json:"message"`
+}
+
+type BreakoutRoomInvitePayload struct {
+	CallID         uuid.UUID `json:"call_id"`
+	BreakoutRoomID uuid.UUID `json:"breakout_room_id"`
+	InviterUserID  uuid.UUID `json:"inviter_user_id"`
+	InviteeUserID  uuid.UUID `json:"invitee_user_id"`
+	RoomName       string    `json:"room_name,omitempty"`
 }
 
 type UserCalendarPayload struct {

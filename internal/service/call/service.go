@@ -708,6 +708,19 @@ func (s *Service) StartCall(
 	// the default rather than an unconditional override.
 	settings.Chat = true
 
+	// Default the member-permission policies to permissive (true) at creation so
+	// every new call carries concrete pointer values; a legacy row that predates
+	// these fields keeps nil and resolves to true via the entity accessors. A
+	// caller that set an explicit value is respected. (ALK-812 / S4.)
+	if settings.MembersCanUnmuteMic == nil {
+		permissive := true
+		settings.MembersCanUnmuteMic = &permissive
+	}
+	if settings.MembersCanEnableCamera == nil {
+		permissive := true
+		settings.MembersCanEnableCamera = &permissive
+	}
+
 	// Resolve the entry mode at creation so the persisted row (and every API read)
 	// carries a concrete value. When the caller omits entry_mode we derive it from
 	// the legacy waiting_room flag (backwards-compatible: existing/programmatic

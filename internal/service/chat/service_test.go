@@ -1982,6 +1982,7 @@ func (r *fakeMessageRepo) HasActiveMessage(_ context.Context, channelID uuid.UUI
 	return false, nil
 }
 func (r *fakeMessageRepo) Update(context.Context, *entity.Message) error { return nil }
+func (r *fakeMessageRepo) HardDelete(context.Context, uuid.UUID) error   { return nil }
 func (r *fakeMessageRepo) Move(_ context.Context, msg *entity.Message) error {
 	if stored := r.messages[msg.ID]; stored != nil {
 		*stored = *msg

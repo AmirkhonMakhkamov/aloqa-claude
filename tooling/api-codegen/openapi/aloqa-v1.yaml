@@ -1973,6 +1973,8 @@ components:
           e2ee,
           watermark,
           entry_mode,
+          members_can_unmute_mic,
+          members_can_enable_camera,
         ]
       properties:
         waiting_room:
@@ -2004,6 +2006,16 @@ components:
           description: Render a per-user watermark on video tiles.
         entry_mode:
           $ref: '#/components/schemas/CallEntryMode'
+        members_can_unmute_mic:
+          type: boolean
+          description: >-
+            Meeting-level member permission (ALK-812): whether non host/co-host
+            members may unmute their microphone. Defaults to true (permissive).
+        members_can_enable_camera:
+          type: boolean
+          description: >-
+            Meeting-level member permission (ALK-812): whether non host/co-host
+            members may enable their camera. Defaults to true (permissive).
 
     StartCallSettings:
       type: object
@@ -2038,6 +2050,16 @@ components:
           description: Render a per-user watermark on video tiles.
         entry_mode:
           $ref: '#/components/schemas/CallEntryMode'
+        members_can_unmute_mic:
+          type: boolean
+          description: >-
+            Meeting-level member permission (ALK-812): whether non host/co-host
+            members may unmute their microphone. Defaults to true (permissive).
+        members_can_enable_camera:
+          type: boolean
+          description: >-
+            Meeting-level member permission (ALK-812): whether non host/co-host
+            members may enable their camera. Defaults to true (permissive).
         password:
           type: string
           maxLength: 72

@@ -469,3 +469,44 @@ func assertSettingsChangedEvent(t *testing.T, pub *capturingPublisher, callID uu
 		t.Fatalf("payload breakout_rooms = %v, want %v", env.Payload.Settings.BreakoutRooms, breakoutRooms)
 	}
 }
+
+// TestValidateCallSettingsBreakoutPolicy covers the StartCall validation path
+// (validateCallSettings) for the S7 breakout policy fields: invalid values are
+// rejected at create time, while unset zero values are tolerated and normalised
+// on read (mirroring entry_mode).
+func TestValidateCallSettingsBreakoutPolicy(t *testing.T) {
+	t.Parallel()
+
+	valid := func(s entity.CallSettings) error { return validateCallSettings(entity.CallTypeGroup, s) }
+
+	t.Run("invalid breakout_creation rejected", func(t *testing.T) {
+		t.Parallel()
+		err := valid(entity.CallSettings{BreakoutCreation: "nobody"})
+		if appErr, ok := cerrors.AsAppError(err); !ok || appErr.Code != cerrors.CodeInvalidInput {
+			t.Fatalf("breakout_creation=nobody error = %v, want INVALID_INPUT", err)
+		}
+	})
+
+	t.Run("out-of-range max_breakout_rooms rejected", func(t *testing.T) {
+		t.Parallel()
+		for _, n := range []int{-1, 9, 100} {
+			if err := valid(entity.CallSettings{MaxBreakoutRooms: n}); err == nil {
+				t.Fatalf("max_breakout_rooms=%d should be rejected", n)
+			}
+		}
+	})
+
+	t.Run("unset zero values accepted (normalised on read)", func(t *testing.T) {
+		t.Parallel()
+		if err := valid(entity.CallSettings{}); err != nil {
+			t.Fatalf("unset breakout fields should be accepted, got %v", err)
+		}
+	})
+
+	t.Run("valid values accepted", func(t *testing.T) {
+		t.Parallel()
+		if err := valid(entity.CallSettings{BreakoutCreation: entity.BreakoutCreationEveryone, MaxBreakoutRooms: 5}); err != nil {
+			t.Fatalf("valid breakout fields should be accepted, got %v", err)
+		}
+	})
+}

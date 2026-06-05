@@ -58,6 +58,11 @@ func (s *Service) CreateBreakoutRooms(
 	}
 	actorIsHostOrCoHost := actor.Role == entity.CallRoleHost || actor.Role == entity.CallRoleCoHost
 	if call.Settings.ResolvedBreakoutCreation() != entity.BreakoutCreationEveryone {
+		// `host` policy intentionally preserves the pre-S7 behaviour
+		// (requireHostOrCoHost, role-only): a host/co-host may open rooms
+		// without an extra connected/guest gate. The `everyone` policy below is
+		// the new, wider surface and therefore carries the tighter
+		// connected-non-guest checks.
 		if !actorIsHostOrCoHost {
 			return nil, cerrors.Forbidden("only host or co-host can perform this action")
 		}

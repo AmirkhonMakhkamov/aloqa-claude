@@ -55,7 +55,10 @@ func (r *BreakoutRoomRepo) CreateRoomsWithinCap(ctx context.Context, callID uuid
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", callID.String()); err != nil {
+	// hashtextextended yields a 64-bit key (vs hashtext's 32-bit) so unrelated
+	// call ids are far less likely to collide and needlessly serialise on the
+	// same advisory lock. Transaction-scoped: released on commit/rollback.
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", callID.String()); err != nil {
 		return fmt.Errorf("postgres: lock breakout room cap: %w", err)
 	}
 

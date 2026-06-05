@@ -133,11 +133,14 @@ func (s *Service) UpdateCallSettings(ctx context.Context, callID, actorID uuid.U
 		return call, nil
 	}
 
+	// Capture whether a publish field changed BEFORE mutating call.Settings —
+	// otherwise the comparison below would be settings-vs-itself (always false).
+	publishChanged := publishAffectingChanged(call.Settings, settings)
 	if err := s.calls.UpdateSettings(ctx, callID, settings); err != nil {
 		return nil, s.wrapCallError(ctx, err, callID, "update call settings")
 	}
 	call.Settings = settings
-	if publishAffectingChanged(call.Settings, settings) {
+	if publishChanged {
 		// A permissive publish flip (false→true): re-apply best-effort so the new
 		// allowance reaches connected members without a rejoin. resolveMemberPublish
 		// ANDs screen with the per-participant grant, so this never over-grants.
@@ -173,7 +176,10 @@ func isPolicyEnforceableMember(p entity.CallParticipant) bool {
 	if p.Status != entity.ParticipantStatusConnected {
 		return false
 	}
-	if p.Role == entity.CallRoleHost || p.Role == entity.CallRoleCoHost {
+	// Host/co-host are exempt; viewers already publish nothing (resolveMemberPublish
+	// returns all-false for them), so there is nothing to enforce and no reason to
+	// overwrite their LiveKit permission with a redundant UpdateParticipant.
+	if p.Role == entity.CallRoleHost || p.Role == entity.CallRoleCoHost || p.Role == entity.CallRoleViewer {
 		return false
 	}
 	return p.BreakoutRoomID == nil

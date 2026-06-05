@@ -124,6 +124,64 @@ func TestUpdateCallSettingsRestrictiveFlipEnforcementFailureLeavesSettingsUnchan
 	}
 }
 
+// A permissive flip (false→true) re-applies the widened permission to connected
+// members at the media plane (re-granting MICROPHONE) without a rejoin.
+func TestUpdateCallSettingsPermissiveMicFlipReappliesGrant(t *testing.T) {
+	ctx := context.Background()
+	workspaceID, callID, hostID, memberID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	call := breakoutCall(callID, workspaceID, hostID)
+	denied := false
+	call.Settings.MembersCanUnmuteMic = &denied // start restricted
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: call},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}:   connectedParticipant(callID, hostID, entity.CallRoleHost),
+			{callID, memberID}: connectedParticipant(callID, memberID, entity.CallRoleParticipant),
+		},
+	}
+	rooms := &fakeLiveKitRoomClient{
+		participantsByCall: map[uuid.UUID][]*livekitpb.ParticipantInfo{callID: {participantWithTracks(memberID)}},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, &capturingPublisher{}, nil, mediaTestConfig(), nil, nil)
+	svc.SetLiveKitRoomClient(rooms)
+
+	if _, err := svc.UpdateCallSettings(ctx, callID, hostID, CallSettingsPatch{MembersCanUnmuteMic: boolPtr(true)}); err != nil {
+		t.Fatalf("UpdateCallSettings returned error: %v", err)
+	}
+	if !hasUpdateFor(rooms.updatedParticipants, memberID) {
+		t.Fatalf("permissive flip did not re-apply the member permission (reconcile dead path)")
+	}
+	if !call.Settings.ResolvedMembersCanUnmuteMic() {
+		t.Fatalf("persisted members_can_unmute_mic = false, want true")
+	}
+}
+
+// A connected viewer is not enforced (they publish nothing; no redundant RPC).
+func TestUpdateCallSettingsRestrictiveFlipSkipsViewers(t *testing.T) {
+	ctx := context.Background()
+	workspaceID, callID, hostID, viewerID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	call := breakoutCall(callID, workspaceID, hostID)
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: call},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}:   connectedParticipant(callID, hostID, entity.CallRoleHost),
+			{callID, viewerID}: connectedParticipant(callID, viewerID, entity.CallRoleViewer),
+		},
+	}
+	rooms := &fakeLiveKitRoomClient{
+		participantsByCall: map[uuid.UUID][]*livekitpb.ParticipantInfo{callID: {participantWithTracks(viewerID)}},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, &capturingPublisher{}, nil, mediaTestConfig(), nil, nil)
+	svc.SetLiveKitRoomClient(rooms)
+
+	if _, err := svc.UpdateCallSettings(ctx, callID, hostID, CallSettingsPatch{MembersCanUnmuteMic: boolPtr(false)}); err != nil {
+		t.Fatalf("UpdateCallSettings returned error: %v", err)
+	}
+	if hasUpdateFor(rooms.updatedParticipants, viewerID) {
+		t.Fatalf("viewer should not be enforced")
+	}
+}
+
 // A member already inside a breakout room is skipped during enforcement (they
 // re-mint via the resolver on return to main).
 func TestUpdateCallSettingsRestrictiveFlipSkipsBreakoutMembers(t *testing.T) {

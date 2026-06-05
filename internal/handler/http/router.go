@@ -399,6 +399,8 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 				r.Route("/{breakoutRoomID}", func(r chi.Router) {
 					r.Post("/join", deps.Breakout.Join)
 					r.Post("/close", deps.Breakout.Close)
+					r.Post("/assign", deps.Breakout.Assign)
+					r.Post("/invite", deps.Breakout.Invite)
 					r.Get("/participants", deps.Breakout.Participants)
 				})
 			})

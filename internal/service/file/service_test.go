@@ -508,3 +508,5 @@ func hasCode(err error, code cerrors.Code) bool {
 	appErr, ok := cerrors.AsAppError(err)
 	return ok && appErr.Code == code
 }
+
+func (r *fakeMessageRepo) HardDelete(context.Context, uuid.UUID) error { return nil }

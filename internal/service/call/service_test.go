@@ -89,6 +89,8 @@ func TestViewerCannotPublishMedia(t *testing.T) {
 // out of production binaries.
 func boolPtr(b bool) *bool { return &b }
 
+func intPtr(i int) *int { return &i }
+
 func TestForwardSignalRequiresBothParticipants(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -2721,6 +2723,9 @@ func (c *fakeLiveKitRoomClient) UpdateParticipant(_ context.Context, room, ident
 type fakeBreakoutRepo struct{}
 
 func (fakeBreakoutRepo) Create(context.Context, *entity.BreakoutRoom) error { return nil }
+func (fakeBreakoutRepo) CreateRoomsWithinCap(context.Context, uuid.UUID, int, []entity.BreakoutRoom) error {
+	return nil
+}
 func (fakeBreakoutRepo) GetByID(context.Context, uuid.UUID) (*entity.BreakoutRoom, error) {
 	return nil, cerrors.NotFound("breakout room not found")
 }

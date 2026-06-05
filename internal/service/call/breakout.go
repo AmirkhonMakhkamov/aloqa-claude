@@ -27,8 +27,8 @@ type CreateBreakoutRoomInput struct {
 }
 
 // CreateBreakoutRooms creates one or more breakout rooms within an active call.
-// Only the host or co-host may create breakout rooms, and the call must have
-// breakout rooms enabled in its settings.
+// The breakout_creation setting controls whether only host/co-host users or any
+// connected non-guest member may create rooms.
 func (s *Service) CreateBreakoutRooms(
 	ctx context.Context,
 	callID, userID uuid.UUID,
@@ -47,19 +47,36 @@ func (s *Service) CreateBreakoutRooms(
 		return nil, cerrors.Forbidden("breakout rooms are not enabled for this call")
 	}
 
-	if err := s.requireHostOrCoHost(ctx, callID, userID); err != nil {
-		return nil, err
+	// GetParticipant is the call repo read path that hydrates the denormalized
+	// IsGuest projection from guest_access_grants/workspace_members.
+	actor, err := s.calls.GetParticipant(ctx, callID, userID)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return nil, cerrors.Forbidden("only host or co-host can perform this action")
+		}
+		return nil, cerrors.Internal("failed to get participant", err)
+	}
+	actorIsHostOrCoHost := actor.Role == entity.CallRoleHost || actor.Role == entity.CallRoleCoHost
+	if call.Settings.ResolvedBreakoutCreation() != entity.BreakoutCreationEveryone {
+		// `host` policy intentionally preserves the pre-S7 behaviour
+		// (requireHostOrCoHost, role-only): a host/co-host may open rooms
+		// without an extra connected/guest gate. The `everyone` policy below is
+		// the new, wider surface and therefore carries the tighter
+		// connected-non-guest checks.
+		if !actorIsHostOrCoHost {
+			return nil, cerrors.Forbidden("only host or co-host can perform this action")
+		}
+	} else {
+		if actor.Status != entity.ParticipantStatusConnected {
+			return nil, cerrors.Forbidden("only connected participants can open breakout rooms")
+		}
+		if actor.IsGuest {
+			return nil, cerrors.Forbidden("guests cannot open breakout rooms")
+		}
 	}
 
 	if len(inputs) == 0 {
 		return nil, cerrors.InvalidInput("at least one breakout room is required")
-	}
-
-	// Snapshot connected participants once so host pre-assignment can validate
-	// the requested user ids without an N+1 lookup per id.
-	connected, err := s.connectedParticipants(ctx, callID)
-	if err != nil {
-		return nil, err
 	}
 
 	now := time.Now().UTC()
@@ -99,11 +116,29 @@ func (s *Service) CreateBreakoutRooms(
 			CreatedAt: now,
 		}
 
-		if err := s.breakoutRooms.Create(ctx, &room); err != nil {
-			slog.ErrorContext(ctx, "failed to create breakout room", "call_id", callID, "name", input.Name, "error", err)
-			return nil, cerrors.Internal("failed to create breakout room", err)
-		}
+		rooms = append(rooms, room)
+	}
 
+	var connected map[uuid.UUID]bool
+	if actorIsHostOrCoHost {
+		// Snapshot connected participants once so host pre-assignment can validate
+		// the requested user ids without an N+1 lookup per id.
+		connected, err = s.connectedParticipants(ctx, callID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if err := s.breakoutRooms.CreateRoomsWithinCap(ctx, callID, call.Settings.ResolvedMaxBreakoutRooms(), rooms); err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok {
+			return nil, appErr
+		}
+		slog.ErrorContext(ctx, "failed to create breakout rooms", "call_id", callID, "count", len(rooms), "error", err)
+		return nil, cerrors.Internal("failed to create breakout rooms", err)
+	}
+
+	for i := range rooms {
+		room := rooms[i]
 		// Create a dedicated SFU room for this breakout room (legacy Pion plane).
 		sfuRoomID := breakoutSFURoomID(callID, room.ID)
 		if _, err := s.sfu.CreateRoom(sfuRoomID, sfu.RoomOptions{
@@ -118,32 +153,32 @@ func (s *Service) CreateBreakoutRooms(
 			slog.WarnContext(ctx, "failed to ensure livekit breakout room", "breakout_id", room.ID, "error", err)
 		}
 
-		rooms = append(rooms, room)
-
 		s.publishBreakoutEvent(ctx, event.TypeBreakoutRoomCreated, call, event.BreakoutRoomPayload{
 			CallID: callID,
 			Room:   &room,
 		})
 
 		// Host-driven pre-assignment of participants into this room.
-		for _, uid := range input.ParticipantUserIDs {
-			if uid == userID {
-				continue // never move the host/actor automatically
+		if actorIsHostOrCoHost {
+			for _, uid := range inputs[i].ParticipantUserIDs {
+				if uid == userID {
+					continue // never move the host/actor automatically
+				}
+				if !connected[uid] {
+					continue // skip unknown / non-connected ids silently
+				}
+				if err := s.breakoutRooms.AssignParticipant(ctx, callID, uid, room.ID); err != nil {
+					slog.ErrorContext(ctx, "failed to pre-assign participant to breakout room",
+						"call_id", callID, "user_id", uid, "breakout_room_id", room.ID, "error", err)
+					continue
+				}
+				assigned := room.ID
+				s.publishBreakoutEvent(ctx, event.TypeBreakoutParticipantMoved, call, event.BreakoutParticipantMovedPayload{
+					CallID:         callID,
+					UserID:         uid,
+					BreakoutRoomID: &assigned,
+				})
 			}
-			if !connected[uid] {
-				continue // skip unknown / non-connected ids silently
-			}
-			if err := s.breakoutRooms.AssignParticipant(ctx, callID, uid, room.ID); err != nil {
-				slog.ErrorContext(ctx, "failed to pre-assign participant to breakout room",
-					"call_id", callID, "user_id", uid, "breakout_room_id", room.ID, "error", err)
-				continue
-			}
-			assigned := room.ID
-			s.publishBreakoutEvent(ctx, event.TypeBreakoutParticipantMoved, call, event.BreakoutParticipantMovedPayload{
-				CallID:         callID,
-				UserID:         uid,
-				BreakoutRoomID: &assigned,
-			})
 		}
 
 	}

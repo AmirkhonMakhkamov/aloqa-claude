@@ -3,6 +3,7 @@ package call
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 // stateless (GetByID always NotFound), which is unsuitable for asserting
 // assignment / lifecycle behavior.
 type stubBreakoutRepo struct {
+	mu                     sync.Mutex
 	rooms                  map[uuid.UUID]*entity.BreakoutRoom
 	assignments            []breakoutAssignment
 	closeAllByCallCount    int
@@ -36,11 +38,35 @@ func newStubBreakoutRepo() *stubBreakoutRepo {
 }
 
 func (r *stubBreakoutRepo) Create(_ context.Context, room *entity.BreakoutRoom) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.rooms[room.ID] = room
 	return nil
 }
 
+func (r *stubBreakoutRepo) CreateRoomsWithinCap(_ context.Context, callID uuid.UUID, maxRooms int, rooms []entity.BreakoutRoom) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	activeCount := 0
+	for _, room := range r.rooms {
+		if room.CallID == callID && room.Status == entity.BreakoutRoomStatusActive {
+			activeCount++
+		}
+	}
+	if activeCount+len(rooms) > maxRooms {
+		return cerrors.InvalidInput("breakout room limit reached")
+	}
+	for i := range rooms {
+		room := rooms[i]
+		r.rooms[room.ID] = &room
+	}
+	return nil
+}
+
 func (r *stubBreakoutRepo) GetByID(_ context.Context, id uuid.UUID) (*entity.BreakoutRoom, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if room, ok := r.rooms[id]; ok {
 		return room, nil
 	}
@@ -48,6 +74,8 @@ func (r *stubBreakoutRepo) GetByID(_ context.Context, id uuid.UUID) (*entity.Bre
 }
 
 func (r *stubBreakoutRepo) ListByCall(_ context.Context, callID uuid.UUID) ([]entity.BreakoutRoom, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	out := make([]entity.BreakoutRoom, 0)
 	for _, room := range r.rooms {
 		if room.CallID == callID {
@@ -58,6 +86,8 @@ func (r *stubBreakoutRepo) ListByCall(_ context.Context, callID uuid.UUID) ([]en
 }
 
 func (r *stubBreakoutRepo) ListCallsWithExpiredActiveBreakouts(_ context.Context, before time.Time, limit int) ([]uuid.UUID, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	seen := map[uuid.UUID]bool{}
 	out := make([]uuid.UUID, 0)
 	for _, room := range r.rooms {
@@ -77,6 +107,8 @@ func (r *stubBreakoutRepo) ListCallsWithExpiredActiveBreakouts(_ context.Context
 }
 
 func (r *stubBreakoutRepo) Close(_ context.Context, id uuid.UUID) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if room, ok := r.rooms[id]; ok {
 		room.Status = entity.BreakoutRoomStatusClosed
 	}
@@ -84,6 +116,8 @@ func (r *stubBreakoutRepo) Close(_ context.Context, id uuid.UUID) error {
 }
 
 func (r *stubBreakoutRepo) CloseAllByCall(_ context.Context, callID uuid.UUID) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.closeAllByCallCount++
 	for _, room := range r.rooms {
 		if room.CallID == callID {
@@ -94,16 +128,22 @@ func (r *stubBreakoutRepo) CloseAllByCall(_ context.Context, callID uuid.UUID) e
 }
 
 func (r *stubBreakoutRepo) AssignParticipant(_ context.Context, callID, userID, breakoutRoomID uuid.UUID) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.assignments = append(r.assignments, breakoutAssignment{callID: callID, userID: userID, breakoutRoomID: breakoutRoomID})
 	return nil
 }
 
 func (r *stubBreakoutRepo) UnassignParticipant(_ context.Context, callID, userID uuid.UUID) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.assignments = append(r.assignments, breakoutAssignment{callID: callID, userID: userID, breakoutRoomID: uuid.Nil})
 	return nil
 }
 
 func (r *stubBreakoutRepo) UnassignAllByRoom(context.Context, uuid.UUID) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.unassignAllByRoomCount++
 	return nil
 }
@@ -284,6 +324,215 @@ func TestCreateBreakoutRoomsAssignsConnectedParticipants(t *testing.T) {
 	}
 	if got := countBreakoutEvents(t, pub.captures, event.TypeBreakoutRoomCreated); got != 1 {
 		t.Fatalf("room.created events = %d, want 1", got)
+	}
+}
+
+func TestCreateBreakoutRoomsEveryoneAllowsConnectedNonGuestMember(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	actorID := uuid.New()
+
+	callEntity := breakoutCall(callID, workspaceID, hostID)
+	callEntity.Settings.BreakoutCreation = entity.BreakoutCreationEveryone
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: callEntity},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, actorID}: connectedParticipant(callID, actorID, entity.CallRoleParticipant),
+		},
+	}
+	repo := newStubBreakoutRepo()
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
+
+	rooms, err := svc.CreateBreakoutRooms(ctx, callID, actorID, []CreateBreakoutRoomInput{{Name: "Room A"}})
+	if err != nil {
+		t.Fatalf("CreateBreakoutRooms returned error: %v", err)
+	}
+	if len(rooms) != 1 {
+		t.Fatalf("rooms = %d, want 1", len(rooms))
+	}
+}
+
+func TestCreateBreakoutRoomsEveryoneRejectsNonConnectedActor(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	actorID := uuid.New()
+
+	callEntity := breakoutCall(callID, workspaceID, hostID)
+	callEntity.Settings.BreakoutCreation = entity.BreakoutCreationEveryone
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: callEntity},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, actorID}: {ID: uuid.New(), CallID: callID, UserID: actorID, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusWaiting},
+		},
+	}
+	svc := NewService(calls, newStubBreakoutRepo(), &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
+
+	_, err := svc.CreateBreakoutRooms(ctx, callID, actorID, []CreateBreakoutRoomInput{{Name: "Room A"}})
+	if !hasCode(err, cerrors.CodeForbidden) {
+		t.Fatalf("CreateBreakoutRooms waiting actor error = %v, want FORBIDDEN", err)
+	}
+}
+
+func TestCreateBreakoutRoomsEveryoneRejectsGuestActor(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	actorID := uuid.New()
+
+	callEntity := breakoutCall(callID, workspaceID, hostID)
+	callEntity.Settings.BreakoutCreation = entity.BreakoutCreationEveryone
+	actor := connectedParticipant(callID, actorID, entity.CallRoleParticipant)
+	actor.IsGuest = true
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: callEntity},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, actorID}: actor,
+		},
+	}
+	svc := NewService(calls, newStubBreakoutRepo(), &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
+
+	_, err := svc.CreateBreakoutRooms(ctx, callID, actorID, []CreateBreakoutRoomInput{{Name: "Room A"}})
+	if !hasCode(err, cerrors.CodeForbidden) {
+		t.Fatalf("CreateBreakoutRooms guest actor error = %v, want FORBIDDEN", err)
+	}
+}
+
+func TestCreateBreakoutRoomsEveryoneNonHostDoesNotPreAssignParticipants(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	actorID := uuid.New()
+	targetID := uuid.New()
+
+	callEntity := breakoutCall(callID, workspaceID, hostID)
+	callEntity.Settings.BreakoutCreation = entity.BreakoutCreationEveryone
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: callEntity},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, actorID}:  connectedParticipant(callID, actorID, entity.CallRoleParticipant),
+			{callID, targetID}: connectedParticipant(callID, targetID, entity.CallRoleParticipant),
+		},
+	}
+	repo := newStubBreakoutRepo()
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
+
+	_, err := svc.CreateBreakoutRooms(ctx, callID, actorID, []CreateBreakoutRoomInput{
+		{Name: "Room A", ParticipantUserIDs: []uuid.UUID{targetID}},
+	})
+	if err != nil {
+		t.Fatalf("CreateBreakoutRooms returned error: %v", err)
+	}
+	if len(repo.assignments) != 0 {
+		t.Fatalf("assignments = %+v, want none for non-host everyone creator", repo.assignments)
+	}
+	if calls.participants[[2]uuid.UUID{callID, targetID}].BreakoutRoomID != nil {
+		t.Fatalf("target participant moved from main room")
+	}
+}
+
+func TestCreateBreakoutRoomsRejectsWhenCapWouldBeExceeded(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+
+	for _, tc := range []struct {
+		name     string
+		maxRooms int
+		existing int
+	}{
+		{name: "explicit max", maxRooms: 2, existing: 2},
+		{name: "lowered max", maxRooms: 1, existing: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			callEntity := breakoutCall(callID, workspaceID, hostID)
+			callEntity.Settings.MaxBreakoutRooms = tc.maxRooms
+			calls := &fakeCallRepo{
+				calls: map[uuid.UUID]*entity.Call{callID: callEntity},
+				participants: map[[2]uuid.UUID]*entity.CallParticipant{
+					{callID, hostID}: connectedParticipant(callID, hostID, entity.CallRoleHost),
+				},
+			}
+			repo := newStubBreakoutRepo()
+			for i := 0; i < tc.existing; i++ {
+				roomID := uuid.New()
+				repo.rooms[roomID] = &entity.BreakoutRoom{ID: roomID, CallID: callID, Name: "Existing", Status: entity.BreakoutRoomStatusActive}
+			}
+			svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
+
+			_, err := svc.CreateBreakoutRooms(ctx, callID, hostID, []CreateBreakoutRoomInput{{Name: "Room A"}})
+			if !hasCode(err, cerrors.CodeInvalidInput) {
+				t.Fatalf("CreateBreakoutRooms cap error = %v, want INVALID_INPUT", err)
+			}
+		})
+	}
+}
+
+func TestCreateBreakoutRoomsConcurrentEveryoneCreatorsCannotExceedCap(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	userA := uuid.New()
+	userB := uuid.New()
+
+	callEntity := breakoutCall(callID, workspaceID, hostID)
+	callEntity.Settings.BreakoutCreation = entity.BreakoutCreationEveryone
+	callEntity.Settings.MaxBreakoutRooms = 1
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: callEntity},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, userA}: connectedParticipant(callID, userA, entity.CallRoleParticipant),
+			{callID, userB}: connectedParticipant(callID, userB, entity.CallRoleParticipant),
+		},
+	}
+	repo := newStubBreakoutRepo()
+	svc := NewService(calls, repo, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, newBreakoutSFU(t), mediaTestConfig(), nil, nil)
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for _, userID := range []uuid.UUID{userA, userB} {
+		go func(userID uuid.UUID) {
+			<-start
+			_, err := svc.CreateBreakoutRooms(ctx, callID, userID, []CreateBreakoutRoomInput{{Name: "Room"}})
+			errs <- err
+		}(userID)
+	}
+	close(start)
+
+	successes := 0
+	rejections := 0
+	for i := 0; i < 2; i++ {
+		err := <-errs
+		if err == nil {
+			successes++
+			continue
+		}
+		if hasCode(err, cerrors.CodeInvalidInput) {
+			rejections++
+			continue
+		}
+		t.Fatalf("CreateBreakoutRooms concurrent error = %v, want nil or INVALID_INPUT", err)
+	}
+
+	rooms, err := repo.ListByCall(ctx, callID)
+	if err != nil {
+		t.Fatalf("ListByCall returned error: %v", err)
+	}
+	activeCount := 0
+	for _, room := range rooms {
+		if room.Status == entity.BreakoutRoomStatusActive {
+			activeCount++
+		}
+	}
+	if successes != 1 || rejections != 1 || activeCount != 1 {
+		t.Fatalf("successes=%d rejections=%d active=%d, want 1/1/1", successes, rejections, activeCount)
 	}
 }
 

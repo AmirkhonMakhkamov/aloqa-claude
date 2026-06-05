@@ -410,6 +410,9 @@ func (r *fakeHTTPCallMessageRepo) GetByID(_ context.Context, id uuid.UUID) (*ent
 type fakeHTTPBreakoutRepo struct{}
 
 func (fakeHTTPBreakoutRepo) Create(context.Context, *entity.BreakoutRoom) error { return nil }
+func (fakeHTTPBreakoutRepo) CreateRoomsWithinCap(context.Context, uuid.UUID, int, []entity.BreakoutRoom) error {
+	return nil
+}
 func (fakeHTTPBreakoutRepo) GetByID(context.Context, uuid.UUID) (*entity.BreakoutRoom, error) {
 	return nil, cerrors.NotFound("breakout room not found")
 }

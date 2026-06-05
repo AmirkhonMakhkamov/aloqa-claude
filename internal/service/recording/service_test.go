@@ -978,6 +978,22 @@ func (r *fakeCallRepo) UpdateSettings(context.Context, uuid.UUID, entity.CallSet
 
 func (r *fakeCallRepo) End(context.Context, uuid.UUID) error { return nil }
 
+func (r *fakeCallRepo) UpdateAccessLevel(context.Context, uuid.UUID, entity.AccessLevel) error {
+	return nil
+}
+func (r *fakeCallRepo) AddInvitedMembers(context.Context, uuid.UUID, []uuid.UUID, uuid.UUID) error {
+	return nil
+}
+func (r *fakeCallRepo) IsInvited(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return false, nil
+}
+func (r *fakeCallRepo) ListInvitedMembers(context.Context, uuid.UUID) ([]uuid.UUID, error) {
+	return nil, nil
+}
+func (r *fakeCallRepo) SnapshotConnectedIntoInvited(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+
 func (r *fakeCallRepo) AddParticipant(context.Context, *entity.CallParticipant) error {
 	return nil
 }

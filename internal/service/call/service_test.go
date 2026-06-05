@@ -2355,6 +2355,7 @@ func (r *fakeChannelRepo) GetDMChannel(context.Context, uuid.UUID, uuid.UUID, uu
 type fakeCallRepo struct {
 	calls                             map[uuid.UUID]*entity.Call
 	participants                      map[[2]uuid.UUID]*entity.CallParticipant
+	invited                           map[uuid.UUID]map[uuid.UUID]bool
 	liveKitWebhookEvents              map[string]*entity.LiveKitWebhookEvent
 	liveKitWebhookClaimAttempts       map[string]int
 	settingsUpdates                   int
@@ -2432,6 +2433,55 @@ func (r *fakeCallRepo) UpdateSettings(_ context.Context, id uuid.UUID, settings 
 	}
 	r.settingsUpdates++
 	call.Settings = settings
+	return nil
+}
+
+func (r *fakeCallRepo) UpdateAccessLevel(_ context.Context, id uuid.UUID, level entity.AccessLevel) error {
+	call := r.calls[id]
+	if call == nil {
+		return cerrors.NotFound("call not found")
+	}
+	call.AccessLevel = level.Resolved()
+	return nil
+}
+
+func (r *fakeCallRepo) AddInvitedMembers(_ context.Context, callID uuid.UUID, userIDs []uuid.UUID, _ uuid.UUID) error {
+	if r.invited == nil {
+		r.invited = map[uuid.UUID]map[uuid.UUID]bool{}
+	}
+	if r.invited[callID] == nil {
+		r.invited[callID] = map[uuid.UUID]bool{}
+	}
+	for _, u := range userIDs {
+		r.invited[callID][u] = true
+	}
+	return nil
+}
+
+func (r *fakeCallRepo) IsInvited(_ context.Context, callID, userID uuid.UUID) (bool, error) {
+	return r.invited[callID][userID], nil
+}
+
+func (r *fakeCallRepo) ListInvitedMembers(_ context.Context, callID uuid.UUID) ([]uuid.UUID, error) {
+	ids := make([]uuid.UUID, 0, len(r.invited[callID]))
+	for u := range r.invited[callID] {
+		ids = append(ids, u)
+	}
+	return ids, nil
+}
+
+func (r *fakeCallRepo) SnapshotConnectedIntoInvited(_ context.Context, callID, _ uuid.UUID) error {
+	if r.invited == nil {
+		r.invited = map[uuid.UUID]map[uuid.UUID]bool{}
+	}
+	if r.invited[callID] == nil {
+		r.invited[callID] = map[uuid.UUID]bool{}
+	}
+	for key, p := range r.participants {
+		if key[0] == callID && p.Status == entity.ParticipantStatusConnected && !p.IsGuest {
+			r.invited[callID][p.UserID] = true
+		}
+	}
 	return nil
 }
 func (r *fakeCallRepo) ActivateRinging(_ context.Context, id uuid.UUID) (bool, error) {

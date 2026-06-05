@@ -1986,6 +1986,26 @@ func (r *txCallRepo) UpdateSettings(_ context.Context, id uuid.UUID, settings en
 	return nil
 }
 
+func (r *txCallRepo) UpdateAccessLevel(context.Context, uuid.UUID, entity.AccessLevel) error {
+	return nil
+}
+
+func (r *txCallRepo) AddInvitedMembers(context.Context, uuid.UUID, []uuid.UUID, uuid.UUID) error {
+	return nil
+}
+
+func (r *txCallRepo) IsInvited(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return false, nil
+}
+
+func (r *txCallRepo) ListInvitedMembers(context.Context, uuid.UUID) ([]uuid.UUID, error) {
+	return nil, nil
+}
+
+func (r *txCallRepo) SnapshotConnectedIntoInvited(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+
 func (r *txCallRepo) End(_ context.Context, id uuid.UUID) error {
 	call := r.calls[id]
 	if call == nil {

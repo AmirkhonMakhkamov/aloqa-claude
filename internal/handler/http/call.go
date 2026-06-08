@@ -719,6 +719,44 @@ type updateParticipantRoleRequest struct {
 	Role entity.CallRole `json:"role"`
 }
 
+type addParticipantsRequest struct {
+	UserIDs []uuid.UUID `json:"user_ids"`
+}
+
+const maxInviteParticipants = 100
+
+func (h *CallHandler) AddParticipants(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	var req addParticipantsRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if len(req.UserIDs) == 0 {
+		writeErr(w, cerrors.InvalidInput("user_ids is required"))
+		return
+	}
+	if len(req.UserIDs) > maxInviteParticipants {
+		writeErr(w, cerrors.InvalidInput("too many user_ids"))
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+	result, err := h.svc.InviteParticipants(r.Context(), workspaceID, callID, userID, req.UserIDs)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, result)
+}
+
 func (h *CallHandler) UpdateParticipantRole(w http.ResponseWriter, r *http.Request) {
 	callID, err := id.Parse(chi.URLParam(r, "callID"))
 	if err != nil {
@@ -774,6 +812,23 @@ func (h *CallHandler) TransferHost(w http.ResponseWriter, r *http.Request) {
 	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
 
 	if err := h.svc.TransferHost(r.Context(), workspaceID, callID, userID, targetUserID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
+func (h *CallHandler) DeclineCall(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+	if err := h.svc.DeclineCall(r.Context(), workspaceID, callID, userID); err != nil {
 		writeErr(w, err)
 		return
 	}

@@ -192,7 +192,7 @@ func (r *fakeWorkspaceRepo) GetMember(_ context.Context, workspaceID, userID uui
 	return member, nil
 }
 
-func (r *fakeWorkspaceRepo) ListMembers(_ context.Context, workspaceID uuid.UUID, _ pagination.Params) ([]entity.WorkspaceMember, error) {
+func (r *fakeWorkspaceRepo) ListMembers(_ context.Context, workspaceID uuid.UUID, _ pagination.Params, _ string) ([]entity.WorkspaceMember, error) {
 	members := make([]entity.WorkspaceMember, 0)
 	for key, member := range r.members {
 		if key[0] == workspaceID {

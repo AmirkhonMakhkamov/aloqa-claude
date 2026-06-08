@@ -351,6 +351,7 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 		r.Route("/{callID}", func(r chi.Router) {
 			r.Get("/", deps.Calls.Get)
 			r.Post("/join", deps.Calls.Join)
+			r.Post("/decline", deps.Calls.DeclineCall)
 			r.Post("/leave", deps.Calls.Leave)
 			r.Post("/cancel", deps.Calls.Cancel)
 			r.Post("/end", deps.Calls.End)
@@ -358,6 +359,7 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 			r.Delete("/hand", deps.Calls.LowerHand)
 			r.Post("/reactions", deps.Calls.SendCallReaction)
 			r.Post("/turn-credentials", deps.Calls.TurnCredentials)
+			r.Post("/participants", deps.Calls.AddParticipants)
 			r.Get("/participants", deps.Calls.Participants)
 			r.Put("/participants/{userID}/role", deps.Calls.UpdateParticipantRole)
 			r.Delete("/participants/{userID}", deps.Calls.RemoveParticipant)

@@ -21,6 +21,10 @@ servers:
   - url: http://localhost:8080
     description: Local dev backend.
 
+x-ws-payloads:
+  call.invited:
+    $ref: '#/components/schemas/CallInvitedPayload'
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -272,6 +276,12 @@ paths:
       summary: List workspace members (callable by any member)
       tags: [workspaces]
       security: [{ bearerAuth: [] }]
+      parameters:
+        - name: search
+          in: query
+          required: false
+          schema: { type: string }
+          description: Optional case-insensitive filter over member display name or email.
       responses:
         '200':
           description: Members
@@ -1059,6 +1069,25 @@ paths:
     parameters:
       - $ref: '#/components/parameters/WorkspaceID'
       - $ref: '#/components/parameters/CallID'
+    post:
+      summary: Invite workspace members into an ongoing call
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddCallParticipantsRequest' }
+      responses:
+        '200':
+          description: Invite result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InviteCallParticipantsResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
     get:
       summary: Fetch the current participant roster
       tags: [calls]
@@ -1071,6 +1100,20 @@ paths:
               schema:
                 type: array
                 items: { $ref: '#/components/schemas/CallParticipant' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/workspaces/{workspaceID}/calls/{callID}/decline:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/CallID'
+    post:
+      summary: Decline an incoming call invitation
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Declined or already not pending }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -1394,6 +1437,11 @@ components:
           schema: { $ref: '#/components/schemas/ErrorEnvelope' }
     Conflict:
       description: Resource already exists or precondition failed
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Unprocessable:
+      description: Request is well-formed but cannot be processed
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ErrorEnvelope' }
@@ -1960,7 +2008,7 @@ components:
     ParticipantStatus:
       type: string
       description: Connection status of a participant inside the call.
-      enum: [invited, waiting, joining, connected, disconnected]
+      enum: [invited, waiting, joining, connected, disconnected, declined]
 
     CallEndReason:
       type: string
@@ -2287,6 +2335,51 @@ components:
             - $ref: '#/components/schemas/ParticipantLeftReason'
           nullable: true
           description: Why this participant disconnected; absent/null while connected.
+
+    AddCallParticipantsRequest:
+      type: object
+      description: Body for POST /workspaces/{workspaceID}/calls/{callID}/participants.
+      required: [user_ids]
+      properties:
+        user_ids:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: { $ref: '#/components/schemas/UUID' }
+
+    InviteSkip:
+      type: object
+      required: [user_id, reason]
+      properties:
+        user_id: { $ref: '#/components/schemas/UUID' }
+        reason:
+          type: string
+          enum: [already_connected, joining, waiting, no_access]
+
+    InviteCallParticipantsResponse:
+      type: object
+      required: [invited, skipped]
+      properties:
+        invited:
+          type: array
+          items: { $ref: '#/components/schemas/CallParticipant' }
+        skipped:
+          type: array
+          items: { $ref: '#/components/schemas/InviteSkip' }
+
+    CallInvitedPayload:
+      type: object
+      description: Ephemeral per-user WebSocket payload for `call.invited`.
+      required: [call_id, workspace_id, inviter_user_id, call_type]
+      properties:
+        call_id: { $ref: '#/components/schemas/UUID' }
+        workspace_id: { $ref: '#/components/schemas/UUID' }
+        inviter_user_id: { $ref: '#/components/schemas/UUID' }
+        call_type: { $ref: '#/components/schemas/CallType' }
+        channel_id:
+          allOf:
+            - $ref: '#/components/schemas/UUID'
+          nullable: true
 
     StartCallRequest:
       type: object

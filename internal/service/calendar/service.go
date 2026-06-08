@@ -62,6 +62,9 @@ type CreateEventInput struct {
 	AttendeeEmails  []string
 	RequiredUserIDs []uuid.UUID
 	Reminders       []entity.EventReminder
+	// Settings is the optional per-event call-settings preconfig (ALK-819 / S11);
+	// the HTTP layer already drops it (nil) for non-aloqa_meet events.
+	Settings *entity.EventCallSettings
 }
 
 type UpdateEventInput struct {
@@ -85,6 +88,15 @@ type UpdateEventInput struct {
 	AttendeesSet    bool
 	Reminders       []entity.EventReminder
 	RemindersSet    bool
+	// Settings is the optional per-event call-settings preconfig (ALK-819 / S11)
+	// with key-presence tri-state semantics:
+	//   - SettingsSet == false           -> key absent, leave existing unchanged
+	//   - SettingsSet == true, Settings == nil   -> explicit JSON null, clear it
+	//   - SettingsSet == true, Settings != nil    -> JSON object, replace it
+	// The service additionally forces Settings to nil when the effective
+	// location type is not aloqa_meet (a non-meet event cannot host a call).
+	Settings    *entity.EventCallSettings
+	SettingsSet bool
 }
 
 type MoveOccurrenceScope string
@@ -278,6 +290,7 @@ func (s *Service) CreateEvent(ctx context.Context, workspaceID, organizerID uuid
 		DurationMinutes: input.DurationMinutes,
 		AllDay:          input.AllDay,
 		Recurrence:      normalizeRecurrence(input.Recurrence),
+		Settings:        normalizeEventSettings(input.Settings, input.Location.Type),
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
@@ -349,6 +362,16 @@ func (s *Service) UpdateEvent(ctx context.Context, workspaceID, eventID, actorID
 	if input.RemindersSet {
 		existing.Reminders = input.Reminders
 	}
+	// Apply the settings tri-state after the location merge so the effective
+	// location type (already merged into existing.Location) governs the drop:
+	//   - absent (SettingsSet false): leave existing.Settings unchanged
+	//   - explicit null: clear
+	//   - object: replace
+	// then force nil when the (effective) location is not aloqa_meet. (ALK-819.)
+	if input.SettingsSet {
+		existing.Settings = input.Settings
+	}
+	existing.Settings = normalizeEventSettings(existing.Settings, existing.Location.Type)
 	if err := s.validateEventEntity(existing); err != nil {
 		return nil, err
 	}
@@ -718,15 +741,11 @@ func (s *Service) StartCallFromEvent(ctx context.Context, workspaceID, eventID, 
 		}
 	}
 
-	callEntity, err := s.calls.StartCall(ctx, workspaceID, initiatorID, entity.CallTypeMeeting, eventEntity.Title, eventEntity.ChannelID, entity.CallSettings{
-		WaitingRoom:     false,
-		MuteOnJoin:      false,
-		Recording:       false,
-		ScreenSharing:   true,
-		Chat:            true,
-		BreakoutRooms:   false,
-		MaxParticipants: 500,
-	}, "")
+	// Apply the event's call-settings preconfig (if any) on top of the canonical
+	// meeting defaults; StartCall also normalises, so the resolveEventCallSettings
+	// call here is idempotent on this path (ALK-819 / S11).
+	callSettings := resolveEventCallSettings(eventEntity.Settings)
+	callEntity, err := s.calls.StartCall(ctx, workspaceID, initiatorID, entity.CallTypeMeeting, eventEntity.Title, eventEntity.ChannelID, callSettings, "")
 	if err != nil {
 		return nil, err
 	}
@@ -779,6 +798,10 @@ func (s *Service) startCallFromEventTx(ctx context.Context, workspaceID, eventID
 
 		now := time.Now().UTC()
 		scheduledCallID := eventEntity.ID
+		// This path writes callEntity.Settings directly via scope.Calls().Create
+		// without going through call.Service.StartCall, so resolveEventCallSettings
+		// MUST be applied here: it overlays the event preconfig onto the meeting
+		// defaults AND normalises (entry_mode/waiting_room/breakout). (ALK-819 / S11.)
 		callEntity = &entity.Call{
 			ID:              id.New(),
 			WorkspaceID:     workspaceID,
@@ -788,17 +811,9 @@ func (s *Service) startCallFromEventTx(ctx context.Context, workspaceID, eventID
 			Title:           eventEntity.Title,
 			CreatedBy:       initiatorID,
 			ScheduledCallID: &scheduledCallID,
-			Settings: entity.CallSettings{
-				WaitingRoom:     false,
-				MuteOnJoin:      false,
-				Recording:       false,
-				ScreenSharing:   true,
-				Chat:            true,
-				BreakoutRooms:   true, // Breakout rooms default-on for meetings; host can disable at runtime.
-				MaxParticipants: 500,
-			},
-			StartedAt: &now,
-			CreatedAt: now,
+			Settings:        resolveEventCallSettings(eventEntity.Settings),
+			StartedAt:       &now,
+			CreatedAt:       now,
 		}
 		participant := &entity.CallParticipant{
 			ID:       id.New(),
@@ -956,6 +971,87 @@ func normalizeRecurrence(recurrence *entity.RecurrenceRule) *entity.RecurrenceRu
 		return nil
 	}
 	return &entity.RecurrenceRule{RRule: rrule, Exdates: recurrence.Exdates}
+}
+
+// normalizeEventSettings drops the per-event call-settings preconfig for any
+// location type other than aloqa_meet (a non-meet event cannot host a call), and
+// otherwise returns the settings unchanged (ALK-819 / S11).
+func normalizeEventSettings(settings *entity.EventCallSettings, locationType entity.EventLocationType) *entity.EventCallSettings {
+	if locationType != entity.EventLocationAloqaMeet {
+		return nil
+	}
+	return settings
+}
+
+// meetingDefaultCallSettings is the canonical base call-settings tuple used when
+// starting a call from a scheduled event. An event preconfig is overlaid on top
+// of this and the result normalised before the call is created (ALK-819 / S11).
+func meetingDefaultCallSettings() entity.CallSettings {
+	return entity.CallSettings{
+		WaitingRoom:      false,
+		MuteOnJoin:       false,
+		Recording:        false,
+		ScreenSharing:    true,
+		Chat:             true,
+		BreakoutRooms:    true,
+		BreakoutCreation: entity.BreakoutCreationHost,
+		MaxBreakoutRooms: 8,
+		MaxParticipants:  500,
+		E2EE:             false,
+		Watermark:        false,
+		EntryMode:        entity.EntryModeOpen,
+	}
+}
+
+// overlayEventSettings applies the present (non-nil) pointer fields of the event
+// preconfig onto the base call settings; absent fields keep the base value. It
+// mutates the base in place (ALK-819 / S11).
+func overlayEventSettings(base *entity.CallSettings, settings *entity.EventCallSettings) {
+	if base == nil || settings == nil {
+		return
+	}
+	if settings.EntryMode != nil {
+		base.EntryMode = *settings.EntryMode
+	}
+	if settings.MuteOnJoin != nil {
+		base.MuteOnJoin = *settings.MuteOnJoin
+	}
+	if settings.BreakoutRooms != nil {
+		base.BreakoutRooms = *settings.BreakoutRooms
+	}
+	if settings.BreakoutCreation != nil {
+		base.BreakoutCreation = *settings.BreakoutCreation
+	}
+	if settings.MaxBreakoutRooms != nil {
+		base.MaxBreakoutRooms = *settings.MaxBreakoutRooms
+	}
+}
+
+// normalizeMeetingCallSettings resolves the call-settings tuple to concrete,
+// persistable values: entry_mode -> resolved, waiting_room derived from it, and
+// the breakout fields resolved. This mirrors the normalisation that
+// call.Service.StartCall performs, and is REQUIRED on the tx start-call path
+// because that path writes callEntity.Settings directly via the repo without
+// going through StartCall (ALK-819 / S11).
+func normalizeMeetingCallSettings(settings *entity.CallSettings) {
+	if settings == nil {
+		return
+	}
+	entryMode := settings.ResolvedEntryMode()
+	settings.EntryMode = entryMode
+	settings.WaitingRoom = entryMode == entity.EntryModeManualAdmit
+	settings.BreakoutCreation = settings.ResolvedBreakoutCreation()
+	settings.MaxBreakoutRooms = settings.ResolvedMaxBreakoutRooms()
+}
+
+// resolveEventCallSettings builds the call-settings to use when starting a call
+// from an event: canonical meeting defaults, overlaid with the event preconfig
+// (if any), then normalised (ALK-819 / S11).
+func resolveEventCallSettings(eventSettings *entity.EventCallSettings) entity.CallSettings {
+	base := meetingDefaultCallSettings()
+	overlayEventSettings(&base, eventSettings)
+	normalizeMeetingCallSettings(&base)
+	return base
 }
 
 func normalizeOriginatorTZ(originatorTZ string) string {

@@ -55,21 +55,35 @@ type recurrenceRequest struct {
 	Exdates []time.Time `json:"exdates"`
 }
 
+// eventCallSettingsRequest is the optional per-event call-settings preconfig
+// accepted on event create/update (ALK-819 / S11). Every field is a pointer so
+// an omitted key is distinguishable from a zero value and only present fields
+// are stored. entry_mode is restricted to manual_admit | open at this boundary
+// (password is rejected — a scheduled event cannot pre-set a join password).
+type eventCallSettingsRequest struct {
+	EntryMode        *entity.EntryMode              `json:"entry_mode"`
+	MuteOnJoin       *bool                          `json:"mute_on_join"`
+	BreakoutRooms    *bool                          `json:"breakout_rooms"`
+	BreakoutCreation *entity.BreakoutCreationPolicy `json:"breakout_creation"`
+	MaxBreakoutRooms *int                           `json:"max_breakout_rooms"`
+}
+
 type createEventRequest struct {
-	CalendarID      string                 `json:"calendar_id"`
-	ChannelID       *string                `json:"channel_id"`
-	Title           string                 `json:"title"`
-	Description     *string                `json:"description"`
-	Location        eventLocationRequest   `json:"location"`
-	ScheduledAt     time.Time              `json:"scheduled_at"`
-	OriginatorTZ    string                 `json:"originator_tz"`
-	DurationMinutes int                    `json:"duration_minutes"`
-	AllDay          bool                   `json:"all_day"`
-	Recurrence      *recurrenceRequest     `json:"recurrence"`
-	AttendeeUserIDs []string               `json:"attendee_user_ids"`
-	AttendeeEmails  []string               `json:"attendee_emails"`
-	RequiredUserIDs []string               `json:"required_user_ids"`
-	Reminders       []entity.EventReminder `json:"reminders"`
+	CalendarID      string                    `json:"calendar_id"`
+	ChannelID       *string                   `json:"channel_id"`
+	Title           string                    `json:"title"`
+	Description     *string                   `json:"description"`
+	Location        eventLocationRequest      `json:"location"`
+	ScheduledAt     time.Time                 `json:"scheduled_at"`
+	OriginatorTZ    string                    `json:"originator_tz"`
+	DurationMinutes int                       `json:"duration_minutes"`
+	AllDay          bool                      `json:"all_day"`
+	Recurrence      *recurrenceRequest        `json:"recurrence"`
+	AttendeeUserIDs []string                  `json:"attendee_user_ids"`
+	AttendeeEmails  []string                  `json:"attendee_emails"`
+	RequiredUserIDs []string                  `json:"required_user_ids"`
+	Reminders       []entity.EventReminder    `json:"reminders"`
+	Settings        *eventCallSettingsRequest `json:"settings"`
 }
 
 type rsvpRequest struct {
@@ -397,6 +411,10 @@ func createEventInputFromRequest(req createEventRequest) (calendarservice.Create
 	if err != nil {
 		return calendarservice.CreateEventInput{}, err
 	}
+	settings, err := eventCallSettingsFromRequest(req.Settings, req.Location.Type)
+	if err != nil {
+		return calendarservice.CreateEventInput{}, err
+	}
 	return calendarservice.CreateEventInput{
 		CalendarID:      calendarID,
 		ChannelID:       channelID,
@@ -412,6 +430,57 @@ func createEventInputFromRequest(req createEventRequest) (calendarservice.Create
 		AttendeeEmails:  req.AttendeeEmails,
 		RequiredUserIDs: requiredUserIDs,
 		Reminders:       req.Reminders,
+		Settings:        settings,
+	}, nil
+}
+
+// eventCallSettingsFromRequest validates and maps the optional per-event
+// call-settings preconfig (ALK-819 / S11) for the create path. It returns nil
+// (drop) when there is no preconfig or the event is not an aloqa_meet — a
+// non-meet event never carries call settings.
+func eventCallSettingsFromRequest(req *eventCallSettingsRequest, locationType entity.EventLocationType) (*entity.EventCallSettings, error) {
+	if req == nil {
+		return nil, nil
+	}
+	if locationType != entity.EventLocationAloqaMeet {
+		// Non-meet events cannot host a call; drop any preconfig silently so a
+		// stale settings payload on a relocated event never persists.
+		return nil, nil
+	}
+	return validateEventCallSettingsRequest(req)
+}
+
+// validateEventCallSettingsRequest performs the location-independent field
+// validation and maps the request to the entity. entry_mode is restricted to
+// manual_admit | open (password is rejected at this boundary), breakout_creation
+// must be host | everyone, and max_breakout_rooms must be 1..8. The aloqa_meet
+// drop is applied by the caller (create) or by the service (update, which knows
+// the effective location type after merging the incoming change).
+func validateEventCallSettingsRequest(req *eventCallSettingsRequest) (*entity.EventCallSettings, error) {
+	if req == nil {
+		return nil, nil
+	}
+	if req.EntryMode != nil {
+		switch *req.EntryMode {
+		case entity.EntryModeManualAdmit, entity.EntryModeOpen:
+		case entity.EntryModePassword:
+			return nil, cerrors.InvalidInput("entry_mode password is not supported for scheduled events")
+		default:
+			return nil, cerrors.InvalidInput("invalid entry_mode")
+		}
+	}
+	if req.BreakoutCreation != nil && !req.BreakoutCreation.Valid() {
+		return nil, cerrors.InvalidInput("invalid breakout_creation")
+	}
+	if req.MaxBreakoutRooms != nil && (*req.MaxBreakoutRooms < 1 || *req.MaxBreakoutRooms > 8) {
+		return nil, cerrors.InvalidInput("max_breakout_rooms must be between 1 and 8")
+	}
+	return &entity.EventCallSettings{
+		EntryMode:        req.EntryMode,
+		MuteOnJoin:       req.MuteOnJoin,
+		BreakoutRooms:    req.BreakoutRooms,
+		BreakoutCreation: req.BreakoutCreation,
+		MaxBreakoutRooms: req.MaxBreakoutRooms,
 	}, nil
 }
 
@@ -512,6 +581,23 @@ func updateEventInputFromRaw(raw map[string]json.RawMessage) (calendarservice.Up
 		}
 		input.Reminders = reminders
 		input.RemindersSet = true
+	}
+	if value, ok := raw["settings"]; ok {
+		// Key-presence tri-state: explicit JSON null clears the preconfig, a JSON
+		// object replaces it (after boundary validation). The service applies the
+		// aloqa_meet drop using the effective location type. (ALK-819 / S11.)
+		input.SettingsSet = true
+		if !isJSONNull(value) {
+			var settingsReq eventCallSettingsRequest
+			if err := json.Unmarshal(value, &settingsReq); err != nil {
+				return input, cerrors.InvalidInput("invalid settings")
+			}
+			settings, err := validateEventCallSettingsRequest(&settingsReq)
+			if err != nil {
+				return input, err
+			}
+			input.Settings = settings
+		}
 	}
 	attendeesTouched := false
 	if value, ok := raw["attendee_user_ids"]; ok {

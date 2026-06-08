@@ -1345,11 +1345,11 @@ func (s *Service) InviteParticipants(ctx context.Context, workspaceID, callID, a
 		return nil, err
 	}
 
-	result := &InviteResult{
-		Invited: []entity.CallParticipant{},
-		Skipped: []InviteSkip{},
-	}
+	// Phase 1: validate every target (dedup + nil + workspace membership) BEFORE
+	// any side effect, so a bad id in the batch fails the whole request with 422
+	// without having already inserted/rung earlier valid targets (atomic 422).
 	seen := make(map[uuid.UUID]struct{}, len(targetUserIDs))
+	targets := make([]uuid.UUID, 0, len(targetUserIDs))
 	for _, targetUserID := range targetUserIDs {
 		if targetUserID == uuid.Nil {
 			return nil, cerrors.InvalidInput("user_ids must not contain nil")
@@ -1366,10 +1366,24 @@ func (s *Service) InviteParticipants(ctx context.Context, workspaceID, callID, a
 			slog.ErrorContext(ctx, "failed to verify invite target membership", "workspace_id", call.WorkspaceID, "user_id", targetUserID, "error", err)
 			return nil, cerrors.Internal("failed to verify workspace membership", err)
 		}
+		targets = append(targets, targetUserID)
+	}
 
+	// Phase 2: per-target access check + transition table + ring (mutations).
+	result := &InviteResult{
+		Invited: []entity.CallParticipant{},
+		Skipped: []InviteSkip{},
+	}
+	for _, targetUserID := range targets {
 		if err := s.CanAccessCall(ctx, workspaceID, callID, targetUserID); err != nil {
-			result.Skipped = append(result.Skipped, InviteSkip{UserID: targetUserID, Reason: "no_access"})
-			continue
+			// Only a genuine access denial means "skip, no_access". An infrastructure
+			// error must surface, not be silently swallowed as a successful skip.
+			if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeForbidden {
+				result.Skipped = append(result.Skipped, InviteSkip{UserID: targetUserID, Reason: "no_access"})
+				continue
+			}
+			slog.ErrorContext(ctx, "failed to check invite target call access", "call_id", callID, "user_id", targetUserID, "error", err)
+			return nil, cerrors.Internal("failed to verify call access", err)
 		}
 
 		existing, err := s.calls.GetParticipant(ctx, callID, targetUserID)

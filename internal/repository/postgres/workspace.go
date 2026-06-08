@@ -290,9 +290,14 @@ func (r *WorkspaceRepo) GetMember(ctx context.Context, workspaceID, userID uuid.
 	return m, nil
 }
 
+// likeEscaper neutralises LIKE/ILIKE wildcards in user-supplied search text so
+// a literal `%` or `_` is matched as itself (paired with `ESCAPE '\'`).
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
 func (r *WorkspaceRepo) ListMembers(ctx context.Context, workspaceID uuid.UUID, p pagination.Params, search string) ([]entity.WorkspaceMember, error) {
 	p.Normalize()
 	search = strings.TrimSpace(search)
+	likePattern := "%" + likeEscaper.Replace(search) + "%"
 
 	var (
 		rows pgx.Rows
@@ -310,9 +315,9 @@ func (r *WorkspaceRepo) ListMembers(ctx context.Context, workspaceID uuid.UUID, 
 			WHERE wm.workspace_id = $1 AND wm.id < $2`
 		args := []any{workspaceID, p.Cursor}
 		if search != "" {
-			args = append(args, "%"+search+"%")
+			args = append(args, likePattern)
 			query += fmt.Sprintf(`
-			  AND (u.display_name ILIKE $%d OR u.email ILIKE $%d)`, len(args), len(args))
+			  AND (u.display_name ILIKE $%d ESCAPE '\' OR u.email ILIKE $%d ESCAPE '\')`, len(args), len(args))
 		}
 		args = append(args, p.Limit+1)
 		query += fmt.Sprintf(`
@@ -328,9 +333,9 @@ func (r *WorkspaceRepo) ListMembers(ctx context.Context, workspaceID uuid.UUID, 
 			WHERE wm.workspace_id = $1`
 		args := []any{workspaceID}
 		if search != "" {
-			args = append(args, "%"+search+"%")
+			args = append(args, likePattern)
 			query += fmt.Sprintf(`
-			  AND (u.display_name ILIKE $%d OR u.email ILIKE $%d)`, len(args), len(args))
+			  AND (u.display_name ILIKE $%d ESCAPE '\' OR u.email ILIKE $%d ESCAPE '\')`, len(args), len(args))
 		}
 		args = append(args, p.Limit+1)
 		query += fmt.Sprintf(`

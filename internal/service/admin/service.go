@@ -191,7 +191,7 @@ func (s *Service) ListMembers(ctx context.Context, workspaceID, actorID uuid.UUI
 	if err := s.requirePermission(ctx, workspaceID, actorID, rbac.PermissionMemberRead); err != nil {
 		return nil, err
 	}
-	return s.workspaces.ListMembers(ctx, workspaceID, p)
+	return s.workspaces.ListMembers(ctx, workspaceID, p, "")
 }
 
 func (s *Service) ReindexSearch(ctx context.Context, workspaceID, actorID uuid.UUID) (*SearchReindexResult, error) {

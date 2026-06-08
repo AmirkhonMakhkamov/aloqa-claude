@@ -2,6 +2,7 @@ package http
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -172,8 +173,9 @@ func (h *AccountHandler) ListWorkspaceMembers(w http.ResponseWriter, r *http.Req
 
 	userID := middleware.UserIDFromContext(r.Context())
 	p := paginationFromQuery(r)
+	search := strings.TrimSpace(r.URL.Query().Get("search"))
 
-	members, err := h.svc.ListWorkspaceMembers(r.Context(), workspaceID, userID, p)
+	members, err := h.svc.ListWorkspaceMembers(r.Context(), workspaceID, userID, p, search)
 	if err != nil {
 		writeErr(w, err)
 		return

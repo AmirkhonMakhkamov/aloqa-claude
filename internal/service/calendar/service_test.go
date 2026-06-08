@@ -2427,7 +2427,7 @@ func (m fakeMembers) GetMember(_ context.Context, workspaceID, userID uuid.UUID)
 	return nil, cerrors.NotFound("workspace member not found")
 }
 
-func (m fakeMembers) ListMembers(context.Context, uuid.UUID, pagination.Params) ([]entity.WorkspaceMember, error) {
+func (m fakeMembers) ListMembers(context.Context, uuid.UUID, pagination.Params, string) ([]entity.WorkspaceMember, error) {
 	return nil, nil
 }
 

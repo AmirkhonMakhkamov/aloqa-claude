@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,6 +93,58 @@ func TestCreateWorkspaceCreatesOwnerMembership(t *testing.T) {
 	}
 	if member.Role != entity.WorkspaceRoleOwner {
 		t.Fatalf("member role = %q, want owner", member.Role)
+	}
+}
+
+func TestListWorkspaceMembersSearchFiltersNameAndEmail(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	actorID := uuid.New()
+	aliceID := uuid.New()
+	bobID := uuid.New()
+	carolID := uuid.New()
+	workspaces := &fakeWorkspaceRepo{
+		workspaces: map[uuid.UUID]*entity.Workspace{},
+		bySlug:     map[string]*entity.Workspace{},
+		members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+			{workspaceID, actorID}: {WorkspaceID: workspaceID, UserID: actorID, Role: entity.WorkspaceRoleMember, User: &entity.User{ID: actorID, Email: "actor@example.com", DisplayName: "Actor"}},
+			{workspaceID, aliceID}: {WorkspaceID: workspaceID, UserID: aliceID, Role: entity.WorkspaceRoleMember, User: &entity.User{ID: aliceID, Email: "alice@example.com", DisplayName: "Alice"}},
+			{workspaceID, bobID}:   {WorkspaceID: workspaceID, UserID: bobID, Role: entity.WorkspaceRoleMember, User: &entity.User{ID: bobID, Email: "builder@example.com", DisplayName: "Bob"}},
+			{workspaceID, carolID}: {WorkspaceID: workspaceID, UserID: carolID, Role: entity.WorkspaceRoleMember, User: &entity.User{ID: carolID, Email: "carol@example.com", DisplayName: "Carol"}},
+		},
+	}
+	svc := NewService(&fakeUserRepo{}, workspaces, nil, []byte("01234567890123456789012345678901"), time.Minute, time.Hour, nil)
+
+	matches, err := svc.ListWorkspaceMembers(ctx, workspaceID, actorID, pagination.Params{Limit: 20}, "ALI")
+	if err != nil {
+		t.Fatalf("ListWorkspaceMembers search returned error: %v", err)
+	}
+	if len(matches) != 1 || matches[0].UserID != aliceID {
+		t.Fatalf("name matches = %+v, want Alice only", matches)
+	}
+
+	matches, err = svc.ListWorkspaceMembers(ctx, workspaceID, actorID, pagination.Params{Limit: 20}, "build")
+	if err != nil {
+		t.Fatalf("ListWorkspaceMembers email search returned error: %v", err)
+	}
+	if len(matches) != 1 || matches[0].UserID != bobID {
+		t.Fatalf("email matches = %+v, want Bob only", matches)
+	}
+
+	matches, err = svc.ListWorkspaceMembers(ctx, workspaceID, actorID, pagination.Params{Limit: 20}, "nobody")
+	if err != nil {
+		t.Fatalf("ListWorkspaceMembers no-match returned error: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("no-match members = %+v, want empty", matches)
+	}
+
+	matches, err = svc.ListWorkspaceMembers(ctx, workspaceID, actorID, pagination.Params{Limit: 20}, "")
+	if err != nil {
+		t.Fatalf("ListWorkspaceMembers empty search returned error: %v", err)
+	}
+	if len(matches) != 4 {
+		t.Fatalf("empty search members = %d, want all 4", len(matches))
 	}
 }
 
@@ -585,12 +638,25 @@ func (r *fakeWorkspaceRepo) GetMember(_ context.Context, workspaceID, userID uui
 	return nil, cerrors.NotFound("workspace member not found")
 }
 
-func (r *fakeWorkspaceRepo) ListMembers(_ context.Context, workspaceID uuid.UUID, _ pagination.Params) ([]entity.WorkspaceMember, error) {
+func (r *fakeWorkspaceRepo) ListMembers(_ context.Context, workspaceID uuid.UUID, _ pagination.Params, search string) ([]entity.WorkspaceMember, error) {
 	var members []entity.WorkspaceMember
+	search = strings.ToLower(strings.TrimSpace(search))
 	for key, member := range r.members {
-		if key[0] == workspaceID {
-			members = append(members, *member)
+		if key[0] != workspaceID {
+			continue
 		}
+		if search != "" {
+			displayName := ""
+			email := ""
+			if member.User != nil {
+				displayName = member.User.DisplayName
+				email = member.User.Email
+			}
+			if !strings.Contains(strings.ToLower(displayName), search) && !strings.Contains(strings.ToLower(email), search) {
+				continue
+			}
+		}
+		members = append(members, *member)
 	}
 	return members, nil
 }

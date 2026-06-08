@@ -649,7 +649,7 @@ func (m fakeCalHTTPMembers) GetMember(_ context.Context, workspaceID, userID uui
 	return nil, cerrors.NotFound("workspace member not found")
 }
 
-func (m fakeCalHTTPMembers) ListMembers(context.Context, uuid.UUID, pagination.Params) ([]entity.WorkspaceMember, error) {
+func (m fakeCalHTTPMembers) ListMembers(context.Context, uuid.UUID, pagination.Params, string) ([]entity.WorkspaceMember, error) {
 	return nil, nil
 }
 

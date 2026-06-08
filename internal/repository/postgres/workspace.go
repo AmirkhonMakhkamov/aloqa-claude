@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -289,8 +290,9 @@ func (r *WorkspaceRepo) GetMember(ctx context.Context, workspaceID, userID uuid.
 	return m, nil
 }
 
-func (r *WorkspaceRepo) ListMembers(ctx context.Context, workspaceID uuid.UUID, p pagination.Params) ([]entity.WorkspaceMember, error) {
+func (r *WorkspaceRepo) ListMembers(ctx context.Context, workspaceID uuid.UUID, p pagination.Params, search string) ([]entity.WorkspaceMember, error) {
 	p.Normalize()
+	search = strings.TrimSpace(search)
 
 	var (
 		rows pgx.Rows
@@ -305,20 +307,36 @@ func (r *WorkspaceRepo) ListMembers(ctx context.Context, workspaceID uuid.UUID, 
 			       u.id, u.email, u.display_name, u.avatar_url, u.avatar_color, u.position, u.department, u.status, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
 			FROM workspace_members wm
 			JOIN users u ON u.id = wm.user_id
-			WHERE wm.workspace_id = $1 AND wm.id < $2
+			WHERE wm.workspace_id = $1 AND wm.id < $2`
+		args := []any{workspaceID, p.Cursor}
+		if search != "" {
+			args = append(args, "%"+search+"%")
+			query += fmt.Sprintf(`
+			  AND (u.display_name ILIKE $%d OR u.email ILIKE $%d)`, len(args), len(args))
+		}
+		args = append(args, p.Limit+1)
+		query += fmt.Sprintf(`
 			ORDER BY wm.id DESC
-			LIMIT $3`
-		rows, err = r.db.Query(ctx, query, workspaceID, p.Cursor, p.Limit+1)
+			LIMIT $%d`, len(args))
+		rows, err = r.db.Query(ctx, query, args...)
 	} else {
 		query := `
 			SELECT wm.id, wm.workspace_id, wm.user_id, wm.role, wm.joined_at,
 			       u.id, u.email, u.display_name, u.avatar_url, u.avatar_color, u.position, u.department, u.status, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
 			FROM workspace_members wm
 			JOIN users u ON u.id = wm.user_id
-			WHERE wm.workspace_id = $1
+			WHERE wm.workspace_id = $1`
+		args := []any{workspaceID}
+		if search != "" {
+			args = append(args, "%"+search+"%")
+			query += fmt.Sprintf(`
+			  AND (u.display_name ILIKE $%d OR u.email ILIKE $%d)`, len(args), len(args))
+		}
+		args = append(args, p.Limit+1)
+		query += fmt.Sprintf(`
 			ORDER BY wm.id DESC
-			LIMIT $2`
-		rows, err = r.db.Query(ctx, query, workspaceID, p.Limit+1)
+			LIMIT $%d`, len(args))
+		rows, err = r.db.Query(ctx, query, args...)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list workspace members: %w", err)

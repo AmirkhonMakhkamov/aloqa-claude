@@ -1987,6 +1987,40 @@ components:
       description: Who may open breakout rooms.
       enum: [host, everyone]
 
+    EventCallSettings:
+      type: object
+      description: >-
+        Optional per-event call-settings preconfig (ALK-819 / S11). A subset of
+        CallSettings carried on an aloqa_meet calendar event; when a call is
+        started from the event these are overlaid onto the canonical meeting
+        defaults and normalised. Every field is optional — an omitted key keeps
+        the corresponding default. Only meaningful for aloqa_meet events; the
+        backend stores null for any other location type. NOTE: the calendar
+        event create/update/response schemas are not yet vendored into this
+        hand-authored spec (it covers Phase 3/4 only); this component is provided
+        for reuse once those schemas are added, and `settings` on those payloads
+        is nullable (`EventCallSettings` or null). The breakout enable toggle is
+        intentionally not presettable: a meeting always starts with breakout
+        enabled (the host disables it at runtime).
+      properties:
+        entry_mode:
+          type: string
+          description: >-
+            How a non-guest member enters the call. Restricted to `manual_admit`
+            or `open` at this boundary — `password` is rejected for scheduled
+            events (a calendar event cannot pre-set a join password).
+          enum: [manual_admit, open]
+        mute_on_join:
+          type: boolean
+          description: Force participants to join muted.
+        breakout_creation:
+          $ref: '#/components/schemas/BreakoutCreationPolicy'
+        max_breakout_rooms:
+          type: integer
+          minimum: 1
+          maximum: 8
+          description: Maximum simultaneous active breakout rooms.
+
     CallSettings:
       type: object
       description: Per-call feature toggles. Mirrors aloqa-claude entity.CallSettings.

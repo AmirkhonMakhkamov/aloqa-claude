@@ -433,6 +433,16 @@ func (s *Service) ensureCollaborationChannelAccess(ctx context.Context, ch *enti
 // passwords are rejected as invalid input rather than failing to hash. #4.
 const maxJoinPasswordBytes = 72
 
+// ValidateNewCallSettings exposes the package-private validateCallSettings on the
+// service so other services that build a call inline (e.g. the calendar service's
+// transactional StartCallFromEvent path, which writes the call row directly rather
+// than going through StartCall) can run the SAME field validation StartCall runs.
+// Without this the tx path could persist a settings tuple StartCall would reject,
+// diverging the two scheduled-call paths (ALK-819 review).
+func (s *Service) ValidateNewCallSettings(callType entity.CallType, settings entity.CallSettings) error {
+	return validateCallSettings(callType, settings)
+}
+
 func validateCallSettings(callType entity.CallType, settings entity.CallSettings) error {
 	switch callType {
 	case entity.CallTypeOneToOne, entity.CallTypeGroup, entity.CallTypeMeeting, entity.CallTypeWebinar, entity.CallTypeSelector:
@@ -692,20 +702,21 @@ func (s *Service) userActiveCall(ctx context.Context, workspaceID, userID uuid.U
 	return nil, nil
 }
 
-func (s *Service) StartCall(
-	ctx context.Context,
-	workspaceID, userID uuid.UUID,
-	callType entity.CallType,
-	title string,
-	channelID *uuid.UUID,
-	settings entity.CallSettings,
-	joinPassword string,
-) (*entity.Call, error) {
+// FinalizeNewCallSettings resolves a caller-supplied call-settings tuple to the
+// concrete, server-authoritative values a freshly created call must carry. It is
+// the single source of truth for new-call finalisation: StartCall applies it on
+// every ad-hoc/channel/DM/meeting creation, and the calendar service applies it
+// on the scheduled-call (StartCallFromEvent) tx path that writes the call entity
+// directly — so both paths persist byte-identical settings for the same input.
+//
+// It does NOT validate (that is validateCallSettings' job, run before this on the
+// StartCall path) and never returns an error; callers that need validation must
+// run it on the raw settings first.
+func (s *Service) FinalizeNewCallSettings(callType entity.CallType, settings entity.CallSettings) entity.CallSettings {
+	// Group/meeting calls always start with breakout enabled; the host disables
+	// it at runtime. This is a server invariant, not a presettable option.
 	if callType == entity.CallTypeGroup || callType == entity.CallTypeMeeting {
 		settings.BreakoutRooms = true
-	}
-	if err := validateCallSettings(callType, settings); err != nil {
-		return nil, err
 	}
 	// Recording is only offerable when egress is configured server-side; advertise
 	// an honest capability so the FE control gate (settings.recording) is truthful (ALK-701).
@@ -744,6 +755,26 @@ func (s *Service) StartCall(
 	settings.WaitingRoom = entryMode == entity.EntryModeManualAdmit
 	settings.BreakoutCreation = settings.ResolvedBreakoutCreation()
 	settings.MaxBreakoutRooms = settings.ResolvedMaxBreakoutRooms()
+	return settings
+}
+
+func (s *Service) StartCall(
+	ctx context.Context,
+	workspaceID, userID uuid.UUID,
+	callType entity.CallType,
+	title string,
+	channelID *uuid.UUID,
+	settings entity.CallSettings,
+	joinPassword string,
+) (*entity.Call, error) {
+	if err := validateCallSettings(callType, settings); err != nil {
+		return nil, err
+	}
+	// Resolve the entry mode here too so the password branch below sees the
+	// concrete mode; FinalizeNewCallSettings resolves it identically before
+	// persisting so the two stay in lock-step.
+	settings = s.FinalizeNewCallSettings(callType, settings)
+	entryMode := settings.EntryMode
 
 	var joinPasswordHash string
 	if entryMode == entity.EntryModePassword {

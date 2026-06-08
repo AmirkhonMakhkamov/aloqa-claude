@@ -82,25 +82,45 @@ type EventReminder struct {
 	Channel       ReminderChannel `json:"channel"`
 }
 
+// EventCallSettings is the optional subset of CallSettings a calendar event may
+// pre-configure (ALK-819 / S11). Every field is a pointer so an omitted key is
+// distinguishable from a zero value: only present fields are overlaid onto the
+// canonical meeting defaults when a call is started from the event. It is only
+// meaningful for aloqa_meet events; for any other location type the service
+// stores nil. Persisted as the calendar_events.settings JSONB (nil -> SQL NULL)
+// and echoed verbatim on the event response.
+//
+// breakout_rooms (the breakout enable toggle) is intentionally NOT a preset: a
+// meeting always starts with breakout enabled (StartCall force-enables it for
+// group/meeting calls; the host disables it at runtime), so it can never be
+// honored as a schedule preconfig and is therefore excluded.
+type EventCallSettings struct {
+	EntryMode        *EntryMode              `json:"entry_mode,omitempty"`
+	MuteOnJoin       *bool                   `json:"mute_on_join,omitempty"`
+	BreakoutCreation *BreakoutCreationPolicy `json:"breakout_creation,omitempty"`
+	MaxBreakoutRooms *int                    `json:"max_breakout_rooms,omitempty"`
+}
+
 type CalendarEvent struct {
-	ID              uuid.UUID       `json:"id"`
-	CalendarID      uuid.UUID       `json:"calendar_id"`
-	WorkspaceID     uuid.UUID       `json:"workspace_id"`
-	ChannelID       *uuid.UUID      `json:"channel_id,omitempty"`
-	OrganizerID     uuid.UUID       `json:"organizer_id"`
-	Title           string          `json:"title"`
-	Description     *string         `json:"description"`
-	Location        EventLocation   `json:"location"`
-	ScheduledAt     time.Time       `json:"scheduled_at"`
-	OriginatorTZ    string          `json:"originator_tz"`
-	DurationMinutes int             `json:"duration_minutes"`
-	AllDay          bool            `json:"all_day"`
-	Recurrence      *RecurrenceRule `json:"recurrence"`
-	CallID          *uuid.UUID      `json:"call_id"`
-	Attendees       []EventAttendee `json:"attendees"`
-	Reminders       []EventReminder `json:"reminders"`
-	CreatedAt       time.Time       `json:"created_at"`
-	UpdatedAt       time.Time       `json:"updated_at"`
+	ID              uuid.UUID          `json:"id"`
+	CalendarID      uuid.UUID          `json:"calendar_id"`
+	WorkspaceID     uuid.UUID          `json:"workspace_id"`
+	ChannelID       *uuid.UUID         `json:"channel_id,omitempty"`
+	OrganizerID     uuid.UUID          `json:"organizer_id"`
+	Title           string             `json:"title"`
+	Description     *string            `json:"description"`
+	Location        EventLocation      `json:"location"`
+	ScheduledAt     time.Time          `json:"scheduled_at"`
+	OriginatorTZ    string             `json:"originator_tz"`
+	DurationMinutes int                `json:"duration_minutes"`
+	AllDay          bool               `json:"all_day"`
+	Recurrence      *RecurrenceRule    `json:"recurrence"`
+	CallID          *uuid.UUID         `json:"call_id"`
+	Settings        *EventCallSettings `json:"settings,omitempty"`
+	Attendees       []EventAttendee    `json:"attendees"`
+	Reminders       []EventReminder    `json:"reminders"`
+	CreatedAt       time.Time          `json:"created_at"`
+	UpdatedAt       time.Time          `json:"updated_at"`
 }
 
 type EventOccurrence struct {

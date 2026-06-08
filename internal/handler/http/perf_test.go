@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -173,6 +174,15 @@ func TestPerfHandlerIngestRUM(t *testing.T) {
 		rec := doPerfReq(h.IngestRUM, token, "{not json")
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("want 400, got %d", rec.Code)
+		}
+	})
+
+	t.Run("persist error still returns 204 (fire-and-forget)", func(t *testing.T) {
+		svc := &fakePerfService{rumErr: errors.New("db down")}
+		h := NewPerfHandler(svc, "", token)
+		rec := doPerfReq(h.IngestRUM, token, validRumBody)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("want 204 despite persist error, got %d", rec.Code)
 		}
 	})
 }

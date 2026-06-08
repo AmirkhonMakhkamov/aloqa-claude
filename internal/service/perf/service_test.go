@@ -38,9 +38,15 @@ func TestIsCleanRouteTemplate(t *testing.T) {
 	clean := []string{
 		"/",
 		"/login",
-		"/w/:ws",
-		"/w/:ws/c/:channel",
-		"/w/:ws/calendar",
+		// Exact camelCase placeholders the FE routeTemplate normalizer emits
+		// (PARAM_NAME_BY_PARENT: :wsId/:chId/:dmId/:callId/:id/:token).
+		"/w/:wsId",
+		"/w/:wsId/c/:chId",
+		"/w/:wsId/d/:dmId",
+		"/w/:wsId/calls/:callId",
+		"/w/:wsId/c/:chId/threads/:id",
+		"/guest/c/:chId",
+		"/w/:wsId/calendar",
 		"/join/:token",
 		"/settings/account",
 		"/guest",

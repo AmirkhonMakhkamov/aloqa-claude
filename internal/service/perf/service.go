@@ -7,8 +7,9 @@
 // nothing about it.
 //
 // The guard is STRUCTURAL: it accepts the FE contract (route templates are
-// `/`-joined lowercase static words and `:placeholder` segments; metric keys are
-// dotted namespaces like `web-vital.lcp`) and rejects anything id-shaped (UUID,
+// `/`-joined lowercase static words plus camelCase `:placeholder` segments such
+// as `:wsId`/`:callId`; metric keys are dotted namespaces like `web-vital.lcp`)
+// and rejects anything id-shaped (UUID,
 // pure-numeric or long-digit-run segment, all-hex token, raw URL, query string,
 // uppercase). It does not import the FE route/landmark registry, so it cannot
 // prove a value is in the catalog — it can only prove a value is NOT a gross
@@ -184,9 +185,15 @@ var (
 	// Three+ consecutive digits in a route/metric segment signal a numeric id or
 	// epoch timestamp. Real route words and metric names never contain them.
 	longDigitRunRe = regexp.MustCompile(`[0-9]{3,}`)
-	// The FE only ever emits lowercase templates of `/`-joined segments.
-	allowedRouteRe = regexp.MustCompile(`^[a-z0-9:/_-]+$`)
-	placeholderRe  = regexp.MustCompile(`^:[a-z]+$`)
+	// The FE emits `/`-joined segments: lowercase static words plus camelCase
+	// `:placeholder` names (the route-template normalizer uses :wsId, :chId,
+	// :dmId, :callId, :id, :token — see routeTemplate.ts PARAM_NAME_BY_PARENT).
+	// Uppercase is therefore allowed in the charset, but only inside a
+	// `:placeholder` (a FE-authored segment NAME with no user data); a STATIC
+	// segment value must still be lowercase (staticSegRe), so an uppercase
+	// concrete id value is still rejected.
+	allowedRouteRe = regexp.MustCompile(`^[a-zA-Z0-9:/_-]+$`)
+	placeholderRe  = regexp.MustCompile(`^:[a-zA-Z]+$`)
 	staticSegRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 	pureNumericRe  = regexp.MustCompile(`^[0-9]+$`)
 	// An 8+ char all-hex segment is a hash/token-shaped id (catches non-UUID hex).

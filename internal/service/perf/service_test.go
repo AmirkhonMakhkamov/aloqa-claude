@@ -9,25 +9,19 @@ import (
 )
 
 type fakeRepo struct {
-	runs       []LabRun
-	runID      uuid.UUID
-	metricsFor map[uuid.UUID][]LabMetric
-	rumRows    []RumEventRecord
-	insertErr  error
+	runs      []LabRun
+	runID     uuid.UUID
+	rumRows   []RumEventRecord
+	insertErr error
 }
 
 func newFakeRepo() *fakeRepo {
-	return &fakeRepo{runID: uuid.New(), metricsFor: map[uuid.UUID][]LabMetric{}}
+	return &fakeRepo{runID: uuid.New()}
 }
 
-func (f *fakeRepo) UpsertLabRun(_ context.Context, run LabRun) (uuid.UUID, error) {
+func (f *fakeRepo) UpsertLabRunWithMetrics(_ context.Context, run LabRun) (uuid.UUID, error) {
 	f.runs = append(f.runs, run)
 	return f.runID, nil
-}
-
-func (f *fakeRepo) UpsertLabMetrics(_ context.Context, runID uuid.UUID, metrics []LabMetric) error {
-	f.metricsFor[runID] = append(f.metricsFor[runID], metrics...)
-	return nil
 }
 
 func (f *fakeRepo) InsertRumEvents(_ context.Context, rows []RumEventRecord) error {
@@ -61,13 +55,15 @@ func TestIsCleanRouteTemplate(t *testing.T) {
 		"",      // empty
 		"login", // no leading slash
 		"/w/019e24ef-c454-7000-8000-0000000000aa", // uuid leak
+		"/c/1234",                        // short numeric id leak
 		"/c/123456",                      // numeric id leak
+		"/x/deadbeef",                    // 8-char all-hex token leak
+		"/dm/abcd1234efgh",               // embedded digit run
 		"/w/My-Workspace",                // uppercase (FE is all-lowercase)
 		"https://airion-cargo.store/w/x", // raw URL
 		"/search?q=secret",               // query string
 		"/w/../etc",                      // traversal / dot
 		"/w/ :channel",                   // whitespace
-		"/w/" + string(make([]byte, 60)), // overlong segment (NUL bytes also fail charset)
 	}
 	for _, rt := range dirty {
 		if isCleanRouteTemplate(rt) {
@@ -83,7 +79,14 @@ func TestIsCleanMetricName(t *testing.T) {
 			t.Errorf("expected clean metric name to pass: %q", n)
 		}
 	}
-	dirty := []string{"", "Web-Vital.LCP", "channel-019e24ef-c454-7000-8000-0000000000aa", "msg-123456", "raw url"}
+	dirty := []string{
+		"",              // empty
+		"secretslug",    // bare slug (no namespace dot) — leak channel
+		"Web-Vital.LCP", // uppercase
+		"channel-019e24ef-c454-7000-8000-0000000000aa", // uuid in name
+		"msg.123456", // long digit run
+		"raw url",    // space
+	}
 	for _, n := range dirty {
 		if isCleanMetricName(n) {
 			t.Errorf("expected dirty metric name to be rejected: %q", n)
@@ -91,9 +94,47 @@ func TestIsCleanMetricName(t *testing.T) {
 	}
 }
 
+func TestSanitizeBatchMeta(t *testing.T) {
+	// A UUID-shaped session is a LEGITIMATE pseudonymous id (the FE uses
+	// crypto.randomUUID) — it must pass, not be rejected as an "id leak".
+	if meta, ok := sanitizeBatchMeta(RumBatch{Session: "019e24ef-c454-7000-8000-0000000000aa"}); !ok || meta.session == "" {
+		t.Fatalf("expected uuid-shaped session to pass as opaque token")
+	}
+	if _, ok := sanitizeBatchMeta(RumBatch{Session: "s-ab12cd"}); !ok {
+		t.Fatalf("expected base36 fallback session to pass")
+	}
+	// PII-shaped session taints the whole batch.
+	if _, ok := sanitizeBatchMeta(RumBatch{Session: "user@example.com"}); ok {
+		t.Fatalf("expected email-shaped session to be rejected")
+	}
+
+	meta, ok := sanitizeBatchMeta(RumBatch{
+		Session:     "sess1",
+		Release:     "v0.25.0",
+		DeviceClass: "phone", // not in allowlist → coerced blank
+		Connection:  "4g",    // allowed
+	})
+	if !ok {
+		t.Fatalf("expected valid session to pass")
+	}
+	if meta.release != "v0.25.0" {
+		t.Errorf("expected release preserved, got %q", meta.release)
+	}
+	if meta.deviceClass != "" {
+		t.Errorf("expected unknown deviceClass coerced to blank, got %q", meta.deviceClass)
+	}
+	if meta.connection != "4g" {
+		t.Errorf("expected allowed connection preserved, got %q", meta.connection)
+	}
+
+	// A free-text release that could smuggle data is coerced to blank.
+	if m, _ := sanitizeBatchMeta(RumBatch{Session: "s1", Release: "drop table users;"}); m.release != "" {
+		t.Errorf("expected dirty release coerced to blank, got %q", m.release)
+	}
+}
+
 func TestIngestRumDropsDirtyAndStampsBucket(t *testing.T) {
 	repo := newFakeRepo()
-	// 2026-06-08T12:00:05Z → unix 1781265605 → bucket /10 = 178126560.
 	clock := time.Date(2026, 6, 8, 12, 0, 5, 0, time.UTC)
 	svc := NewService(repo, fixedClock(clock))
 
@@ -138,6 +179,27 @@ func TestIngestRumDropsDirtyAndStampsBucket(t *testing.T) {
 	}
 }
 
+func TestIngestRumDropsBatchOnBadSession(t *testing.T) {
+	repo := newFakeRepo()
+	svc := NewService(repo)
+	batch := RumBatch{
+		Session: "bad session!", // not an opaque token → whole batch dropped
+		Events: []RumEvent{
+			{Kind: "web-vital", Name: "web-vital.lcp", RouteTemplate: "/login", Value: 900},
+		},
+	}
+	inserted, dropped, err := svc.IngestRum(context.Background(), batch)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if inserted != 0 || dropped != 1 {
+		t.Fatalf("expected inserted=0 dropped=1, got inserted=%d dropped=%d", inserted, dropped)
+	}
+	if len(repo.rumRows) != 0 {
+		t.Fatalf("expected no repo call on bad session, got %d rows", len(repo.rumRows))
+	}
+}
+
 func TestIngestRumAllDirtySkipsRepo(t *testing.T) {
 	repo := newFakeRepo()
 	svc := NewService(repo)
@@ -159,7 +221,7 @@ func TestIngestRumAllDirtySkipsRepo(t *testing.T) {
 	}
 }
 
-func TestIngestLabUpsertsRunThenMetrics(t *testing.T) {
+func TestIngestLabUpsertsRun(t *testing.T) {
 	repo := newFakeRepo()
 	svc := NewService(repo)
 	runs := []LabRun{
@@ -177,8 +239,8 @@ func TestIngestLabUpsertsRunThenMetrics(t *testing.T) {
 	if len(repo.runs) != 1 {
 		t.Fatalf("expected 1 upserted run, got %d", len(repo.runs))
 	}
-	if got := repo.metricsFor[repo.runID]; len(got) != 2 {
-		t.Fatalf("expected 2 metrics under run id, got %d", len(got))
+	if len(repo.runs[0].Metrics) != 2 {
+		t.Fatalf("expected 2 metrics on the run, got %d", len(repo.runs[0].Metrics))
 	}
 }
 

@@ -1,4 +1,4 @@
--- Migration: 056_perf_telemetry
+-- Migration: 057_perf_telemetry
 -- Performance telemetry storage (epic ALK-849, spec §11): lab CI runs and their
 -- metric rows, plus sampled, privacy-scrubbed field RUM events. Lab rows are
 -- written by CI via POST /api/v1/perf/lab (service token); RUM rows by the FE
@@ -26,19 +26,18 @@ ALTER TABLE perf_lab_runs
 
 -- Metric rows for a run. The full gate identity is
 -- (scenario, metric_key, route_template, profile, environment, case); scenario/
--- profile/environment live on the parent run, the rest here.
+-- profile/environment live on the parent run, the rest here. The identity tuple
+-- is the PRIMARY KEY — it is the natural key (no surrogate id) and is the
+-- ON CONFLICT target that dedupes metric rows on CI retry within the same run.
 CREATE TABLE perf_lab_metrics (
     run_id         uuid             NOT NULL REFERENCES perf_lab_runs(id) ON DELETE CASCADE,
     metric_key     text             NOT NULL CHECK (metric_key <> ''),
     route_template text             NOT NULL CHECK (route_template <> ''),
     "case"         text             NOT NULL DEFAULT 'default',
     value          double precision NOT NULL,
-    unit           text             NOT NULL CHECK (unit <> '')
+    unit           text             NOT NULL CHECK (unit <> ''),
+    PRIMARY KEY (run_id, metric_key, route_template, "case")
 );
-
--- Dedupe metric rows on CI retry within the same run.
-ALTER TABLE perf_lab_metrics
-    ADD CONSTRAINT perf_lab_metrics_identity_key UNIQUE (run_id, metric_key, route_template, "case");
 
 -- Sampled field events. Privacy invariant (spec §11): ONLY route template,
 -- release, metric key/value, coarse device_class, connection, and a pseudonymous

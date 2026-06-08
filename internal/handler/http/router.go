@@ -134,8 +134,11 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 	// static service token in constant time. Lab runs are POSTed by CI; RUM
 	// batches are forwarded by the FE BFF. Per-IP rate limiting is intentionally
 	// NOT applied here — all RUM traffic originates from the BFF's single IP, so
-	// an IP cap would throttle legitimate field events; the global per-IP cap
-	// above is the backstop and edge/per-session limiting is an infra concern.
+	// a per-IP cap would throttle legitimate field events. The trade-off: those
+	// events all share ONE IP's slice of the global 2400/min cap above, which a
+	// burst could exhaust; a token/endpoint-scoped or per-session limiter is the
+	// proper control and is deferred to the infra layer (handoff doc §2). The
+	// batch size (<=200 events) and lab metric count are bounded in the handlers.
 	if deps.Perf != nil {
 		r.Post("/api/v1/perf/lab", deps.Perf.IngestLab)
 		r.Post("/api/v1/perf/rum", deps.Perf.IngestRUM)

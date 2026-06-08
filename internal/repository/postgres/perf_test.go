@@ -44,26 +44,20 @@ func TestPerfRepoUpsertLabRunIsIdempotent(t *testing.T) {
 		},
 	}
 
-	firstID, err := repo.UpsertLabRun(ctx, run)
+	firstID, err := repo.UpsertLabRunWithMetrics(ctx, run)
 	if err != nil {
 		t.Fatalf("first upsert run: %v", err)
-	}
-	if err := repo.UpsertLabMetrics(ctx, firstID, run.Metrics); err != nil {
-		t.Fatalf("upsert metrics: %v", err)
 	}
 
 	// Same identity, changed branch + metric value → same run id, updated rows.
 	run.Branch = "feature/x"
 	run.Metrics[0].Value = 750
-	secondID, err := repo.UpsertLabRun(ctx, run)
+	secondID, err := repo.UpsertLabRunWithMetrics(ctx, run)
 	if err != nil {
 		t.Fatalf("second upsert run: %v", err)
 	}
 	if firstID != secondID {
 		t.Fatalf("expected same run id on conflict, got %s then %s", firstID, secondID)
-	}
-	if err := repo.UpsertLabMetrics(ctx, secondID, run.Metrics); err != nil {
-		t.Fatalf("re-upsert metrics: %v", err)
 	}
 
 	var runCount int

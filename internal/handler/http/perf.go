@@ -3,10 +3,12 @@ package http
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -42,6 +44,8 @@ const (
 	maxLabBodyBytes = 4 << 20 // 4 MB
 	// maxRumBodyBytes caps one sampled field beacon batch (<=200 events).
 	maxRumBodyBytes = 256 << 10 // 256 KB
+	// maxLabMetricsPerRun bounds a single run's metric array (DoS guard).
+	maxLabMetricsPerRun = 2000
 )
 
 type labMetricDTO struct {
@@ -86,7 +90,7 @@ func (h *PerfHandler) IngestLab(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	body, err := readLimitedBody(r, maxLabBodyBytes)
+	body, err := readLimitedBody(w, r, maxLabBodyBytes)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -120,7 +124,7 @@ func (h *PerfHandler) IngestRUM(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	body, err := readLimitedBody(r, maxRumBodyBytes)
+	body, err := readLimitedBody(w, r, maxRumBodyBytes)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -136,8 +140,10 @@ func (h *PerfHandler) IngestRUM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, _, err := h.svc.IngestRum(r.Context(), batch); err != nil {
-		writeErr(w, err)
-		return
+		// Fire-and-forget contract (spec §11): a failed persist must never surface
+		// to the sampled client (the BFF ignores the response). Log for
+		// observability and still return 204.
+		slog.ErrorContext(r.Context(), "perf rum ingest persist failed", "error", err)
 	}
 	writeNoContent(w)
 }
@@ -149,7 +155,14 @@ func (h *PerfHandler) authorize(r *http.Request, expected string) error {
 		return cerrors.Unavailable("perf ingest is not configured")
 	}
 	token := bearerToken(r)
-	if token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(expected)) != 1 {
+	if token == "" {
+		return cerrors.Unauthorized("invalid perf ingest token")
+	}
+	// Compare fixed-length SHA-256 digests so neither the comparison time nor the
+	// ConstantTimeCompare equal-length precheck leaks the configured token length.
+	want := sha256.Sum256([]byte(expected))
+	got := sha256.Sum256([]byte(token))
+	if subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
 		return cerrors.Unauthorized("invalid perf ingest token")
 	}
 	return nil
@@ -164,11 +177,12 @@ func bearerToken(r *http.Request) string {
 	return strings.TrimSpace(token)
 }
 
-func readLimitedBody(r *http.Request, maxBytes int64) ([]byte, error) {
-	body, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, maxBytes))
+func readLimitedBody(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]byte, error) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBytes))
 	if err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
+			// cerrors has no 413 constructor; map an oversize body to 400.
 			return nil, cerrors.InvalidInput("request body too large")
 		}
 		return nil, cerrors.InvalidInput("invalid request body")
@@ -213,6 +227,9 @@ func (d labRunDTO) toLabRun() (perf.LabRun, error) {
 	}
 	if strings.TrimSpace(d.Scenario) == "" {
 		return perf.LabRun{}, cerrors.InvalidInput("scenario is required")
+	}
+	if len(d.Metrics) > maxLabMetricsPerRun {
+		return perf.LabRun{}, cerrors.InvalidInput("too many metrics in run")
 	}
 
 	ts := time.Time{}

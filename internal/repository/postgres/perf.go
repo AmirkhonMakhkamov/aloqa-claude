@@ -27,10 +27,38 @@ func NewPerfRepo(pool *pgxpool.Pool) *PerfRepo {
 // Compile-time guarantee that PerfRepo satisfies the service port.
 var _ perfsvc.Repository = (*PerfRepo)(nil)
 
-// UpsertLabRun inserts or updates a run by its identity tuple
-// (commit, scenario, profile, environment) and returns the run id — the existing
-// id on conflict so a CI retry rewrites the same run.
-func (r *PerfRepo) UpsertLabRun(ctx context.Context, run perfsvc.LabRun) (uuid.UUID, error) {
+// UpsertLabRunWithMetrics upserts a run by its identity tuple
+// (commit, scenario, profile, environment) together with its metric rows in ONE
+// transaction, so a failed metric write rolls back the run upsert too. Returns
+// the run id — the existing id on conflict, so a CI retry rewrites the same rows.
+func (r *PerfRepo) UpsertLabRunWithMetrics(ctx context.Context, run perfsvc.LabRun) (uuid.UUID, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("postgres: begin perf lab tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	runID, err := upsertLabRunTx(ctx, tx, run)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if err := upsertLabMetricsTx(ctx, tx, runID, run.Metrics); err != nil {
+		return uuid.Nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return uuid.Nil, fmt.Errorf("postgres: commit perf lab tx: %w", err)
+	}
+	committed = true
+	return runID, nil
+}
+
+func upsertLabRunTx(ctx context.Context, tx pgx.Tx, run perfsvc.LabRun) (uuid.UUID, error) {
 	const query = `
 		INSERT INTO perf_lab_runs (id, commit, branch, profile, environment, scenario, ci_run_url, ts)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -46,7 +74,7 @@ func (r *PerfRepo) UpsertLabRun(ctx context.Context, run perfsvc.LabRun) (uuid.U
 	}
 
 	var runID uuid.UUID
-	if err := r.pool.QueryRow(ctx, query,
+	if err := tx.QueryRow(ctx, query,
 		id.New(),
 		run.Commit,
 		run.Branch,
@@ -61,9 +89,7 @@ func (r *PerfRepo) UpsertLabRun(ctx context.Context, run perfsvc.LabRun) (uuid.U
 	return runID, nil
 }
 
-// UpsertLabMetrics inserts or updates each metric row for a run, deduping on the
-// (run_id, metric_key, route_template, case) identity.
-func (r *PerfRepo) UpsertLabMetrics(ctx context.Context, runID uuid.UUID, metrics []perfsvc.LabMetric) error {
+func upsertLabMetricsTx(ctx context.Context, tx pgx.Tx, runID uuid.UUID, metrics []perfsvc.LabMetric) error {
 	if len(metrics) == 0 {
 		return nil
 	}
@@ -83,7 +109,7 @@ func (r *PerfRepo) UpsertLabMetrics(ctx context.Context, runID uuid.UUID, metric
 		batch.Queue(query, runID, m.Key, m.RouteTemplate, metricCase, m.Value, m.Unit)
 	}
 
-	br := r.pool.SendBatch(ctx, batch)
+	br := tx.SendBatch(ctx, batch)
 	defer func() { _ = br.Close() }()
 	for range metrics {
 		if _, err := br.Exec(); err != nil {

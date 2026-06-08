@@ -89,10 +89,14 @@ type EventReminder struct {
 // meaningful for aloqa_meet events; for any other location type the service
 // stores nil. Persisted as the calendar_events.settings JSONB (nil -> SQL NULL)
 // and echoed verbatim on the event response.
+//
+// breakout_rooms (the breakout enable toggle) is intentionally NOT a preset: a
+// meeting always starts with breakout enabled (StartCall force-enables it for
+// group/meeting calls; the host disables it at runtime), so it can never be
+// honored as a schedule preconfig and is therefore excluded.
 type EventCallSettings struct {
 	EntryMode        *EntryMode              `json:"entry_mode,omitempty"`
 	MuteOnJoin       *bool                   `json:"mute_on_join,omitempty"`
-	BreakoutRooms    *bool                   `json:"breakout_rooms,omitempty"`
 	BreakoutCreation *BreakoutCreationPolicy `json:"breakout_creation,omitempty"`
 	MaxBreakoutRooms *int                    `json:"max_breakout_rooms,omitempty"`
 }

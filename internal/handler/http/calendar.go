@@ -63,7 +63,6 @@ type recurrenceRequest struct {
 type eventCallSettingsRequest struct {
 	EntryMode        *entity.EntryMode              `json:"entry_mode"`
 	MuteOnJoin       *bool                          `json:"mute_on_join"`
-	BreakoutRooms    *bool                          `json:"breakout_rooms"`
 	BreakoutCreation *entity.BreakoutCreationPolicy `json:"breakout_creation"`
 	MaxBreakoutRooms *int                           `json:"max_breakout_rooms"`
 }
@@ -478,7 +477,6 @@ func validateEventCallSettingsRequest(req *eventCallSettingsRequest) (*entity.Ev
 	return &entity.EventCallSettings{
 		EntryMode:        req.EntryMode,
 		MuteOnJoin:       req.MuteOnJoin,
-		BreakoutRooms:    req.BreakoutRooms,
 		BreakoutCreation: req.BreakoutCreation,
 		MaxBreakoutRooms: req.MaxBreakoutRooms,
 	}, nil

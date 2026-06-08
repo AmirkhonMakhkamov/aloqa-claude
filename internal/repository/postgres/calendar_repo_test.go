@@ -63,10 +63,10 @@ func TestEventSettingsColumnRoundTrip(t *testing.T) {
 	if !strings.Contains(string(raw), "manual_admit") {
 		t.Fatalf("marshalled settings = %q, want entry_mode", string(raw))
 	}
-	// The omitted breakout_rooms bool must not appear as its own key (note
-	// max_breakout_rooms contains the same substring, so match the quoted key).
-	if strings.Contains(string(raw), `"breakout_rooms"`) {
-		t.Fatalf("marshalled settings = %q, omitted bool should not appear", string(raw))
+	// The omitted breakout_creation key must not appear; an absent pointer field
+	// stays out of the JSONB so the start-call overlay leaves the default intact.
+	if strings.Contains(string(raw), `"breakout_creation"`) {
+		t.Fatalf("marshalled settings = %q, omitted key should not appear", string(raw))
 	}
 	out, err := scanEventSettings(raw)
 	if err != nil {
@@ -81,8 +81,8 @@ func TestEventSettingsColumnRoundTrip(t *testing.T) {
 	if out.MaxBreakoutRooms == nil || *out.MaxBreakoutRooms != 4 {
 		t.Fatalf("round-trip MaxBreakoutRooms = %+v, want 4", out)
 	}
-	if out.BreakoutRooms != nil {
-		t.Fatalf("round-trip BreakoutRooms = %+v, want nil (omitted)", out)
+	if out.BreakoutCreation != nil {
+		t.Fatalf("round-trip BreakoutCreation = %+v, want nil (omitted)", out)
 	}
 }
 

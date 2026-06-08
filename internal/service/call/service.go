@@ -692,20 +692,21 @@ func (s *Service) userActiveCall(ctx context.Context, workspaceID, userID uuid.U
 	return nil, nil
 }
 
-func (s *Service) StartCall(
-	ctx context.Context,
-	workspaceID, userID uuid.UUID,
-	callType entity.CallType,
-	title string,
-	channelID *uuid.UUID,
-	settings entity.CallSettings,
-	joinPassword string,
-) (*entity.Call, error) {
+// FinalizeNewCallSettings resolves a caller-supplied call-settings tuple to the
+// concrete, server-authoritative values a freshly created call must carry. It is
+// the single source of truth for new-call finalisation: StartCall applies it on
+// every ad-hoc/channel/DM/meeting creation, and the calendar service applies it
+// on the scheduled-call (StartCallFromEvent) tx path that writes the call entity
+// directly — so both paths persist byte-identical settings for the same input.
+//
+// It does NOT validate (that is validateCallSettings' job, run before this on the
+// StartCall path) and never returns an error; callers that need validation must
+// run it on the raw settings first.
+func (s *Service) FinalizeNewCallSettings(callType entity.CallType, settings entity.CallSettings) entity.CallSettings {
+	// Group/meeting calls always start with breakout enabled; the host disables
+	// it at runtime. This is a server invariant, not a presettable option.
 	if callType == entity.CallTypeGroup || callType == entity.CallTypeMeeting {
 		settings.BreakoutRooms = true
-	}
-	if err := validateCallSettings(callType, settings); err != nil {
-		return nil, err
 	}
 	// Recording is only offerable when egress is configured server-side; advertise
 	// an honest capability so the FE control gate (settings.recording) is truthful (ALK-701).
@@ -744,6 +745,26 @@ func (s *Service) StartCall(
 	settings.WaitingRoom = entryMode == entity.EntryModeManualAdmit
 	settings.BreakoutCreation = settings.ResolvedBreakoutCreation()
 	settings.MaxBreakoutRooms = settings.ResolvedMaxBreakoutRooms()
+	return settings
+}
+
+func (s *Service) StartCall(
+	ctx context.Context,
+	workspaceID, userID uuid.UUID,
+	callType entity.CallType,
+	title string,
+	channelID *uuid.UUID,
+	settings entity.CallSettings,
+	joinPassword string,
+) (*entity.Call, error) {
+	if err := validateCallSettings(callType, settings); err != nil {
+		return nil, err
+	}
+	// Resolve the entry mode here too so the password branch below sees the
+	// concrete mode; FinalizeNewCallSettings resolves it identically before
+	// persisting so the two stay in lock-step.
+	settings = s.FinalizeNewCallSettings(callType, settings)
+	entryMode := settings.EntryMode
 
 	var joinPasswordHash string
 	if entryMode == entity.EntryModePassword {

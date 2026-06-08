@@ -1,7 +1,7 @@
 -- 056: optional per-event call-settings preconfig (ALK-819 / S11).
 --
 -- A calendar event whose location is `aloqa_meet` may carry a subset of the
--- call settings (entry_mode, mute_on_join, breakout_rooms, breakout_creation,
+-- call settings (entry_mode, mute_on_join, breakout_creation,
 -- max_breakout_rooms). When a call is started from the event the service
 -- overlays these onto the canonical meeting defaults and normalises the result,
 -- instead of always using hardcoded defaults.

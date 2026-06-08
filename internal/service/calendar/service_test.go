@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -629,6 +630,145 @@ func TestStartCallFromEventTxAndNonTxPathsProduceIdenticalSettings(t *testing.T)
 	if !callSettingsEqual(nonTxCall.Settings, txStored.Settings) {
 		t.Fatalf("settings diverge between paths:\n non-tx = %+v\n     tx = %+v", nonTxCall.Settings, txStored.Settings)
 	}
+}
+
+// TestStartCallFromEvent_PasswordEntryMode_RejectedOnBothPaths guards the
+// blocking ALK-819 review finding: the HTTP layer rejects entry_mode=password for
+// scheduled events, but a corrupted/legacy event settings row could still carry
+// it. A scheduled meeting has no join password available at start, so BOTH the tx
+// and non-tx StartCallFromEvent paths must refuse such a row (same InvalidInput
+// class) and create NO call, rather than the tx path persisting an unusable
+// password-mode call with no JoinPasswordHash.
+func TestStartCallFromEvent_PasswordEntryMode_RejectedOnBothPaths(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	organizerID := uuid.New()
+	password := entity.EntryModePassword
+
+	// newEvent builds an event whose STORED settings carry entry_mode=password,
+	// bypassing the HTTP boundary validation by setting the entity field directly.
+	newEvent := func(eventID uuid.UUID) *entity.CalendarEvent {
+		return &entity.CalendarEvent{
+			ID:          eventID,
+			WorkspaceID: workspaceID,
+			OrganizerID: organizerID,
+			Title:       "Planning",
+			Location:    entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			Settings:    &entity.EventCallSettings{EntryMode: &password},
+		}
+	}
+
+	t.Run("non-tx path", func(t *testing.T) {
+		eventID := uuid.New()
+		repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{eventID: newEvent(eventID)}}
+		calls := &fakeCallService{calls: map[uuid.UUID]*entity.Call{}}
+		svc := NewService(repo, fakeMembers{}, calls, noopPublisher{})
+
+		call, err := svc.StartCallFromEvent(ctx, workspaceID, eventID, organizerID)
+		if err == nil {
+			t.Fatalf("StartCallFromEvent error = nil, want rejection for password entry mode")
+		}
+		if !hasCode(err, cerrors.CodeInvalidInput) {
+			t.Fatalf("error code = %v, want INVALID_INPUT", err)
+		}
+		if call != nil {
+			t.Fatalf("call = %+v, want nil", call)
+		}
+		if len(calls.calls) != 0 {
+			t.Fatalf("calls created = %d, want 0", len(calls.calls))
+		}
+		if calls.starts != 0 {
+			t.Fatalf("StartCall invocations = %d, want 0 (rejected before StartCall)", calls.starts)
+		}
+	})
+
+	t.Run("tx path", func(t *testing.T) {
+		eventID := uuid.New()
+		txManager := newCalendarCallTxManager(newEvent(eventID))
+		calls := &fakeCallService{calls: map[uuid.UUID]*entity.Call{}}
+		svc := NewService(txManager.calendars.fakeCalendarRepo, fakeMembers{}, calls, noopPublisher{})
+		svc.SetTransactionManager(txManager)
+
+		call, err := svc.StartCallFromEvent(ctx, workspaceID, eventID, organizerID)
+		if err == nil {
+			t.Fatalf("StartCallFromEvent error = nil, want rejection for password entry mode")
+		}
+		if !hasCode(err, cerrors.CodeInvalidInput) {
+			t.Fatalf("error code = %v, want INVALID_INPUT", err)
+		}
+		if call != nil {
+			t.Fatalf("call = %+v, want nil", call)
+		}
+		if len(txManager.calls.calls) != 0 {
+			t.Fatalf("calls persisted in tx = %d, want 0", len(txManager.calls.calls))
+		}
+		if got := txManager.calendars.events[eventID].CallID; got != nil {
+			t.Fatalf("event call_id after rejection = %s, want nil", *got)
+		}
+	})
+}
+
+// TestCloneEventCallSettings_DeepCopy guards the ALK-819 review fix that derived
+// event rows (e.g. a moved recurring occurrence) must own their own settings
+// pointers and never alias the parent's. Mutating any cloned pointer field must
+// not bleed back into the original.
+func TestCloneEventCallSettings_DeepCopy(t *testing.T) {
+	t.Run("nil clones to nil", func(t *testing.T) {
+		if got := cloneEventCallSettings(nil); got != nil {
+			t.Fatalf("cloneEventCallSettings(nil) = %+v, want nil", got)
+		}
+	})
+
+	t.Run("fully-populated deep copy", func(t *testing.T) {
+		entryMode := entity.EntryModeManualAdmit
+		breakoutCreation := entity.BreakoutCreationEveryone
+		src := &entity.EventCallSettings{
+			EntryMode:        &entryMode,
+			MuteOnJoin:       boolPtr(true),
+			BreakoutCreation: &breakoutCreation,
+			MaxBreakoutRooms: intPtr(4),
+		}
+
+		clone := cloneEventCallSettings(src)
+		if clone == nil {
+			t.Fatalf("cloneEventCallSettings returned nil for populated source")
+		}
+		if !reflect.DeepEqual(src, clone) {
+			t.Fatalf("clone not equal by value:\n src = %+v\n clone = %+v", src, clone)
+		}
+
+		// No shared pointers: every pointer field must be a distinct allocation.
+		if src.EntryMode == clone.EntryMode {
+			t.Fatalf("EntryMode pointer aliased")
+		}
+		if src.MuteOnJoin == clone.MuteOnJoin {
+			t.Fatalf("MuteOnJoin pointer aliased")
+		}
+		if src.BreakoutCreation == clone.BreakoutCreation {
+			t.Fatalf("BreakoutCreation pointer aliased")
+		}
+		if src.MaxBreakoutRooms == clone.MaxBreakoutRooms {
+			t.Fatalf("MaxBreakoutRooms pointer aliased")
+		}
+
+		// Mutating each cloned field must not affect the original.
+		*clone.EntryMode = entity.EntryModeOpen
+		*clone.MuteOnJoin = false
+		*clone.BreakoutCreation = entity.BreakoutCreationHost
+		*clone.MaxBreakoutRooms = 1
+		if *src.EntryMode != entity.EntryModeManualAdmit {
+			t.Fatalf("src.EntryMode mutated to %v via clone", *src.EntryMode)
+		}
+		if !*src.MuteOnJoin {
+			t.Fatalf("src.MuteOnJoin mutated to %v via clone", *src.MuteOnJoin)
+		}
+		if *src.BreakoutCreation != entity.BreakoutCreationEveryone {
+			t.Fatalf("src.BreakoutCreation mutated to %v via clone", *src.BreakoutCreation)
+		}
+		if *src.MaxBreakoutRooms != 4 {
+			t.Fatalf("src.MaxBreakoutRooms mutated to %v via clone", *src.MaxBreakoutRooms)
+		}
+	})
 }
 
 // callSettingsEqual compares two CallSettings by value, dereferencing the
@@ -2353,6 +2493,32 @@ func (s *fakeCallService) finalize(callType entity.CallType, settings entity.Cal
 
 func (s *fakeCallService) FinalizeNewCallSettings(callType entity.CallType, settings entity.CallSettings) entity.CallSettings {
 	return s.finalize(callType, settings)
+}
+
+// ValidateNewCallSettings mirrors call.Service.ValidateNewCallSettings (a thin
+// wrapper over the package-private validateCallSettings) so the calendar service's
+// scheduled-settings chokepoint runs the SAME field validation against the fake
+// that it would against the real call service (ALK-819 review). It is a pure
+// function (no shared state) and safe to call without the mutex.
+func (s *fakeCallService) ValidateNewCallSettings(callType entity.CallType, settings entity.CallSettings) error {
+	switch callType {
+	case entity.CallTypeOneToOne, entity.CallTypeGroup, entity.CallTypeMeeting, entity.CallTypeWebinar, entity.CallTypeSelector:
+	default:
+		return cerrors.InvalidInput("invalid call type")
+	}
+	if settings.MaxParticipants < 0 {
+		return cerrors.InvalidInput("max_participants cannot be negative")
+	}
+	if settings.EntryMode != "" && !settings.EntryMode.Valid() {
+		return cerrors.InvalidInput("invalid entry_mode")
+	}
+	if settings.BreakoutCreation != "" && !settings.BreakoutCreation.Valid() {
+		return cerrors.InvalidInput("invalid breakout_creation")
+	}
+	if settings.MaxBreakoutRooms != 0 && (settings.MaxBreakoutRooms < 1 || settings.MaxBreakoutRooms > 8) {
+		return cerrors.InvalidInput("max_breakout_rooms must be between 1 and 8")
+	}
+	return nil
 }
 
 func (s *fakeCallService) GetCall(_ context.Context, _ uuid.UUID, callID, _ uuid.UUID) (*entity.Call, error) {

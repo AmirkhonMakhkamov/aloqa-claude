@@ -342,6 +342,28 @@ func TestCreateEventHandler_DropsSettingsForNonMeet(t *testing.T) {
 	}
 }
 
+// TestCreateEventHandler_RejectsMalformedSettingsForNonMeet guards the ALK-819
+// review create/update symmetry fix: a malformed settings payload must yield the
+// same 400 on create as on update even when the event is non-meet. Previously the
+// create path dropped settings for a non-meet location WITHOUT validating field
+// values, so a bad payload was silently swallowed on create but rejected on
+// update. Now create validates-then-drops like update.
+func TestCreateEventHandler_RejectsMalformedSettingsForNonMeet(t *testing.T) {
+	f := newCalendarHTTPFixture()
+	body := `{"calendar_id":"` + uuid.NewString() + `","title":"Sync",` +
+		`"location":{"type":"external_link","value":"https://example.com"},` +
+		`"scheduled_at":"2026-06-01T10:00:00Z","duration_minutes":30,` +
+		`"settings":{"max_breakout_rooms":9}}`
+	res := f.post("/events", body)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400 (validate before non-meet drop)", res.Code, res.Body.String())
+	}
+	_, msg := decodeErrBody(t, res)
+	if !strings.Contains(msg, "max_breakout_rooms") {
+		t.Fatalf("message=%q missing max_breakout_rooms rejection", msg)
+	}
+}
+
 func createMeetEventForUpdate(t *testing.T, f calendarHTTPFixture) uuid.UUID {
 	t.Helper()
 	body := `{"calendar_id":"` + uuid.NewString() + `","title":"Planning",` +

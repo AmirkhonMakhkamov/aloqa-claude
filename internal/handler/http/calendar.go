@@ -434,19 +434,26 @@ func createEventInputFromRequest(req createEventRequest) (calendarservice.Create
 }
 
 // eventCallSettingsFromRequest validates and maps the optional per-event
-// call-settings preconfig (ALK-819 / S11) for the create path. It returns nil
-// (drop) when there is no preconfig or the event is not an aloqa_meet — a
-// non-meet event never carries call settings.
+// call-settings preconfig (ALK-819 / S11) for the create path. It validates the
+// field values FIRST and only then applies the non-meet drop, mirroring the
+// update path (which validates before the service drops). This keeps the two
+// paths symmetric: a malformed settings payload yields the same 400 whether the
+// event is aloqa_meet or not, instead of being silently swallowed on create when
+// the location happens to be non-meet (ALK-819 review).
 func eventCallSettingsFromRequest(req *eventCallSettingsRequest, locationType entity.EventLocationType) (*entity.EventCallSettings, error) {
 	if req == nil {
 		return nil, nil
 	}
+	settings, err := validateEventCallSettingsRequest(req)
+	if err != nil {
+		return nil, err
+	}
 	if locationType != entity.EventLocationAloqaMeet {
-		// Non-meet events cannot host a call; drop any preconfig silently so a
+		// Non-meet events cannot host a call; drop the (now-validated) preconfig so a
 		// stale settings payload on a relocated event never persists.
 		return nil, nil
 	}
-	return validateEventCallSettingsRequest(req)
+	return settings, nil
 }
 
 // validateEventCallSettingsRequest performs the location-independent field

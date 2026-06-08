@@ -31,6 +31,11 @@ type CallService interface {
 	// resolution). The tx start-call path applies it directly so it persists the
 	// SAME settings as StartCall does on the non-tx path (ALK-819 review).
 	FinalizeNewCallSettings(callType entity.CallType, settings entity.CallSettings) entity.CallSettings
+	// ValidateNewCallSettings runs the call service's per-field settings validation
+	// (the same StartCall runs on the non-tx path). The tx start-call path builds
+	// the call inline and must run it explicitly so a corrupted/legacy event
+	// settings row can't persist a call the non-tx path would reject (ALK-819 review).
+	ValidateNewCallSettings(callType entity.CallType, settings entity.CallSettings) error
 	GetCall(ctx context.Context, workspaceID, callID, userID uuid.UUID) (*entity.Call, error)
 	EnsureLiveKitRoomRequired(ctx context.Context, call *entity.Call) error
 	DeleteLiveKitRoom(ctx context.Context, callID uuid.UUID) error
@@ -781,10 +786,15 @@ func (s *Service) StartCallFromEvent(ctx context.Context, workspaceID, eventID, 
 		}
 	}
 
-	// Apply the event's call-settings preconfig (if any) on top of the canonical
-	// meeting defaults and hand the result to StartCall, which finalises it. The
-	// tx path below finalises the SAME base via FinalizeNewCallSettings directly,
-	// so both paths persist identical settings (ALK-819 / S11 + review).
+	// Validate + reject password entry mode up front via the shared chokepoint so
+	// this path returns the SAME error class as the tx path for a corrupted/legacy
+	// event settings row (StartCall would also reject password mode for lack of a
+	// join password, but going through the helper makes the rejection explicit and
+	// consistent across both paths). Then hand the pre-finalisation base to
+	// StartCall, which finalises it identically (ALK-819 / S11 + review).
+	if _, err := s.resolveScheduledCallSettings(eventEntity.Settings); err != nil {
+		return nil, err
+	}
 	callSettings := baseWithEventOverlay(eventEntity.Settings)
 	callEntity, err := s.calls.StartCall(ctx, workspaceID, initiatorID, entity.CallTypeMeeting, eventEntity.Title, eventEntity.ChannelID, callSettings, "")
 	if err != nil {
@@ -803,6 +813,15 @@ func (s *Service) StartCallFromEvent(ctx context.Context, workspaceID, eventID, 
 	return callEntity, nil
 }
 
+// startCallFromEventTx builds and persists the scheduled call inline within a
+// single transaction (rather than delegating to call.Service.StartCall). It uses
+// EVENT-SCOPED idempotency: the call is reused when the locked event already
+// points at a non-ended call (the eventEntity.CallID != nil branch below), so
+// concurrent "start" presses on the same scheduled event converge on one call.
+// This intentionally does NOT run StartCall's per-channel and per-user
+// single-active-call guards (9b/9c): a scheduled meeting is keyed by its event,
+// not by its channel or initiator, so those ad-hoc guards do not apply here. The
+// asymmetry with StartCall is deliberate, not an oversight (ALK-819 review).
 func (s *Service) startCallFromEventTx(ctx context.Context, workspaceID, eventID, initiatorID uuid.UUID) (*entity.Call, error) {
 	var callEntity *entity.Call
 	var preparedLiveKitRoomID *uuid.UUID
@@ -840,16 +859,18 @@ func (s *Service) startCallFromEventTx(ctx context.Context, workspaceID, eventID
 		now := time.Now().UTC()
 		scheduledCallID := eventEntity.ID
 		// This path writes callEntity.Settings directly via scope.Calls().Create
-		// without going through call.Service.StartCall, so the call-service
-		// finaliser MUST be applied here on the same base StartCall receives on the
-		// non-tx path: it overlays the event preconfig onto the meeting defaults and
-		// resolves entry_mode/waiting_room/breakout + the server invariants. Routing
-		// both paths through FinalizeNewCallSettings guarantees identical persisted
-		// settings (ALK-819 / S11 + review). s.calls is required for this path.
-		if s.calls == nil {
-			return cerrors.Unavailable("call service is not configured")
+		// without going through call.Service.StartCall, so the call-service settings
+		// validation + finaliser MUST be applied here on the same base StartCall
+		// receives on the non-tx path: resolveScheduledCallSettings overlays the
+		// event preconfig onto the meeting defaults, validates the fields, resolves
+		// entry_mode/waiting_room/breakout + the server invariants, and rejects
+		// password entry mode. Routing both paths through it guarantees identical
+		// persisted settings and the same rejection class (ALK-819 / S11 + review).
+		// s.calls is required for this path (the helper enforces it).
+		callSettings, err := s.resolveScheduledCallSettings(eventEntity.Settings)
+		if err != nil {
+			return err
 		}
-		callSettings := s.calls.FinalizeNewCallSettings(entity.CallTypeMeeting, baseWithEventOverlay(eventEntity.Settings))
 		callEntity = &entity.Call{
 			ID:              id.New(),
 			WorkspaceID:     workspaceID,
@@ -1083,6 +1104,30 @@ func baseWithEventOverlay(eventSettings *entity.EventCallSettings) entity.CallSe
 	base := meetingDefaultCallSettings()
 	overlayEventSettings(&base, eventSettings)
 	return base
+}
+
+// resolveScheduledCallSettings is the single chokepoint both StartCallFromEvent
+// paths run to turn a stored event preconfig into the finalised, validated call
+// settings tuple. It (1) validates the pre-finalisation overlay with the call
+// service's field validation (the same StartCall runs), (2) finalises it, and
+// (3) rejects password entry mode — a scheduled meeting can never carry a join
+// password (none is available at scheduled start), so a corrupted/legacy event
+// settings row with entry_mode=password is refused on BOTH paths with the same
+// InvalidInput error class rather than persisting an unusable password-mode call.
+// Returns the finalised settings the call row must carry (ALK-819 review).
+func (s *Service) resolveScheduledCallSettings(eventSettings *entity.EventCallSettings) (entity.CallSettings, error) {
+	if s.calls == nil {
+		return entity.CallSettings{}, cerrors.Unavailable("call service is not configured")
+	}
+	base := baseWithEventOverlay(eventSettings)
+	if err := s.calls.ValidateNewCallSettings(entity.CallTypeMeeting, base); err != nil {
+		return entity.CallSettings{}, err
+	}
+	finalized := s.calls.FinalizeNewCallSettings(entity.CallTypeMeeting, base)
+	if finalized.EntryMode == entity.EntryModePassword {
+		return entity.CallSettings{}, cerrors.InvalidInput("scheduled meetings cannot use password entry mode")
+	}
+	return finalized, nil
 }
 
 func normalizeOriginatorTZ(originatorTZ string) string {

@@ -433,6 +433,16 @@ func (s *Service) ensureCollaborationChannelAccess(ctx context.Context, ch *enti
 // passwords are rejected as invalid input rather than failing to hash. #4.
 const maxJoinPasswordBytes = 72
 
+// ValidateNewCallSettings exposes the package-private validateCallSettings on the
+// service so other services that build a call inline (e.g. the calendar service's
+// transactional StartCallFromEvent path, which writes the call row directly rather
+// than going through StartCall) can run the SAME field validation StartCall runs.
+// Without this the tx path could persist a settings tuple StartCall would reject,
+// diverging the two scheduled-call paths (ALK-819 review).
+func (s *Service) ValidateNewCallSettings(callType entity.CallType, settings entity.CallSettings) error {
+	return validateCallSettings(callType, settings)
+}
+
 func validateCallSettings(callType entity.CallType, settings entity.CallSettings) error {
 	switch callType {
 	case entity.CallTypeOneToOne, entity.CallTypeGroup, entity.CallTypeMeeting, entity.CallTypeWebinar, entity.CallTypeSelector:

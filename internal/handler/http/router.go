@@ -30,6 +30,7 @@ type RouterDeps struct {
 	Admin            *AdminHandler
 	Metrics          *MetricsHandler
 	Guests           *GuestHandler
+	Perf             *PerfHandler
 	WS               *wshandler.Handler
 	Validator        middleware.TokenValidator
 	PersonalResolver middleware.PersonalWorkspaceResolver
@@ -127,6 +128,20 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 	// so no global auth middleware applies.
 	if deps.LiveKit != nil {
 		r.Post(deps.LiveKit.WebhookPath(), deps.LiveKit.Webhook)
+	}
+
+	// Perf telemetry ingest (public). No user session: each handler verifies a
+	// static service token in constant time. Lab runs are POSTed by CI; RUM
+	// batches are forwarded by the FE BFF. Per-IP rate limiting is intentionally
+	// NOT applied here — all RUM traffic originates from the BFF's single IP, so
+	// a per-IP cap would throttle legitimate field events. The trade-off: those
+	// events all share ONE IP's slice of the global 2400/min cap above, which a
+	// burst could exhaust; a token/endpoint-scoped or per-session limiter is the
+	// proper control and is deferred to the infra layer (handoff doc §2). The
+	// batch size (<=200 events) and lab metric count are bounded in the handlers.
+	if deps.Perf != nil {
+		r.Post("/api/v1/perf/lab", deps.Perf.IngestLab)
+		r.Post("/api/v1/perf/rum", deps.Perf.IngestRUM)
 	}
 
 	// Authenticated routes.

@@ -1064,22 +1064,18 @@ type mentionableMemberSearcher interface {
 	) ([]entity.MentionSuggestion, error)
 }
 
-// SearchChannelMentions returns channel members matching the query for @mention
-// autocomplete (ALK-838). Direct messages have no mention popup, so it returns
-// an empty list for dm/group_dm channels. Requires view access to the channel.
+// SearchChannelMentions returns members of the conversation matching the query
+// for @mention autocomplete (ALK-838), excluding the requester. Works for both
+// channels and direct messages (the DM's participants); the composer decides
+// when to open the popup. Requires view access to the channel.
 func (s *Service) SearchChannelMentions(
 	ctx context.Context,
 	channelID, userID uuid.UUID,
 	query string,
 	limit int,
 ) ([]entity.MentionSuggestion, error) {
-	decision, err := s.authorizeChannel(ctx, channelID, userID, accesspolicy.CapabilityView)
-	if err != nil {
+	if _, err := s.authorizeChannel(ctx, channelID, userID, accesspolicy.CapabilityView); err != nil {
 		return nil, err
-	}
-
-	if decision.Channel.Type == entity.ChannelTypeDM || decision.Channel.Type == entity.ChannelTypeGroupDM {
-		return []entity.MentionSuggestion{}, nil
 	}
 
 	if limit <= 0 {

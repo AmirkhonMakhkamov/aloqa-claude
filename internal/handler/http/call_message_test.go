@@ -231,7 +231,7 @@ func (r *fakeHTTPWorkspaceRepo) GetMember(_ context.Context, workspaceID, userID
 	return nil, cerrors.NotFound("workspace member not found")
 }
 
-func (r *fakeHTTPWorkspaceRepo) ListMembers(context.Context, uuid.UUID, pagination.Params) ([]entity.WorkspaceMember, error) {
+func (r *fakeHTTPWorkspaceRepo) ListMembers(context.Context, uuid.UUID, pagination.Params, string) ([]entity.WorkspaceMember, error) {
 	return nil, nil
 }
 
@@ -309,6 +309,21 @@ func (r *fakeHTTPCallRepo) UpdateSettings(_ context.Context, id uuid.UUID, setti
 	return cerrors.NotFound("call not found")
 }
 func (r *fakeHTTPCallRepo) End(context.Context, uuid.UUID) error { return nil }
+func (r *fakeHTTPCallRepo) UpdateAccessLevel(context.Context, uuid.UUID, entity.AccessLevel) error {
+	return nil
+}
+func (r *fakeHTTPCallRepo) AddInvitedMembers(context.Context, uuid.UUID, []uuid.UUID, uuid.UUID) error {
+	return nil
+}
+func (r *fakeHTTPCallRepo) IsInvited(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return false, nil
+}
+func (r *fakeHTTPCallRepo) ListInvitedMembers(context.Context, uuid.UUID) ([]uuid.UUID, error) {
+	return nil, nil
+}
+func (r *fakeHTTPCallRepo) SnapshotConnectedIntoInvited(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
 func (r *fakeHTTPCallRepo) AddParticipant(_ context.Context, p *entity.CallParticipant) error {
 	r.participants[[2]uuid.UUID{p.CallID, p.UserID}] = p
 	return nil
@@ -353,6 +368,9 @@ func (r *fakeHTTPCallRepo) UpdateParticipantMedia(context.Context, uuid.UUID, bo
 func (r *fakeHTTPCallRepo) SetCanScreenShare(context.Context, uuid.UUID, bool) error { return nil }
 
 func (r *fakeHTTPCallRepo) SetFeaturedShareUserID(context.Context, uuid.UUID, *uuid.UUID) error {
+	return nil
+}
+func (r *fakeHTTPCallRepo) SetPinnedParticipantUserID(context.Context, uuid.UUID, *uuid.UUID) error {
 	return nil
 }
 
@@ -410,6 +428,9 @@ func (r *fakeHTTPCallMessageRepo) GetByID(_ context.Context, id uuid.UUID) (*ent
 type fakeHTTPBreakoutRepo struct{}
 
 func (fakeHTTPBreakoutRepo) Create(context.Context, *entity.BreakoutRoom) error { return nil }
+func (fakeHTTPBreakoutRepo) CreateRoomsWithinCap(context.Context, uuid.UUID, int, []entity.BreakoutRoom) error {
+	return nil
+}
 func (fakeHTTPBreakoutRepo) GetByID(context.Context, uuid.UUID) (*entity.BreakoutRoom, error) {
 	return nil, cerrors.NotFound("breakout room not found")
 }

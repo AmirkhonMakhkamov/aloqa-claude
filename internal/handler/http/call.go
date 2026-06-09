@@ -217,10 +217,12 @@ type startCallSettings struct {
 }
 
 type startCallRequest struct {
-	Type      entity.CallType   `json:"type"`
-	Title     string            `json:"title"`
-	ChannelID *string           `json:"channel_id,omitempty"`
-	Settings  startCallSettings `json:"settings"`
+	Type             entity.CallType   `json:"type"`
+	Title            string            `json:"title"`
+	ChannelID        *string           `json:"channel_id,omitempty"`
+	AccessLevel      *string           `json:"access_level,omitempty"`
+	InvitedMemberIDs []string          `json:"invited_member_ids,omitempty"`
+	Settings         startCallSettings `json:"settings"`
 }
 
 type joinCallRequest struct {
@@ -249,7 +251,24 @@ func (h *CallHandler) Start(w http.ResponseWriter, r *http.Request) {
 		channelID = &parsed
 	}
 
-	c, err := h.svc.StartCall(r.Context(), wsID, userID, req.Type, req.Title, channelID, req.Settings.CallSettings, req.Settings.Password)
+	accessOptions := call.StartCallAccessOptions{}
+	if req.AccessLevel != nil {
+		accessLevel := entity.AccessLevel(*req.AccessLevel)
+		accessOptions.AccessLevel = accessLevel
+	}
+	if len(req.InvitedMemberIDs) > 0 {
+		accessOptions.InvitedMemberIDs = make([]uuid.UUID, 0, len(req.InvitedMemberIDs))
+		for _, rawUserID := range req.InvitedMemberIDs {
+			parsed, err := id.Parse(rawUserID)
+			if err != nil {
+				writeErr(w, err)
+				return
+			}
+			accessOptions.InvitedMemberIDs = append(accessOptions.InvitedMemberIDs, parsed)
+		}
+	}
+
+	c, err := h.svc.StartCallWithAccess(r.Context(), wsID, userID, req.Type, req.Title, channelID, req.Settings.CallSettings, req.Settings.Password, accessOptions)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -632,7 +651,17 @@ type updateMediaRequest struct {
 }
 
 type updateSettingsRequest struct {
-	BreakoutRooms *bool `json:"breakout_rooms,omitempty"`
+	EntryMode              *string `json:"entry_mode,omitempty"`
+	MuteOnJoin             *bool   `json:"mute_on_join,omitempty"`
+	BreakoutRooms          *bool   `json:"breakout_rooms,omitempty"`
+	BreakoutCreation       *string `json:"breakout_creation,omitempty"`
+	MaxBreakoutRooms       *int    `json:"max_breakout_rooms,omitempty"`
+	AccessLevel            *string `json:"access_level,omitempty"`
+	ScreenSharing          *bool   `json:"screen_sharing,omitempty"`
+	Chat                   *bool   `json:"chat,omitempty"`
+	MembersCanUnmuteMic    *bool   `json:"members_can_unmute_mic,omitempty"`
+	MembersCanEnableCamera *bool   `json:"members_can_enable_camera,omitempty"`
+	WhoCanAddGuests        *string `json:"who_can_add_guests,omitempty"`
 }
 
 func (h *CallHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
@@ -656,9 +685,33 @@ func (h *CallHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated, err := h.svc.UpdateCallSettings(r.Context(), callID, userID, call.CallSettingsPatch{
-		BreakoutRooms: req.BreakoutRooms,
-	})
+	patch := call.CallSettingsPatch{
+		MuteOnJoin:             req.MuteOnJoin,
+		BreakoutRooms:          req.BreakoutRooms,
+		MaxBreakoutRooms:       req.MaxBreakoutRooms,
+		ScreenSharing:          req.ScreenSharing,
+		Chat:                   req.Chat,
+		MembersCanUnmuteMic:    req.MembersCanUnmuteMic,
+		MembersCanEnableCamera: req.MembersCanEnableCamera,
+	}
+	if req.EntryMode != nil {
+		mode := entity.EntryMode(*req.EntryMode)
+		patch.EntryMode = &mode
+	}
+	if req.BreakoutCreation != nil {
+		policy := entity.BreakoutCreationPolicy(*req.BreakoutCreation)
+		patch.BreakoutCreation = &policy
+	}
+	if req.AccessLevel != nil {
+		level := entity.AccessLevel(*req.AccessLevel)
+		patch.AccessLevel = &level
+	}
+	if req.WhoCanAddGuests != nil {
+		policy := entity.WhoCanAddGuestsPolicy(*req.WhoCanAddGuests)
+		patch.WhoCanAddGuests = &policy
+	}
+
+	updated, err := h.svc.UpdateCallSettings(r.Context(), callID, userID, patch)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -693,6 +746,44 @@ func (h *CallHandler) UpdateMedia(w http.ResponseWriter, r *http.Request) {
 
 type updateParticipantRoleRequest struct {
 	Role entity.CallRole `json:"role"`
+}
+
+type addParticipantsRequest struct {
+	UserIDs []uuid.UUID `json:"user_ids"`
+}
+
+const maxInviteParticipants = 100
+
+func (h *CallHandler) AddParticipants(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	var req addParticipantsRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if len(req.UserIDs) == 0 {
+		writeErr(w, cerrors.InvalidInput("user_ids is required"))
+		return
+	}
+	if len(req.UserIDs) > maxInviteParticipants {
+		writeErr(w, cerrors.InvalidInput("too many user_ids"))
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+	result, err := h.svc.InviteParticipants(r.Context(), workspaceID, callID, userID, req.UserIDs)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, result)
 }
 
 func (h *CallHandler) UpdateParticipantRole(w http.ResponseWriter, r *http.Request) {
@@ -750,6 +841,23 @@ func (h *CallHandler) TransferHost(w http.ResponseWriter, r *http.Request) {
 	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
 
 	if err := h.svc.TransferHost(r.Context(), workspaceID, callID, userID, targetUserID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
+func (h *CallHandler) DeclineCall(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+	if err := h.svc.DeclineCall(r.Context(), workspaceID, callID, userID); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -868,6 +976,83 @@ func (h *CallHandler) RevokeScreenShare(w http.ResponseWriter, r *http.Request) 
 	writeNoContent(w)
 }
 
+// MuteParticipant lets a host/co-host force-mute a connected participant's mic.
+// POST /calls/{callID}/participants/{userID}/mute
+func (h *CallHandler) MuteParticipant(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	targetID, err := id.Parse(chi.URLParam(r, "userID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	if err := h.svc.MuteParticipant(r.Context(), workspaceID, callID, userID, targetID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
+// AskParticipantToUnmute asks a connected participant to unmute without
+// forcing media state.
+// POST /calls/{callID}/participants/{userID}/ask-unmute
+func (h *CallHandler) AskParticipantToUnmute(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	targetID, err := id.Parse(chi.URLParam(r, "userID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	if err := h.svc.AskParticipantToUnmute(r.Context(), workspaceID, callID, userID, targetID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
+// DisableParticipantCamera lets a host/co-host force-disable a connected
+// participant's camera.
+// POST /calls/{callID}/participants/{userID}/disable-camera
+func (h *CallHandler) DisableParticipantCamera(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	targetID, err := id.Parse(chi.URLParam(r, "userID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	if err := h.svc.DisableParticipantCamera(r.Context(), workspaceID, callID, userID, targetID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
 type setFeaturedShareRequest struct {
 	UserID *string `json:"user_id"`
 }
@@ -902,6 +1087,43 @@ func (h *CallHandler) SetFeaturedShare(w http.ResponseWriter, r *http.Request) {
 	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
 
 	if err := h.svc.SetFeaturedShare(r.Context(), workspaceID, callID, userID, target); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
+// SetPinnedParticipant lets a host/co-host pin one participant for everyone
+// (a null user_id clears the global pin).
+// PUT /calls/{callID}/pinned-participant
+func (h *CallHandler) SetPinnedParticipant(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	var req setFeaturedShareRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	var target *uuid.UUID
+	if req.UserID != nil {
+		parsed, perr := id.Parse(*req.UserID)
+		if perr != nil {
+			writeErr(w, perr)
+			return
+		}
+		target = &parsed
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	if err := h.svc.SetPinnedParticipant(r.Context(), workspaceID, callID, userID, target); err != nil {
 		writeErr(w, err)
 		return
 	}

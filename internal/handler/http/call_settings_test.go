@@ -59,6 +59,83 @@ func TestCallUpdateSettingsHTTPRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestCallUpdateSettingsHTTPDecodesEntryModeAndMuteOnJoin(t *testing.T) {
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	handler, calls := newCallSettingsHTTPHandler(workspaceID, callID, hostID)
+
+	res := httptest.NewRecorder()
+	req := callSettingsHTTPRequest(workspaceID, hostID, callID, `{"entry_mode":"manual_admit","mute_on_join":true}`)
+	handler.UpdateSettings(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", res.Code, res.Body.String())
+	}
+	stored := calls.calls[callID].Settings
+	if stored.EntryMode != entity.EntryModeManualAdmit {
+		t.Fatalf("stored entry_mode = %s, want manual_admit", stored.EntryMode)
+	}
+	if !stored.WaitingRoom {
+		t.Fatalf("stored waiting_room = false, want true (derived from manual_admit)")
+	}
+	if !stored.MuteOnJoin {
+		t.Fatalf("stored mute_on_join = false, want true")
+	}
+}
+
+func TestCallUpdateSettingsHTTPDecodesBreakoutCreationAndMaxRooms(t *testing.T) {
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	handler, calls := newCallSettingsHTTPHandler(workspaceID, callID, hostID)
+
+	res := httptest.NewRecorder()
+	req := callSettingsHTTPRequest(workspaceID, hostID, callID, `{"breakout_creation":"everyone","max_breakout_rooms":4}`)
+	handler.UpdateSettings(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", res.Code, res.Body.String())
+	}
+	stored := calls.calls[callID].Settings
+	if stored.BreakoutCreation != entity.BreakoutCreationEveryone {
+		t.Fatalf("stored breakout_creation = %s, want everyone", stored.BreakoutCreation)
+	}
+	if stored.MaxBreakoutRooms != 4 {
+		t.Fatalf("stored max_breakout_rooms = %d, want 4", stored.MaxBreakoutRooms)
+	}
+}
+
+func TestCallUpdateSettingsHTTPRejectsInvalidBreakoutCreationAndMaxRooms(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "invalid breakout_creation", body: `{"breakout_creation":"bogus"}`},
+		{name: "max zero", body: `{"max_breakout_rooms":0}`},
+		{name: "max nine", body: `{"max_breakout_rooms":9}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspaceID := uuid.New()
+			callID := uuid.New()
+			hostID := uuid.New()
+			handler, calls := newCallSettingsHTTPHandler(workspaceID, callID, hostID)
+
+			res := httptest.NewRecorder()
+			req := callSettingsHTTPRequest(workspaceID, hostID, callID, tc.body)
+			handler.UpdateSettings(res, req)
+
+			if res.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400, body=%s", res.Code, res.Body.String())
+			}
+			stored := calls.calls[callID].Settings
+			if stored.BreakoutCreation != "" || stored.MaxBreakoutRooms != 0 {
+				t.Fatalf("stored settings changed on invalid request: %+v", stored)
+			}
+		})
+	}
+}
+
 func newCallSettingsHTTPHandler(workspaceID, callID, hostID uuid.UUID) (*CallHandler, *httpCallRepo) {
 	calls := &httpCallRepo{
 		calls: map[uuid.UUID]*entity.Call{

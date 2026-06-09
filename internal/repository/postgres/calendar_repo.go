@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -168,7 +169,7 @@ func (r *CalendarRepo) ListEvents(ctx context.Context, workspaceID uuid.UUID, fr
 	rows, err := r.db.Query(ctx, `
 		SELECT e.id, e.calendar_id, e.workspace_id, e.channel_id, e.organizer_id, e.title,
 		       e.description, e.location_type, e.location_value, e.scheduled_at, e.originator_tz, e.duration_minutes,
-		       e.all_day, e.recurrence_rrule, e.recurrence_exdates, e.call_id, e.created_at, e.updated_at
+		       e.all_day, e.recurrence_rrule, e.recurrence_exdates, e.call_id, e.settings, e.created_at, e.updated_at
 		FROM calendar_events e
 		JOIN user_calendars uc ON uc.id = e.calendar_id
 		WHERE e.workspace_id = $1
@@ -238,7 +239,7 @@ func (r *CalendarRepo) ListDueReminderTargets(ctx context.Context, now time.Time
 		SELECT d.reminder_id, d.occurrence_at,
 		       e.id, e.calendar_id, e.workspace_id, e.channel_id, e.organizer_id, e.title,
 		       e.description, e.location_type, e.location_value, e.scheduled_at, e.originator_tz, e.duration_minutes,
-		       e.all_day, e.recurrence_rrule, e.recurrence_exdates, e.call_id, e.created_at, e.updated_at,
+		       e.all_day, e.recurrence_rrule, e.recurrence_exdates, e.call_id, e.settings, e.created_at, e.updated_at,
 		       r.user_id, r.offset_minutes, r.channel
 		FROM event_reminder_dispatches d
 		JOIN event_reminders r ON r.id = d.reminder_id
@@ -271,6 +272,7 @@ func (r *CalendarRepo) ListDueReminderTargets(ctx context.Context, now time.Time
 		var locationValue *string
 		var recurrenceRRule *string
 		var recurrenceExdates []time.Time
+		var settingsRaw []byte
 		var userID uuid.UUID
 		var offsetMinutes int
 		var channel entity.ReminderChannel
@@ -293,6 +295,7 @@ func (r *CalendarRepo) ListDueReminderTargets(ctx context.Context, now time.Time
 			&recurrenceRRule,
 			&recurrenceExdates,
 			&event.CallID,
+			&settingsRaw,
 			&event.CreatedAt,
 			&event.UpdatedAt,
 			&userID,
@@ -305,6 +308,11 @@ func (r *CalendarRepo) ListDueReminderTargets(ctx context.Context, now time.Time
 		if recurrenceRRule != nil {
 			event.Recurrence = &entity.RecurrenceRule{RRule: *recurrenceRRule, Exdates: recurrenceExdates}
 		}
+		settings, err := scanEventSettings(settingsRaw)
+		if err != nil {
+			return nil, err
+		}
+		event.Settings = settings
 		event.OriginatorTZ = originatorTZOrDefault(event.OriginatorTZ)
 		eventCopy := &event
 		events = append(events, eventCopy)
@@ -349,7 +357,7 @@ func (r *CalendarRepo) discoverDueReminderDispatches(ctx context.Context, now ti
 	rows, err := r.db.Query(ctx, `
 		SELECT r.id, e.id, e.calendar_id, e.workspace_id, e.channel_id, e.organizer_id, e.title,
 		       e.description, e.location_type, e.location_value, e.scheduled_at, e.originator_tz, e.duration_minutes,
-		       e.all_day, e.recurrence_rrule, e.recurrence_exdates, e.call_id, e.created_at, e.updated_at,
+		       e.all_day, e.recurrence_rrule, e.recurrence_exdates, e.call_id, e.settings, e.created_at, e.updated_at,
 		       r.user_id, r.offset_minutes, r.channel
 		FROM calendar_events e
 		JOIN event_reminders r ON r.event_id = e.id
@@ -736,16 +744,20 @@ func (r *CalendarRepo) defaultCalendar(ctx context.Context, workspaceID, ownerID
 
 func (r *CalendarRepo) insertEvent(ctx context.Context, event *entity.CalendarEvent) error {
 	rrule, exdates := recurrenceColumns(event.Recurrence)
-	_, err := r.db.Exec(ctx, `
+	settings, err := eventSettingsColumn(event.Settings)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.Exec(ctx, `
 		INSERT INTO calendar_events (
 			id, calendar_id, workspace_id, channel_id, organizer_id, title, description,
 			location_type, location_value, scheduled_at, originator_tz, duration_minutes, all_day,
-			recurrence_rrule, recurrence_exdates, call_id, created_at, updated_at
+			recurrence_rrule, recurrence_exdates, call_id, created_at, updated_at, settings
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
 		event.ID, event.CalendarID, event.WorkspaceID, event.ChannelID, event.OrganizerID,
 		event.Title, event.Description, event.Location.Type, event.Location.Value, event.ScheduledAt,
-		originatorTZOrDefault(event.OriginatorTZ), event.DurationMinutes, event.AllDay, rrule, exdates, event.CallID, event.CreatedAt, event.UpdatedAt)
+		originatorTZOrDefault(event.OriginatorTZ), event.DurationMinutes, event.AllDay, rrule, exdates, event.CallID, event.CreatedAt, event.UpdatedAt, settings)
 	if err != nil {
 		return wrapCalendarWriteErr(err, "create calendar event")
 	}
@@ -754,26 +766,30 @@ func (r *CalendarRepo) insertEvent(ctx context.Context, event *entity.CalendarEv
 
 func (r *CalendarRepo) updateEventRowTx(ctx context.Context, event *entity.CalendarEvent, expectedUpdatedAt *time.Time) error {
 	rrule, exdates := recurrenceColumns(event.Recurrence)
+	settings, err := eventSettingsColumn(event.Settings)
+	if err != nil {
+		return err
+	}
 	args := []any{
 		event.ID, event.CalendarID, event.ChannelID, event.Title, event.Description,
 		event.Location.Type, event.Location.Value, event.ScheduledAt,
 		originatorTZOrDefault(event.OriginatorTZ), event.DurationMinutes,
-		event.AllDay, rrule, exdates, event.CallID, event.WorkspaceID,
+		event.AllDay, rrule, exdates, event.CallID, settings, event.WorkspaceID,
 	}
 	sql := `
 		UPDATE calendar_events
 		SET calendar_id = $2, channel_id = $3, title = $4, description = $5,
 		    location_type = $6, location_value = $7, scheduled_at = $8, originator_tz = $9, duration_minutes = $10,
-		    all_day = $11, recurrence_rrule = $12, recurrence_exdates = $13, call_id = $14, updated_at = NOW()
-		WHERE id = $1 AND workspace_id = $15`
+		    all_day = $11, recurrence_rrule = $12, recurrence_exdates = $13, call_id = $14, settings = $15, updated_at = NOW()
+		WHERE id = $1 AND workspace_id = $16`
 	if expectedUpdatedAt != nil {
-		sql += ` AND updated_at = $16`
+		sql += ` AND updated_at = $17`
 		args = append(args, expectedUpdatedAt.UTC())
 	}
 	sql += `
 		RETURNING id, calendar_id, workspace_id, channel_id, organizer_id, title,
 		          description, location_type, location_value, scheduled_at, originator_tz, duration_minutes,
-		          all_day, recurrence_rrule, recurrence_exdates, call_id, created_at, updated_at`
+		          all_day, recurrence_rrule, recurrence_exdates, call_id, settings, created_at, updated_at`
 	row := r.db.QueryRow(ctx, sql, args...)
 	updated, err := scanCalendarEvent(row)
 	if err != nil {
@@ -1008,6 +1024,7 @@ func scanCalendarEvent(row scanner) (*entity.CalendarEvent, error) {
 	var locationValue *string
 	var recurrenceRRule *string
 	var recurrenceExdates []time.Time
+	var settingsRaw []byte
 	if err := row.Scan(
 		&event.ID,
 		&event.CalendarID,
@@ -1025,6 +1042,7 @@ func scanCalendarEvent(row scanner) (*entity.CalendarEvent, error) {
 		&recurrenceRRule,
 		&recurrenceExdates,
 		&event.CallID,
+		&settingsRaw,
 		&event.CreatedAt,
 		&event.UpdatedAt,
 	); err != nil {
@@ -1037,6 +1055,11 @@ func scanCalendarEvent(row scanner) (*entity.CalendarEvent, error) {
 			Exdates: recurrenceExdates,
 		}
 	}
+	settings, err := scanEventSettings(settingsRaw)
+	if err != nil {
+		return nil, err
+	}
+	event.Settings = settings
 	event.OriginatorTZ = originatorTZOrDefault(event.OriginatorTZ)
 	return &event, nil
 }
@@ -1047,6 +1070,7 @@ func scanCalendarEventReminderRow(row scanner) (*entity.CalendarEvent, uuid.UUID
 	var locationValue *string
 	var recurrenceRRule *string
 	var recurrenceExdates []time.Time
+	var settingsRaw []byte
 	var userID uuid.UUID
 	var offsetMinutes int
 	var channel entity.ReminderChannel
@@ -1068,6 +1092,7 @@ func scanCalendarEventReminderRow(row scanner) (*entity.CalendarEvent, uuid.UUID
 		&recurrenceRRule,
 		&recurrenceExdates,
 		&event.CallID,
+		&settingsRaw,
 		&event.CreatedAt,
 		&event.UpdatedAt,
 		&userID,
@@ -1080,6 +1105,11 @@ func scanCalendarEventReminderRow(row scanner) (*entity.CalendarEvent, uuid.UUID
 	if recurrenceRRule != nil {
 		event.Recurrence = &entity.RecurrenceRule{RRule: *recurrenceRRule, Exdates: recurrenceExdates}
 	}
+	settings, err := scanEventSettings(settingsRaw)
+	if err != nil {
+		return nil, uuid.Nil, uuid.Nil, 0, "", err
+	}
+	event.Settings = settings
 	event.OriginatorTZ = originatorTZOrDefault(event.OriginatorTZ)
 	return &event, reminderID, userID, offsetMinutes, channel, nil
 }
@@ -1104,7 +1134,7 @@ func calendarEventSelectSQL() string {
 	return `
 		SELECT e.id, e.calendar_id, e.workspace_id, e.channel_id, e.organizer_id, e.title,
 		       e.description, e.location_type, e.location_value, e.scheduled_at, e.originator_tz, e.duration_minutes,
-		       e.all_day, e.recurrence_rrule, e.recurrence_exdates, e.call_id, e.created_at, e.updated_at
+		       e.all_day, e.recurrence_rrule, e.recurrence_exdates, e.call_id, e.settings, e.created_at, e.updated_at
 		FROM calendar_events e`
 }
 
@@ -1113,6 +1143,39 @@ func recurrenceColumns(recurrence *entity.RecurrenceRule) (*string, []time.Time)
 		return nil, nil
 	}
 	return &recurrence.RRule, recurrence.Exdates
+}
+
+// eventSettingsColumn marshals the optional per-event call-settings to the
+// JSONB column value. A nil settings pointer maps to SQL NULL so an event
+// without a preconfig stores nothing (ALK-819 / S11).
+func eventSettingsColumn(settings *entity.EventCallSettings) ([]byte, error) {
+	if settings == nil {
+		return nil, nil
+	}
+	raw, err := json.Marshal(settings)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: marshal event settings: %w", err)
+	}
+	return raw, nil
+}
+
+// scanEventSettings turns the JSONB column bytes back into the optional
+// settings pointer. SQL NULL (nil bytes) and an explicit JSON `null` both map
+// to a nil pointer so the start-call overlay falls back to the canonical
+// defaults (ALK-819 / S11).
+func scanEventSettings(raw []byte) (*entity.EventCallSettings, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return nil, nil
+	}
+	var settings entity.EventCallSettings
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		return nil, fmt.Errorf("postgres: unmarshal event settings: %w", err)
+	}
+	return &settings, nil
 }
 
 func originatorTZOrDefault(originatorTZ string) string {

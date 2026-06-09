@@ -30,6 +30,7 @@ type RouterDeps struct {
 	Admin            *AdminHandler
 	Metrics          *MetricsHandler
 	Guests           *GuestHandler
+	Perf             *PerfHandler
 	WS               *wshandler.Handler
 	Validator        middleware.TokenValidator
 	PersonalResolver middleware.PersonalWorkspaceResolver
@@ -129,6 +130,20 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 		r.Post(deps.LiveKit.WebhookPath(), deps.LiveKit.Webhook)
 	}
 
+	// Perf telemetry ingest (public). No user session: each handler verifies a
+	// static service token in constant time. Lab runs are POSTed by CI; RUM
+	// batches are forwarded by the FE BFF. Per-IP rate limiting is intentionally
+	// NOT applied here — all RUM traffic originates from the BFF's single IP, so
+	// a per-IP cap would throttle legitimate field events. The trade-off: those
+	// events all share ONE IP's slice of the global 2400/min cap above, which a
+	// burst could exhaust; a token/endpoint-scoped or per-session limiter is the
+	// proper control and is deferred to the infra layer (handoff doc §2). The
+	// batch size (<=200 events) and lab metric count are bounded in the handlers.
+	if deps.Perf != nil {
+		r.Post("/api/v1/perf/lab", deps.Perf.IngestLab)
+		r.Post("/api/v1/perf/rum", deps.Perf.IngestRUM)
+	}
+
 	// Authenticated routes.
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Auth(deps.Validator))
@@ -147,6 +162,7 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 				r.Post("/me/saved-messages", deps.Saved.SaveMessage)
 				r.Get("/me/saved-messages", deps.Saved.ListMessages)
 				r.Delete("/me/saved-messages/{savedMsgID}", deps.Saved.UnsaveMessage)
+				r.Delete("/me/saved-messages/{savedMsgID}/hard", deps.Saved.HardDeleteMessage)
 			}
 		})
 
@@ -335,6 +351,7 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 		r.Route("/{callID}", func(r chi.Router) {
 			r.Get("/", deps.Calls.Get)
 			r.Post("/join", deps.Calls.Join)
+			r.Post("/decline", deps.Calls.DeclineCall)
 			r.Post("/leave", deps.Calls.Leave)
 			r.Post("/cancel", deps.Calls.Cancel)
 			r.Post("/end", deps.Calls.End)
@@ -342,6 +359,7 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 			r.Delete("/hand", deps.Calls.LowerHand)
 			r.Post("/reactions", deps.Calls.SendCallReaction)
 			r.Post("/turn-credentials", deps.Calls.TurnCredentials)
+			r.Post("/participants", deps.Calls.AddParticipants)
 			r.Get("/participants", deps.Calls.Participants)
 			r.Put("/participants/{userID}/role", deps.Calls.UpdateParticipantRole)
 			r.Delete("/participants/{userID}", deps.Calls.RemoveParticipant)
@@ -354,6 +372,10 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 			})
 			r.Post("/participants/{userID}/revoke-screen-share", deps.Calls.RevokeScreenShare)
 			r.Put("/featured-share", deps.Calls.SetFeaturedShare)
+			r.Post("/participants/{userID}/mute", deps.Calls.MuteParticipant)
+			r.Post("/participants/{userID}/ask-unmute", deps.Calls.AskParticipantToUnmute)
+			r.Post("/participants/{userID}/disable-camera", deps.Calls.DisableParticipantCamera)
+			r.Put("/pinned-participant", deps.Calls.SetPinnedParticipant)
 			r.Patch("/settings", deps.Calls.UpdateSettings)
 			r.Put("/media", deps.Calls.UpdateMedia)
 			r.Put("/quality", deps.Calls.SetQuality)
@@ -398,6 +420,8 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 				r.Route("/{breakoutRoomID}", func(r chi.Router) {
 					r.Post("/join", deps.Breakout.Join)
 					r.Post("/close", deps.Breakout.Close)
+					r.Post("/assign", deps.Breakout.Assign)
+					r.Post("/invite", deps.Breakout.Invite)
 					r.Get("/participants", deps.Breakout.Participants)
 				})
 			})

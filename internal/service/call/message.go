@@ -40,7 +40,10 @@ func (s *Service) SendCallMessage(ctx context.Context, workspaceID, callID, send
 	if participant.Status != entity.ParticipantStatusConnected {
 		return nil, cerrors.Forbidden("not in call")
 	}
-	if !call.Settings.Chat {
+	// Chat policy (ALK-812): when chat is disabled, members cannot SEND, but the
+	// host/co-host still can (they own the meeting). Reading history is never
+	// gated here — only the send path. The FE renders a read-only panel for members.
+	if !call.Settings.Chat && participant.Role != entity.CallRoleHost && participant.Role != entity.CallRoleCoHost {
 		return nil, cerrors.Forbidden("call chat is disabled")
 	}
 	if call.Status == entity.CallStatusEnded {

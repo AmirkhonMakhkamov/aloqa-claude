@@ -28,7 +28,7 @@ type WorkspaceRepository interface {
 
 	AddMember(ctx context.Context, m *entity.WorkspaceMember) error
 	GetMember(ctx context.Context, workspaceID, userID uuid.UUID) (*entity.WorkspaceMember, error)
-	ListMembers(ctx context.Context, workspaceID uuid.UUID, p pagination.Params) ([]entity.WorkspaceMember, error)
+	ListMembers(ctx context.Context, workspaceID uuid.UUID, p pagination.Params, search string) ([]entity.WorkspaceMember, error)
 	UpdateMemberRole(ctx context.Context, workspaceID, userID uuid.UUID, role entity.WorkspaceRole) error
 	RemoveMember(ctx context.Context, workspaceID, userID uuid.UUID) error
 }
@@ -93,6 +93,7 @@ type MessageRepository interface {
 	Update(ctx context.Context, msg *entity.Message) error
 	SoftDelete(ctx context.Context, id uuid.UUID) error
 	SoftDeleteWithCascade(ctx context.Context, id uuid.UUID) ([]uuid.UUID, error)
+	HardDelete(ctx context.Context, id uuid.UUID) error
 
 	Pin(ctx context.Context, messageID, userID uuid.UUID) error
 	Unpin(ctx context.Context, messageID uuid.UUID) error
@@ -175,6 +176,7 @@ type MediaRepository interface {
 // BreakoutRoomRepository manages breakout room persistence.
 type BreakoutRoomRepository interface {
 	Create(ctx context.Context, room *entity.BreakoutRoom) error
+	CreateRoomsWithinCap(ctx context.Context, callID uuid.UUID, maxRooms int, rooms []entity.BreakoutRoom) error
 	GetByID(ctx context.Context, id uuid.UUID) (*entity.BreakoutRoom, error)
 	ListByCall(ctx context.Context, callID uuid.UUID) ([]entity.BreakoutRoom, error)
 	ListCallsWithExpiredActiveBreakouts(ctx context.Context, before time.Time, limit int) ([]uuid.UUID, error)
@@ -221,6 +223,14 @@ type CallRepository interface {
 	ListActiveByWorkspace(ctx context.Context, workspaceID uuid.UUID) ([]entity.Call, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status entity.CallStatus) error
 	UpdateSettings(ctx context.Context, id uuid.UUID, settings entity.CallSettings) error
+	// UpdateAccessLevel sets the call's access_level column (ALK-814 / S6).
+	UpdateAccessLevel(ctx context.Context, id uuid.UUID, level entity.AccessLevel) error
+	// AddInvitedMembers / IsInvited / ListInvitedMembers / SnapshotConnectedIntoInvited
+	// back the private-call invite list (call_invited_members). (ALK-814 / S6)
+	AddInvitedMembers(ctx context.Context, callID uuid.UUID, userIDs []uuid.UUID, invitedBy uuid.UUID) error
+	IsInvited(ctx context.Context, callID, userID uuid.UUID) (bool, error)
+	ListInvitedMembers(ctx context.Context, callID uuid.UUID) ([]uuid.UUID, error)
+	SnapshotConnectedIntoInvited(ctx context.Context, callID, invitedBy uuid.UUID) error
 	End(ctx context.Context, id uuid.UUID) error
 
 	AddParticipant(ctx context.Context, p *entity.CallParticipant) error
@@ -246,6 +256,9 @@ type CallRepository interface {
 	// SetFeaturedShareUserID sets (or clears with nil) the host-featured share
 	// pick on a call row. Keyed by callID since it's a calls-row update. (ALK-697)
 	SetFeaturedShareUserID(ctx context.Context, callID uuid.UUID, userID *uuid.UUID) error
+	// SetPinnedParticipantUserID sets (or clears with nil) the host-pinned
+	// participant pick on a call row. Keyed by callID since it's a calls-row update. (ALK-813)
+	SetPinnedParticipantUserID(ctx context.Context, callID uuid.UUID, userID *uuid.UUID) error
 	RemoveParticipant(ctx context.Context, callID, userID uuid.UUID) error
 }
 

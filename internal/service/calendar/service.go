@@ -25,6 +25,17 @@ type EventPublisher interface {
 
 type CallService interface {
 	StartCall(ctx context.Context, workspaceID, userID uuid.UUID, callType entity.CallType, title string, channelID *uuid.UUID, settings entity.CallSettings, joinPassword string) (*entity.Call, error)
+	// FinalizeNewCallSettings resolves a caller-supplied settings tuple to the
+	// server-authoritative values a new call must carry (breakout-force, recording
+	// capability, chat-on, member-permission defaults, entry-mode/breakout
+	// resolution). The tx start-call path applies it directly so it persists the
+	// SAME settings as StartCall does on the non-tx path (ALK-819 review).
+	FinalizeNewCallSettings(callType entity.CallType, settings entity.CallSettings) entity.CallSettings
+	// ValidateNewCallSettings runs the call service's per-field settings validation
+	// (the same StartCall runs on the non-tx path). The tx start-call path builds
+	// the call inline and must run it explicitly so a corrupted/legacy event
+	// settings row can't persist a call the non-tx path would reject (ALK-819 review).
+	ValidateNewCallSettings(callType entity.CallType, settings entity.CallSettings) error
 	GetCall(ctx context.Context, workspaceID, callID, userID uuid.UUID) (*entity.Call, error)
 	EnsureLiveKitRoomRequired(ctx context.Context, call *entity.Call) error
 	DeleteLiveKitRoom(ctx context.Context, callID uuid.UUID) error
@@ -62,6 +73,9 @@ type CreateEventInput struct {
 	AttendeeEmails  []string
 	RequiredUserIDs []uuid.UUID
 	Reminders       []entity.EventReminder
+	// Settings is the optional per-event call-settings preconfig (ALK-819 / S11);
+	// the HTTP layer already drops it (nil) for non-aloqa_meet events.
+	Settings *entity.EventCallSettings
 }
 
 type UpdateEventInput struct {
@@ -85,6 +99,15 @@ type UpdateEventInput struct {
 	AttendeesSet    bool
 	Reminders       []entity.EventReminder
 	RemindersSet    bool
+	// Settings is the optional per-event call-settings preconfig (ALK-819 / S11)
+	// with key-presence tri-state semantics:
+	//   - SettingsSet == false           -> key absent, leave existing unchanged
+	//   - SettingsSet == true, Settings == nil   -> explicit JSON null, clear it
+	//   - SettingsSet == true, Settings != nil    -> JSON object, replace it
+	// The service additionally forces Settings to nil when the effective
+	// location type is not aloqa_meet (a non-meet event cannot host a call).
+	Settings    *entity.EventCallSettings
+	SettingsSet bool
 }
 
 type MoveOccurrenceScope string
@@ -278,6 +301,7 @@ func (s *Service) CreateEvent(ctx context.Context, workspaceID, organizerID uuid
 		DurationMinutes: input.DurationMinutes,
 		AllDay:          input.AllDay,
 		Recurrence:      normalizeRecurrence(input.Recurrence),
+		Settings:        normalizeEventSettings(input.Settings, input.Location.Type),
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
@@ -349,6 +373,16 @@ func (s *Service) UpdateEvent(ctx context.Context, workspaceID, eventID, actorID
 	if input.RemindersSet {
 		existing.Reminders = input.Reminders
 	}
+	// Apply the settings tri-state after the location merge so the effective
+	// location type (already merged into existing.Location) governs the drop:
+	//   - absent (SettingsSet false): leave existing.Settings unchanged
+	//   - explicit null: clear
+	//   - object: replace
+	// then force nil when the (effective) location is not aloqa_meet. (ALK-819.)
+	if input.SettingsSet {
+		existing.Settings = input.Settings
+	}
+	existing.Settings = normalizeEventSettings(existing.Settings, existing.Location.Type)
 	if err := s.validateEventEntity(existing); err != nil {
 		return nil, err
 	}
@@ -522,12 +556,46 @@ func buildOccurrenceChild(parent *entity.CalendarEvent, scheduledAt time.Time, d
 		AllDay:          parent.AllDay,
 		Recurrence:      nil,
 		CallID:          nil,
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		// Carry the per-event call-settings preconfig onto the split-off occurrence
+		// so a moved instance of an aloqa_meet recurring meeting keeps its schedule
+		// preset instead of falling back to defaults. Deep-copy the pointer struct
+		// (the child is a distinct row) and re-run the location normalisation so a
+		// relocated child (non-meet location) drops the settings consistently with
+		// create/update. (ALK-819 review.)
+		Settings:  normalizeEventSettings(cloneEventCallSettings(parent.Settings), parent.Location.Type),
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	child.Attendees = resetAttendees(parent.Attendees, child.ID)
 	child.Reminders = copyReminders(parent.Reminders, child.ID)
 	return child
+}
+
+// cloneEventCallSettings deep-copies the per-event call-settings preconfig so a
+// derived event row (e.g. a moved recurring occurrence) owns its own pointers and
+// never aliases the parent's (ALK-819 review).
+func cloneEventCallSettings(src *entity.EventCallSettings) *entity.EventCallSettings {
+	if src == nil {
+		return nil
+	}
+	clone := &entity.EventCallSettings{}
+	if src.EntryMode != nil {
+		entryMode := *src.EntryMode
+		clone.EntryMode = &entryMode
+	}
+	if src.MuteOnJoin != nil {
+		muteOnJoin := *src.MuteOnJoin
+		clone.MuteOnJoin = &muteOnJoin
+	}
+	if src.BreakoutCreation != nil {
+		breakoutCreation := *src.BreakoutCreation
+		clone.BreakoutCreation = &breakoutCreation
+	}
+	if src.MaxBreakoutRooms != nil {
+		maxBreakoutRooms := *src.MaxBreakoutRooms
+		clone.MaxBreakoutRooms = &maxBreakoutRooms
+	}
+	return clone
 }
 
 func recurrenceLocation(originatorTZ string) *time.Location {
@@ -718,15 +786,17 @@ func (s *Service) StartCallFromEvent(ctx context.Context, workspaceID, eventID, 
 		}
 	}
 
-	callEntity, err := s.calls.StartCall(ctx, workspaceID, initiatorID, entity.CallTypeMeeting, eventEntity.Title, eventEntity.ChannelID, entity.CallSettings{
-		WaitingRoom:     false,
-		MuteOnJoin:      false,
-		Recording:       false,
-		ScreenSharing:   true,
-		Chat:            true,
-		BreakoutRooms:   false,
-		MaxParticipants: 500,
-	}, "")
+	// Validate + reject password entry mode up front via the shared chokepoint so
+	// this path returns the SAME error class as the tx path for a corrupted/legacy
+	// event settings row (StartCall would also reject password mode for lack of a
+	// join password, but going through the helper makes the rejection explicit and
+	// consistent across both paths). Then hand the pre-finalisation base to
+	// StartCall, which finalises it identically (ALK-819 / S11 + review).
+	if _, err := s.resolveScheduledCallSettings(eventEntity.Settings); err != nil {
+		return nil, err
+	}
+	callSettings := baseWithEventOverlay(eventEntity.Settings)
+	callEntity, err := s.calls.StartCall(ctx, workspaceID, initiatorID, entity.CallTypeMeeting, eventEntity.Title, eventEntity.ChannelID, callSettings, "")
 	if err != nil {
 		return nil, err
 	}
@@ -743,6 +813,15 @@ func (s *Service) StartCallFromEvent(ctx context.Context, workspaceID, eventID, 
 	return callEntity, nil
 }
 
+// startCallFromEventTx builds and persists the scheduled call inline within a
+// single transaction (rather than delegating to call.Service.StartCall). It uses
+// EVENT-SCOPED idempotency: the call is reused when the locked event already
+// points at a non-ended call (the eventEntity.CallID != nil branch below), so
+// concurrent "start" presses on the same scheduled event converge on one call.
+// This intentionally does NOT run StartCall's per-channel and per-user
+// single-active-call guards (9b/9c): a scheduled meeting is keyed by its event,
+// not by its channel or initiator, so those ad-hoc guards do not apply here. The
+// asymmetry with StartCall is deliberate, not an oversight (ALK-819 review).
 func (s *Service) startCallFromEventTx(ctx context.Context, workspaceID, eventID, initiatorID uuid.UUID) (*entity.Call, error) {
 	var callEntity *entity.Call
 	var preparedLiveKitRoomID *uuid.UUID
@@ -779,6 +858,19 @@ func (s *Service) startCallFromEventTx(ctx context.Context, workspaceID, eventID
 
 		now := time.Now().UTC()
 		scheduledCallID := eventEntity.ID
+		// This path writes callEntity.Settings directly via scope.Calls().Create
+		// without going through call.Service.StartCall, so the call-service settings
+		// validation + finaliser MUST be applied here on the same base StartCall
+		// receives on the non-tx path: resolveScheduledCallSettings overlays the
+		// event preconfig onto the meeting defaults, validates the fields, resolves
+		// entry_mode/waiting_room/breakout + the server invariants, and rejects
+		// password entry mode. Routing both paths through it guarantees identical
+		// persisted settings and the same rejection class (ALK-819 / S11 + review).
+		// s.calls is required for this path (the helper enforces it).
+		callSettings, err := s.resolveScheduledCallSettings(eventEntity.Settings)
+		if err != nil {
+			return err
+		}
 		callEntity = &entity.Call{
 			ID:              id.New(),
 			WorkspaceID:     workspaceID,
@@ -788,17 +880,10 @@ func (s *Service) startCallFromEventTx(ctx context.Context, workspaceID, eventID
 			Title:           eventEntity.Title,
 			CreatedBy:       initiatorID,
 			ScheduledCallID: &scheduledCallID,
-			Settings: entity.CallSettings{
-				WaitingRoom:     false,
-				MuteOnJoin:      false,
-				Recording:       false,
-				ScreenSharing:   true,
-				Chat:            true,
-				BreakoutRooms:   true, // Breakout rooms default-on for meetings; host can disable at runtime.
-				MaxParticipants: 500,
-			},
-			StartedAt: &now,
-			CreatedAt: now,
+			AccessLevel:     entity.AccessLevelPublic,
+			Settings:        callSettings,
+			StartedAt:       &now,
+			CreatedAt:       now,
 		}
 		participant := &entity.CallParticipant{
 			ID:       id.New(),
@@ -956,6 +1041,94 @@ func normalizeRecurrence(recurrence *entity.RecurrenceRule) *entity.RecurrenceRu
 		return nil
 	}
 	return &entity.RecurrenceRule{RRule: rrule, Exdates: recurrence.Exdates}
+}
+
+// normalizeEventSettings drops the per-event call-settings preconfig for any
+// location type other than aloqa_meet (a non-meet event cannot host a call), and
+// otherwise returns the settings unchanged (ALK-819 / S11).
+func normalizeEventSettings(settings *entity.EventCallSettings, locationType entity.EventLocationType) *entity.EventCallSettings {
+	if locationType != entity.EventLocationAloqaMeet {
+		return nil
+	}
+	return settings
+}
+
+// meetingDefaultCallSettings is the canonical base call-settings tuple used when
+// starting a call from a scheduled event. An event preconfig is overlaid on top
+// of this and the result normalised before the call is created (ALK-819 / S11).
+func meetingDefaultCallSettings() entity.CallSettings {
+	return entity.CallSettings{
+		WaitingRoom:      false,
+		MuteOnJoin:       false,
+		Recording:        false,
+		ScreenSharing:    true,
+		Chat:             true,
+		BreakoutRooms:    true,
+		BreakoutCreation: entity.BreakoutCreationHost,
+		MaxBreakoutRooms: 8,
+		MaxParticipants:  500,
+		E2EE:             false,
+		Watermark:        false,
+		EntryMode:        entity.EntryModeOpen,
+	}
+}
+
+// overlayEventSettings applies the present (non-nil) pointer fields of the event
+// preconfig onto the base call settings; absent fields keep the base value. It
+// mutates the base in place (ALK-819 / S11).
+func overlayEventSettings(base *entity.CallSettings, settings *entity.EventCallSettings) {
+	if base == nil || settings == nil {
+		return
+	}
+	if settings.EntryMode != nil {
+		base.EntryMode = *settings.EntryMode
+	}
+	if settings.MuteOnJoin != nil {
+		base.MuteOnJoin = *settings.MuteOnJoin
+	}
+	if settings.BreakoutCreation != nil {
+		base.BreakoutCreation = *settings.BreakoutCreation
+	}
+	if settings.MaxBreakoutRooms != nil {
+		base.MaxBreakoutRooms = *settings.MaxBreakoutRooms
+	}
+}
+
+// baseWithEventOverlay builds the pre-finalisation call-settings tuple to use
+// when starting a call from an event: the canonical meeting defaults overlaid
+// with the event preconfig (if any). The result is handed to
+// CallService.FinalizeNewCallSettings, which resolves entry_mode / waiting_room
+// and the breakout fields and applies the server-authoritative invariants — so
+// BOTH start-call paths (non-tx via StartCall, tx via the direct write) run the
+// same finaliser and persist byte-identical settings (ALK-819 / S11 + review).
+func baseWithEventOverlay(eventSettings *entity.EventCallSettings) entity.CallSettings {
+	base := meetingDefaultCallSettings()
+	overlayEventSettings(&base, eventSettings)
+	return base
+}
+
+// resolveScheduledCallSettings is the single chokepoint both StartCallFromEvent
+// paths run to turn a stored event preconfig into the finalised, validated call
+// settings tuple. It (1) validates the pre-finalisation overlay with the call
+// service's field validation (the same StartCall runs), (2) finalises it, and
+// (3) rejects password entry mode — a scheduled meeting can never carry a join
+// password (none is available at scheduled start), so a corrupted/legacy event
+// settings row with entry_mode=password is refused on BOTH paths with the same
+// InvalidInput error class rather than persisting an unusable password-mode call.
+// Returns the finalised settings the call row must carry (ALK-819 review).
+func (s *Service) resolveScheduledCallSettings(eventSettings *entity.EventCallSettings) (entity.CallSettings, error) {
+	if s.calls == nil {
+		return entity.CallSettings{}, cerrors.Unavailable("call service is not configured")
+	}
+	base := baseWithEventOverlay(eventSettings)
+	if err := s.calls.ValidateNewCallSettings(entity.CallTypeMeeting, base); err != nil {
+		return entity.CallSettings{}, err
+	}
+	finalized := s.calls.FinalizeNewCallSettings(entity.CallTypeMeeting, base)
+	if finalized.EntryMode == entity.EntryModePassword {
+		return entity.CallSettings{}, cerrors.InvalidInput("scheduled meetings cannot use password entry mode")
+	}
+	return finalized, nil
 }
 
 func normalizeOriginatorTZ(originatorTZ string) string {

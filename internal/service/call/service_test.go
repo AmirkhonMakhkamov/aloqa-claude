@@ -3,6 +3,7 @@ package call
 import (
 	"context"
 	"errors"
+	"sort"
 	"testing"
 	"time"
 
@@ -88,6 +89,305 @@ func TestViewerCannotPublishMedia(t *testing.T) {
 // the patch-style UpdateMedia signature. Lives in the test file so it stays
 // out of production binaries.
 func boolPtr(b bool) *bool { return &b }
+
+func intPtr(i int) *int { return &i }
+
+func TestStartCallWithAccessCreatesPrivateCallWithInvitedMembers(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	hostID := uuid.New()
+	inviteeID := uuid.New()
+	calls := &fakeCallRepo{}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, hostID}:    {WorkspaceID: workspaceID, UserID: hostID, Role: entity.WorkspaceRoleMember},
+		{workspaceID, inviteeID}: {WorkspaceID: workspaceID, UserID: inviteeID, Role: entity.WorkspaceRoleMember},
+	}}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	callEntity, err := svc.StartCallWithAccess(ctx, workspaceID, hostID, entity.CallTypeMeeting, "Private", nil, entity.CallSettings{}, "", StartCallAccessOptions{
+		AccessLevel:      entity.AccessLevelPrivate,
+		InvitedMemberIDs: []uuid.UUID{inviteeID, inviteeID},
+	})
+	if err != nil {
+		t.Fatalf("StartCallWithAccess returned error: %v", err)
+	}
+	if callEntity.AccessLevel != entity.AccessLevelPrivate {
+		t.Fatalf("access_level = %q, want private", callEntity.AccessLevel)
+	}
+	if !calls.invited[callEntity.ID][inviteeID] {
+		t.Fatalf("invitee was not inserted into private-call invite list")
+	}
+}
+
+func TestStartCallWithAccessRejectsInvalidPrivateShapes(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	hostID := uuid.New()
+	channelID := uuid.New()
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, hostID}: {WorkspaceID: workspaceID, UserID: hostID, Role: entity.WorkspaceRoleMember},
+	}}
+	svc := NewService(&fakeCallRepo{}, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	if _, err := svc.StartCallWithAccess(ctx, workspaceID, hostID, entity.CallTypeMeeting, "", &channelID, entity.CallSettings{}, "", StartCallAccessOptions{AccessLevel: entity.AccessLevelPrivate}); !hasCode(err, cerrors.CodeInvalidInput) {
+		t.Fatalf("private channel-attached StartCall error = %v, want INVALID_INPUT", err)
+	}
+	if _, err := svc.StartCallWithAccess(ctx, workspaceID, hostID, entity.CallTypeOneToOne, "", nil, entity.CallSettings{}, "", StartCallAccessOptions{AccessLevel: entity.AccessLevelPrivate}); !hasCode(err, cerrors.CodeInvalidInput) {
+		t.Fatalf("private one_to_one StartCall error = %v, want INVALID_INPUT", err)
+	}
+}
+
+func TestPrivateChannelLessJoinRequiresInvite(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	inviteeID := uuid.New()
+	strangerID := uuid.New()
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, hostID}:     {WorkspaceID: workspaceID, UserID: hostID, Role: entity.WorkspaceRoleMember},
+		{workspaceID, inviteeID}:  {WorkspaceID: workspaceID, UserID: inviteeID, Role: entity.WorkspaceRoleMember},
+		{workspaceID, strangerID}: {WorkspaceID: workspaceID, UserID: strangerID, Role: entity.WorkspaceRoleMember},
+	}}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive, CreatedBy: hostID, AccessLevel: entity.AccessLevelPrivate},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: {ID: uuid.New(), CallID: callID, UserID: hostID, Role: entity.CallRoleHost, Status: entity.ParticipantStatusConnected},
+		},
+		invited: map[uuid.UUID]map[uuid.UUID]bool{callID: {inviteeID: true}},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	if _, err := svc.JoinCall(ctx, workspaceID, callID, strangerID, ""); !hasCode(err, cerrors.CodeForbidden) {
+		t.Fatalf("uninvited JoinCall error = %v, want FORBIDDEN", err)
+	}
+	participant, err := svc.JoinCall(ctx, workspaceID, callID, inviteeID, "")
+	if err != nil {
+		t.Fatalf("invited JoinCall returned error: %v", err)
+	}
+	if participant.UserID != inviteeID || participant.Status != entity.ParticipantStatusConnected {
+		t.Fatalf("participant = %+v, want invited connected participant", participant)
+	}
+}
+
+func TestPrivateChannelLessRejectsGuestGrantForOtherCall(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	otherCallID := uuid.New()
+	hostID := uuid.New()
+	guestID := uuid.New()
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive, CreatedBy: hostID, AccessLevel: entity.AccessLevelPrivate},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{},
+	}
+	guests := guestaccess.NewChecker(&fakeGuestAccessRepo{grants: []entity.GuestAccessGrant{{
+		WorkspaceID: workspaceID,
+		UserID:      guestID,
+		CallID:      &otherCallID,
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}}})
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), guests, nil)
+
+	if _, err := svc.JoinCall(ctx, workspaceID, callID, guestID, ""); !hasCode(err, cerrors.CodeForbidden) {
+		t.Fatalf("guest grant for another call JoinCall error = %v, want FORBIDDEN", err)
+	}
+}
+
+func TestListActiveCallsHidesUnauthorizedPrivateChannelLessCalls(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	publicCallID := uuid.New()
+	privateCallID := uuid.New()
+	userID := uuid.New()
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			publicCallID:  {ID: publicCallID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive, AccessLevel: entity.AccessLevelPublic},
+			privateCallID: {ID: privateCallID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive, AccessLevel: entity.AccessLevelPrivate},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	active, err := svc.ListActiveCalls(ctx, workspaceID, userID)
+	if err != nil {
+		t.Fatalf("ListActiveCalls returned error: %v", err)
+	}
+	if len(active) != 1 || active[0].ID != publicCallID {
+		t.Fatalf("active calls = %+v, want only public call", active)
+	}
+
+	calls.invited = map[uuid.UUID]map[uuid.UUID]bool{privateCallID: {userID: true}}
+	active, err = svc.ListActiveCalls(ctx, workspaceID, userID)
+	if err != nil {
+		t.Fatalf("ListActiveCalls invited returned error: %v", err)
+	}
+	if len(active) != 2 {
+		t.Fatalf("active calls count = %d, want 2 after invite", len(active))
+	}
+}
+
+func TestListRecentCallsHidesUnauthorizedPrivateChannelLessCalls(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	publicCallID := uuid.New()
+	privateCallID := uuid.New()
+	userID := uuid.New()
+	now := time.Now().UTC()
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			publicCallID: {
+				ID:          publicCallID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeMeeting,
+				Status:      entity.CallStatusEnded,
+				AccessLevel: entity.AccessLevelPublic,
+				CreatedAt:   now.Add(-time.Minute),
+			},
+			privateCallID: {
+				ID:          privateCallID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeMeeting,
+				Status:      entity.CallStatusEnded,
+				AccessLevel: entity.AccessLevelPrivate,
+				CreatedAt:   now,
+			},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	recent, err := svc.ListRecentCalls(ctx, workspaceID, userID, 20, "")
+	if err != nil {
+		t.Fatalf("ListRecentCalls returned error: %v", err)
+	}
+	if len(recent.Calls) != 1 || recent.Calls[0].ID != publicCallID {
+		t.Fatalf("recent calls = %+v, want only public call", recent.Calls)
+	}
+
+	calls.invited = map[uuid.UUID]map[uuid.UUID]bool{privateCallID: {userID: true}}
+	recent, err = svc.ListRecentCalls(ctx, workspaceID, userID, 20, "")
+	if err != nil {
+		t.Fatalf("ListRecentCalls invited returned error: %v", err)
+	}
+	if len(recent.Calls) != 2 {
+		t.Fatalf("recent calls count = %d, want 2 after invite", len(recent.Calls))
+	}
+}
+
+func TestPrivateCallEventPublishesOnlyUserScopedSubjects(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	memberID := uuid.New()
+	inviteeID := uuid.New()
+	pub := &capturingPublisher{}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {
+				ID:          callID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeMeeting,
+				Status:      entity.CallStatusActive,
+				CreatedBy:   hostID,
+				AccessLevel: entity.AccessLevelPrivate,
+			},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}:   connectedParticipant(callID, hostID, entity.CallRoleHost),
+			{callID, memberID}: connectedParticipant(callID, memberID, entity.CallRoleParticipant),
+		},
+		invited: map[uuid.UUID]map[uuid.UUID]bool{callID: {inviteeID: true}},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+
+	svc.publishCallEvent(ctx, event.TypeCallStarted, calls.calls[callID], hostID)
+
+	subjects := make([]string, 0, len(pub.captures))
+	for _, capture := range pub.captures {
+		if capture.subject == workspaceSubject(workspaceID) {
+			t.Fatalf("private call event leaked to workspace subject")
+		}
+		subjects = append(subjects, capture.subject)
+	}
+	sort.Strings(subjects)
+	want := []string{
+		workspaceUserEventsSubject(workspaceID, hostID),
+		workspaceUserEventsSubject(workspaceID, inviteeID),
+		workspaceUserEventsSubject(workspaceID, memberID),
+	}
+	sort.Strings(want)
+	if len(subjects) != len(want) {
+		t.Fatalf("subjects = %+v, want %+v", subjects, want)
+	}
+	for i := range want {
+		if subjects[i] != want[i] {
+			t.Fatalf("subjects = %+v, want %+v", subjects, want)
+		}
+	}
+}
+
+func TestAuthorizeGuestLinkHonorsWhoCanAddGuestsPolicy(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	publicCallID := uuid.New()
+	privateCallID := uuid.New()
+	memberID := uuid.New()
+	hostID := uuid.New()
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, memberID}: {WorkspaceID: workspaceID, UserID: memberID, Role: entity.WorkspaceRoleMember},
+		{workspaceID, hostID}:   {WorkspaceID: workspaceID, UserID: hostID, Role: entity.WorkspaceRoleMember},
+	}}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			publicCallID: {
+				ID:          publicCallID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeMeeting,
+				Status:      entity.CallStatusActive,
+				CreatedBy:   hostID,
+				AccessLevel: entity.AccessLevelPublic,
+				Settings:    entity.CallSettings{WhoCanAddGuests: entity.WhoCanAddGuestsEveryone},
+			},
+			privateCallID: {
+				ID:          privateCallID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeMeeting,
+				Status:      entity.CallStatusActive,
+				CreatedBy:   hostID,
+				AccessLevel: entity.AccessLevelPrivate,
+				Settings:    entity.CallSettings{WhoCanAddGuests: entity.WhoCanAddGuestsEveryone},
+			},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{publicCallID, memberID}:  {ID: uuid.New(), CallID: publicCallID, UserID: memberID, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected},
+			{privateCallID, memberID}: {ID: uuid.New(), CallID: privateCallID, UserID: memberID, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected},
+			{privateCallID, hostID}:   {ID: uuid.New(), CallID: privateCallID, UserID: hostID, Role: entity.CallRoleHost, Status: entity.ParticipantStatusConnected},
+		},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	if _, err := svc.AuthorizeGuestLink(ctx, workspaceID, publicCallID, memberID); err != nil {
+		t.Fatalf("public/everyone member AuthorizeGuestLink returned error: %v", err)
+	}
+	if _, err := svc.AuthorizeGuestLink(ctx, workspaceID, privateCallID, memberID); !hasCode(err, cerrors.CodeForbidden) {
+		t.Fatalf("private/everyone member AuthorizeGuestLink error = %v, want FORBIDDEN", err)
+	}
+	if _, err := svc.AuthorizeGuestLink(ctx, workspaceID, privateCallID, hostID); err != nil {
+		t.Fatalf("private host AuthorizeGuestLink returned error: %v", err)
+	}
+}
 
 func TestForwardSignalRequiresBothParticipants(t *testing.T) {
 	ctx := context.Background()
@@ -456,6 +756,283 @@ func TestJoinCallKeepsExistingWaitingParticipantWaiting(t *testing.T) {
 	if pub.called {
 		t.Fatalf("waiting participant rejoin published %q; want no event", pub.subject)
 	}
+}
+
+func TestInviteParticipantsFreshMemberPublishesCallInvited(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	targetID := uuid.New()
+	pub := &capturingPublisher{}
+	svc, calls := inviteParticipantsFixture(workspaceID, callID, hostID, entity.CallRoleHost, targetID, nil, pub)
+
+	result, err := svc.InviteParticipants(ctx, workspaceID, callID, hostID, []uuid.UUID{targetID})
+	if err != nil {
+		t.Fatalf("InviteParticipants returned error: %v", err)
+	}
+	if len(result.Invited) != 1 || result.Invited[0].UserID != targetID {
+		t.Fatalf("invited = %+v, want target", result.Invited)
+	}
+	if len(result.Skipped) != 0 {
+		t.Fatalf("skipped = %+v, want empty", result.Skipped)
+	}
+	stored := calls.participants[[2]uuid.UUID{callID, targetID}]
+	if stored == nil || stored.Status != entity.ParticipantStatusInvited || stored.Role != entity.CallRoleParticipant {
+		t.Fatalf("stored participant = %+v, want invited participant", stored)
+	}
+	if got := countBreakoutEvents(t, pub.captures, event.TypeCallInvited); got != 1 {
+		t.Fatalf("call.invited events = %d, want 1", got)
+	}
+	if got := countBreakoutEvents(t, pub.captures, event.TypeCallParticipantUpdated); got != 0 {
+		t.Fatalf("durable/presence participant updates = %d, want 0", got)
+	}
+	if pub.subject != "aloqa.signal."+targetID.String() {
+		t.Fatalf("publish subject = %q, want per-user signal subject", pub.subject)
+	}
+}
+
+func TestInviteParticipantsExistingStatusTransitionTable(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		status     entity.ParticipantStatus
+		wantStatus entity.ParticipantStatus
+		wantSkip   string
+		wantRings  int
+	}{
+		{status: entity.ParticipantStatusConnected, wantStatus: entity.ParticipantStatusConnected, wantSkip: "already_connected"},
+		{status: entity.ParticipantStatusJoining, wantStatus: entity.ParticipantStatusJoining, wantSkip: "joining"},
+		{status: entity.ParticipantStatusWaiting, wantStatus: entity.ParticipantStatusWaiting, wantSkip: "waiting"},
+		{status: entity.ParticipantStatusInvited, wantStatus: entity.ParticipantStatusInvited, wantRings: 1},
+		{status: entity.ParticipantStatusDeclined, wantStatus: entity.ParticipantStatusInvited, wantRings: 1},
+		{status: entity.ParticipantStatusDisconnected, wantStatus: entity.ParticipantStatusInvited, wantRings: 1},
+	} {
+		t.Run(string(tc.status), func(t *testing.T) {
+			workspaceID := uuid.New()
+			callID := uuid.New()
+			hostID := uuid.New()
+			targetID := uuid.New()
+			pub := &capturingPublisher{}
+			status := tc.status
+			svc, calls := inviteParticipantsFixture(workspaceID, callID, hostID, entity.CallRoleHost, targetID, &status, pub)
+
+			result, err := svc.InviteParticipants(ctx, workspaceID, callID, hostID, []uuid.UUID{targetID})
+			if err != nil {
+				t.Fatalf("InviteParticipants returned error: %v", err)
+			}
+			stored := calls.participants[[2]uuid.UUID{callID, targetID}]
+			if stored.Status != tc.wantStatus {
+				t.Fatalf("stored status = %q, want %q", stored.Status, tc.wantStatus)
+			}
+			if tc.wantSkip != "" {
+				if len(result.Skipped) != 1 || result.Skipped[0].Reason != tc.wantSkip || result.Skipped[0].UserID != targetID {
+					t.Fatalf("skipped = %+v, want %s for target", result.Skipped, tc.wantSkip)
+				}
+				if len(result.Invited) != 0 {
+					t.Fatalf("invited = %+v, want empty", result.Invited)
+				}
+			} else if len(result.Invited) != 1 || result.Invited[0].Status != entity.ParticipantStatusInvited {
+				t.Fatalf("invited = %+v, want invited target", result.Invited)
+			}
+			if got := countBreakoutEvents(t, pub.captures, event.TypeCallInvited); got != tc.wantRings {
+				t.Fatalf("call.invited events = %d, want %d", got, tc.wantRings)
+			}
+		})
+	}
+}
+
+func TestInviteParticipantsAccessGuards(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("non host forbidden", func(t *testing.T) {
+		workspaceID := uuid.New()
+		callID := uuid.New()
+		actorID := uuid.New()
+		targetID := uuid.New()
+		svc, _ := inviteParticipantsFixture(workspaceID, callID, actorID, entity.CallRoleParticipant, targetID, nil, &capturingPublisher{})
+
+		if _, err := svc.InviteParticipants(ctx, workspaceID, callID, actorID, []uuid.UUID{targetID}); !hasCode(err, cerrors.CodeForbidden) {
+			t.Fatalf("InviteParticipants non-host error = %v, want FORBIDDEN", err)
+		}
+	})
+
+	t.Run("non workspace member is unprocessable", func(t *testing.T) {
+		workspaceID := uuid.New()
+		callID := uuid.New()
+		hostID := uuid.New()
+		targetID := uuid.New()
+		svc, _ := inviteParticipantsFixture(workspaceID, callID, hostID, entity.CallRoleHost, targetID, nil, &capturingPublisher{})
+		delete(svc.members.(*fakeWorkspaceRepo).members, [2]uuid.UUID{workspaceID, targetID})
+
+		if _, err := svc.InviteParticipants(ctx, workspaceID, callID, hostID, []uuid.UUID{targetID}); !hasCode(err, cerrors.CodeUnprocessable) {
+			t.Fatalf("InviteParticipants non-member error = %v, want UNPROCESSABLE", err)
+		}
+	})
+
+	t.Run("workspace member without call access is skipped", func(t *testing.T) {
+		workspaceID := uuid.New()
+		callID := uuid.New()
+		channelID := uuid.New()
+		hostID := uuid.New()
+		targetID := uuid.New()
+		pub := &capturingPublisher{}
+		status := entity.ParticipantStatusDisconnected
+		svc, _ := inviteParticipantsFixture(workspaceID, callID, hostID, entity.CallRoleHost, targetID, &status, pub)
+		calls := svc.calls.(*fakeCallRepo)
+		calls.calls[callID].ChannelID = &channelID
+		channels := svc.channels.(*fakeChannelRepo)
+		channels.channels[channelID] = &entity.Channel{ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePrivate}
+		channels.members = map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, hostID}: {ChannelID: channelID, UserID: hostID},
+		}
+
+		result, err := svc.InviteParticipants(ctx, workspaceID, callID, hostID, []uuid.UUID{targetID})
+		if err != nil {
+			t.Fatalf("InviteParticipants returned error: %v", err)
+		}
+		if len(result.Skipped) != 1 || result.Skipped[0].Reason != "no_access" {
+			t.Fatalf("skipped = %+v, want no_access", result.Skipped)
+		}
+		if got := countBreakoutEvents(t, pub.captures, event.TypeCallInvited); got != 0 {
+			t.Fatalf("call.invited events = %d, want 0", got)
+		}
+	})
+}
+
+func TestDeclineCallTransitionsInvitedAndWaitingOnly(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		status    entity.ParticipantStatus
+		wantEvent int
+		wantState entity.ParticipantStatus
+	}{
+		{status: entity.ParticipantStatusInvited, wantEvent: 1, wantState: entity.ParticipantStatusDeclined},
+		{status: entity.ParticipantStatusWaiting, wantEvent: 1, wantState: entity.ParticipantStatusDeclined},
+		{status: entity.ParticipantStatusConnected, wantState: entity.ParticipantStatusConnected},
+		{status: entity.ParticipantStatusDisconnected, wantState: entity.ParticipantStatusDisconnected},
+		{status: entity.ParticipantStatusDeclined, wantState: entity.ParticipantStatusDeclined},
+	} {
+		t.Run(string(tc.status), func(t *testing.T) {
+			workspaceID := uuid.New()
+			callID := uuid.New()
+			userID := uuid.New()
+			pub := &capturingPublisher{}
+			status := tc.status
+			svc, calls := inviteParticipantsFixture(workspaceID, callID, userID, entity.CallRoleHost, userID, &status, pub)
+
+			if err := svc.DeclineCall(ctx, workspaceID, callID, userID); err != nil {
+				t.Fatalf("DeclineCall returned error: %v", err)
+			}
+			if got := calls.participants[[2]uuid.UUID{callID, userID}].Status; got != tc.wantState {
+				t.Fatalf("stored status = %q, want %q", got, tc.wantState)
+			}
+			if got := countBreakoutEvents(t, pub.captures, event.TypeCallParticipantUpdated); got != tc.wantEvent {
+				t.Fatalf("participant updated events = %d, want %d", got, tc.wantEvent)
+			}
+		})
+	}
+}
+
+func TestDeclineCallUnknownParticipantNoops(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	targetID := uuid.New()
+	svc, calls := inviteParticipantsFixture(workspaceID, callID, hostID, entity.CallRoleHost, targetID, nil, &capturingPublisher{})
+	delete(calls.participants, [2]uuid.UUID{callID, targetID})
+
+	if err := svc.DeclineCall(ctx, workspaceID, callID, targetID); err != nil {
+		t.Fatalf("DeclineCall unknown participant returned error: %v", err)
+	}
+}
+
+func TestJoinCallInvitedMemberConnectsDirectlyAndActivatesRinging(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	inviteeID := uuid.New()
+	pub := &capturingPublisher{}
+	status := entity.ParticipantStatusInvited
+	svc, calls := inviteParticipantsFixture(workspaceID, callID, hostID, entity.CallRoleHost, inviteeID, &status, pub)
+	calls.calls[callID].Status = entity.CallStatusRinging
+	calls.calls[callID].Settings = entity.CallSettings{EntryMode: entity.EntryModeManualAdmit}
+
+	participant, err := svc.JoinCall(ctx, workspaceID, callID, inviteeID, "")
+	if err != nil {
+		t.Fatalf("JoinCall invited returned error: %v", err)
+	}
+	if participant.Status != entity.ParticipantStatusConnected {
+		t.Fatalf("participant status = %q, want connected", participant.Status)
+	}
+	if calls.calls[callID].Status != entity.CallStatusActive {
+		t.Fatalf("call status = %q, want active", calls.calls[callID].Status)
+	}
+	if got := countBreakoutEvents(t, pub.captures, event.TypeCallParticipantJoined); got != 1 {
+		t.Fatalf("joined events = %d, want 1", got)
+	}
+}
+
+func TestJoinCallInvitedMemberBypassesPasswordAndActivationRace(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	inviteeID := uuid.New()
+	status := entity.ParticipantStatusInvited
+	svc, calls := inviteParticipantsFixture(workspaceID, callID, hostID, entity.CallRoleHost, inviteeID, &status, &capturingPublisher{})
+	calls.calls[callID].Status = entity.CallStatusRinging
+	calls.calls[callID].Settings = entity.CallSettings{EntryMode: entity.EntryModePassword}
+	calls.calls[callID].JoinPasswordHash = "not-a-valid-password-hash"
+	calls.activateBeforeUpdate = func(call *entity.Call) {
+		call.Status = entity.CallStatusActive
+	}
+
+	participant, err := svc.JoinCall(ctx, workspaceID, callID, inviteeID, "")
+	if err != nil {
+		t.Fatalf("JoinCall invited activation race returned error: %v", err)
+	}
+	if participant.Status != entity.ParticipantStatusConnected {
+		t.Fatalf("participant status = %q, want connected", participant.Status)
+	}
+}
+
+func inviteParticipantsFixture(
+	workspaceID, callID, hostID uuid.UUID,
+	hostRole entity.CallRole,
+	targetID uuid.UUID,
+	targetStatus *entity.ParticipantStatus,
+	pub EventPublisher,
+) (*Service, *fakeCallRepo) {
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, hostID}:   {WorkspaceID: workspaceID, UserID: hostID, Role: entity.WorkspaceRoleMember},
+		{workspaceID, targetID}: {WorkspaceID: workspaceID, UserID: targetID, Role: entity.WorkspaceRoleMember},
+	}}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: {ID: uuid.New(), CallID: callID, UserID: hostID, Role: hostRole, Status: entity.ParticipantStatusConnected},
+		},
+	}
+	if targetStatus != nil {
+		calls.participants[[2]uuid.UUID{callID, targetID}] = &entity.CallParticipant{
+			ID:     uuid.New(),
+			CallID: callID,
+			UserID: targetID,
+			Role:   entity.CallRoleParticipant,
+			Status: *targetStatus,
+		}
+	}
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{},
+		members:  map[[2]uuid.UUID]*entity.ChannelMember{},
+	}
+	return NewService(calls, &fakeBreakoutRepo{}, channels, workspaces, pub, nil, mediaTestConfig(), nil, nil), calls
 }
 
 func removeParticipantFixture(workspaceID, callID, hostID, targetID uuid.UUID, actorRole entity.CallRole) (*Service, *fakeCallRepo) {
@@ -935,8 +1512,10 @@ func TestLiveKitBreakoutParticipantLeftMarksHardLeaveDisconnected(t *testing.T) 
 	leaver.BreakoutRoomID = &breakoutRoomID
 	host := connectedParticipant(callID, hostID, entity.CallRoleHost)
 
+	call := breakoutCall(callID, workspaceID, hostID)
+	call.PinnedParticipantUserID = &userID
 	calls := &fakeCallRepo{
-		calls: map[uuid.UUID]*entity.Call{callID: breakoutCall(callID, workspaceID, hostID)},
+		calls: map[uuid.UUID]*entity.Call{callID: call},
 		participants: map[[2]uuid.UUID]*entity.CallParticipant{
 			{callID, userID}: leaver,
 			{callID, hostID}: host,
@@ -956,11 +1535,17 @@ func TestLiveKitBreakoutParticipantLeftMarksHardLeaveDisconnected(t *testing.T) 
 		t.Fatalf("HandleLiveKitWebhook returned error: %v", err)
 	}
 
+	if calls.calls[callID].PinnedParticipantUserID != nil {
+		t.Fatalf("pinned participant = %v, want nil", calls.calls[callID].PinnedParticipantUserID)
+	}
 	if leaver.Status != entity.ParticipantStatusDisconnected {
 		t.Fatalf("leaver status = %v, want disconnected", leaver.Status)
 	}
 	if got := countBreakoutEvents(t, pub.captures, event.TypeCallParticipantLeft); got != 1 {
 		t.Fatalf("call.participant.left events = %d, want 1", got)
+	}
+	if got := countBreakoutEvents(t, pub.captures, event.TypeCallPinnedChanged); got != 1 {
+		t.Fatalf("call.pinned.changed events = %d, want 1", got)
 	}
 	// Host is still connected, so the call must NOT auto-end.
 	if calls.calls[callID].Status == entity.CallStatusEnded {
@@ -2282,7 +2867,7 @@ func (r *fakeWorkspaceRepo) GetMember(_ context.Context, workspaceID, userID uui
 	}
 	return nil, cerrors.NotFound("workspace member not found")
 }
-func (r *fakeWorkspaceRepo) ListMembers(context.Context, uuid.UUID, pagination.Params) ([]entity.WorkspaceMember, error) {
+func (r *fakeWorkspaceRepo) ListMembers(context.Context, uuid.UUID, pagination.Params, string) ([]entity.WorkspaceMember, error) {
 	return nil, nil
 }
 func (r *fakeWorkspaceRepo) UpdateMemberRole(context.Context, uuid.UUID, uuid.UUID, entity.WorkspaceRole) error {
@@ -2353,11 +2938,13 @@ func (r *fakeChannelRepo) GetDMChannel(context.Context, uuid.UUID, uuid.UUID, uu
 type fakeCallRepo struct {
 	calls                             map[uuid.UUID]*entity.Call
 	participants                      map[[2]uuid.UUID]*entity.CallParticipant
+	invited                           map[uuid.UUID]map[uuid.UUID]bool
 	liveKitWebhookEvents              map[string]*entity.LiveKitWebhookEvent
 	liveKitWebhookClaimAttempts       map[string]int
 	settingsUpdates                   int
 	markLiveKitWebhookBeforeProcessed func(event *entity.LiveKitWebhookEvent)
 	cancelBeforeUpdate                func(call *entity.Call)
+	activateBeforeUpdate              func(call *entity.Call)
 	disconnectBeforeUpdate            func(participant *entity.CallParticipant)
 }
 
@@ -2392,6 +2979,25 @@ func (r *fakeCallRepo) ListActiveByWorkspace(_ context.Context, workspaceID uuid
 		if call.Status != entity.CallStatusEnded && call.WorkspaceID == workspaceID {
 			calls = append(calls, *call)
 		}
+	}
+	return calls, nil
+}
+func (r *fakeCallRepo) ListRecentByWorkspace(_ context.Context, workspaceID uuid.UUID, limit int, before *time.Time) ([]entity.Call, error) {
+	var calls []entity.Call
+	for _, call := range r.calls {
+		if call.WorkspaceID != workspaceID {
+			continue
+		}
+		if before != nil && !call.CreatedAt.Before(*before) {
+			continue
+		}
+		calls = append(calls, *call)
+	}
+	sort.Slice(calls, func(i, j int) bool {
+		return calls[i].CreatedAt.After(calls[j].CreatedAt)
+	})
+	if limit > 0 && len(calls) > limit {
+		return calls[:limit], nil
 	}
 	return calls, nil
 }
@@ -2432,10 +3038,63 @@ func (r *fakeCallRepo) UpdateSettings(_ context.Context, id uuid.UUID, settings 
 	call.Settings = settings
 	return nil
 }
+
+func (r *fakeCallRepo) UpdateAccessLevel(_ context.Context, id uuid.UUID, level entity.AccessLevel) error {
+	call := r.calls[id]
+	if call == nil {
+		return cerrors.NotFound("call not found")
+	}
+	call.AccessLevel = level.Resolved()
+	return nil
+}
+
+func (r *fakeCallRepo) AddInvitedMembers(_ context.Context, callID uuid.UUID, userIDs []uuid.UUID, _ uuid.UUID) error {
+	if r.invited == nil {
+		r.invited = map[uuid.UUID]map[uuid.UUID]bool{}
+	}
+	if r.invited[callID] == nil {
+		r.invited[callID] = map[uuid.UUID]bool{}
+	}
+	for _, u := range userIDs {
+		r.invited[callID][u] = true
+	}
+	return nil
+}
+
+func (r *fakeCallRepo) IsInvited(_ context.Context, callID, userID uuid.UUID) (bool, error) {
+	return r.invited[callID][userID], nil
+}
+
+func (r *fakeCallRepo) ListInvitedMembers(_ context.Context, callID uuid.UUID) ([]uuid.UUID, error) {
+	ids := make([]uuid.UUID, 0, len(r.invited[callID]))
+	for u := range r.invited[callID] {
+		ids = append(ids, u)
+	}
+	return ids, nil
+}
+
+func (r *fakeCallRepo) SnapshotConnectedIntoInvited(_ context.Context, callID, _ uuid.UUID) error {
+	if r.invited == nil {
+		r.invited = map[uuid.UUID]map[uuid.UUID]bool{}
+	}
+	if r.invited[callID] == nil {
+		r.invited[callID] = map[uuid.UUID]bool{}
+	}
+	for key, p := range r.participants {
+		if key[0] == callID && p.Status == entity.ParticipantStatusConnected && !p.IsGuest {
+			r.invited[callID][p.UserID] = true
+		}
+	}
+	return nil
+}
 func (r *fakeCallRepo) ActivateRinging(_ context.Context, id uuid.UUID) (bool, error) {
 	call := r.calls[id]
 	if call == nil {
 		return false, cerrors.NotFound("call not found")
+	}
+	if r.activateBeforeUpdate != nil {
+		r.activateBeforeUpdate(call)
+		r.activateBeforeUpdate = nil
 	}
 	if call.Status != entity.CallStatusRinging {
 		return false, nil
@@ -2576,8 +3235,28 @@ func (r *fakeCallRepo) ListParticipants(_ context.Context, callID uuid.UUID) ([]
 	}
 	return participants, nil
 }
-func (r *fakeCallRepo) UpdateParticipantStatus(context.Context, uuid.UUID, entity.ParticipantStatus) error {
-	return nil
+func (r *fakeCallRepo) UpdateParticipantStatus(ctx context.Context, id uuid.UUID, status entity.ParticipantStatus) error {
+	return r.UpdateParticipantStatusWithReason(ctx, id, status, "")
+}
+func (r *fakeCallRepo) UpdateParticipantStatusWithReason(_ context.Context, id uuid.UUID, status entity.ParticipantStatus, reason entity.ParticipantLeftReason) error {
+	for _, p := range r.participants {
+		if p.ID != id {
+			continue
+		}
+		now := time.Now().UTC()
+		p.Status = status
+		if status == entity.ParticipantStatusConnected {
+			p.JoinedAt = &now
+			p.LeftAt = nil
+			p.LeftReason = ""
+		}
+		if status == entity.ParticipantStatusDisconnected {
+			p.LeftAt = &now
+			p.LeftReason = reason
+		}
+		return nil
+	}
+	return cerrors.NotFound("call participant not found")
 }
 func (r *fakeCallRepo) DisconnectParticipantIfConnectedWithReason(_ context.Context, id uuid.UUID, reason entity.ParticipantLeftReason) (bool, error) {
 	for _, p := range r.participants {
@@ -2648,6 +3327,13 @@ func (r *fakeCallRepo) SetFeaturedShareUserID(_ context.Context, callID uuid.UUI
 	}
 	return cerrors.NotFound("call not found")
 }
+func (r *fakeCallRepo) SetPinnedParticipantUserID(_ context.Context, callID uuid.UUID, userID *uuid.UUID) error {
+	if c := r.calls[callID]; c != nil {
+		c.PinnedParticipantUserID = userID
+		return nil
+	}
+	return cerrors.NotFound("call not found")
+}
 func (r *fakeCallRepo) RemoveParticipant(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 
 type removedLiveKitParticipant struct {
@@ -2668,10 +3354,19 @@ type fakeLiveKitRoomClient struct {
 	deletedRoomNames      []string
 	removedParticipants   []removedLiveKitParticipant
 	participantsByCall    map[uuid.UUID][]*livekitpb.ParticipantInfo
+	participantsByRoom    map[string][]*livekitpb.ParticipantInfo
 	listParticipantsErr   error
 	listParticipantsCalls int
 	updatedParticipants   []updatedLiveKitParticipant
 	updateParticipantErr  error
+	mutedTracks           []mutedLiveKitTrack
+	mutePublishedTrackErr error
+}
+
+type mutedLiveKitTrack struct {
+	room     string
+	identity string
+	trackSID string
 }
 
 func (c *fakeLiveKitRoomClient) EnsureRoom(_ context.Context, args LiveKitEnsureRoomArgs) error {
@@ -2702,10 +3397,21 @@ func (c *fakeLiveKitRoomClient) RemoveParticipant(_ context.Context, callID, use
 	return nil
 }
 
-func (c *fakeLiveKitRoomClient) ListParticipants(_ context.Context, callID uuid.UUID) ([]*livekitpb.ParticipantInfo, error) {
+func (c *fakeLiveKitRoomClient) ListParticipants(ctx context.Context, callID uuid.UUID) ([]*livekitpb.ParticipantInfo, error) {
+	return c.ListParticipantsByRoom(ctx, callID.String())
+}
+
+func (c *fakeLiveKitRoomClient) ListParticipantsByRoom(_ context.Context, room string) ([]*livekitpb.ParticipantInfo, error) {
 	c.listParticipantsCalls++
 	if c.listParticipantsErr != nil {
 		return nil, c.listParticipantsErr
+	}
+	if c.participantsByRoom != nil {
+		return c.participantsByRoom[room], nil
+	}
+	callID, err := uuid.Parse(room)
+	if err != nil {
+		return nil, nil
 	}
 	return c.participantsByCall[callID], nil
 }
@@ -2718,9 +3424,46 @@ func (c *fakeLiveKitRoomClient) UpdateParticipant(_ context.Context, room, ident
 	return nil
 }
 
+func (c *fakeLiveKitRoomClient) MutePublishedTrack(_ context.Context, room, identity, trackSID string) error {
+	if c.mutePublishedTrackErr != nil {
+		return c.mutePublishedTrackErr
+	}
+	c.mutedTracks = append(c.mutedTracks, mutedLiveKitTrack{room: room, identity: identity, trackSID: trackSID})
+	// Reflect the mute so a subsequent ListParticipants sees the track muted (the
+	// real RoomService does this), letting an idempotent reconcile pass skip it.
+	for _, parts := range c.participantsByCall {
+		for _, p := range parts {
+			if p.GetIdentity() != identity {
+				continue
+			}
+			for _, tr := range p.GetTracks() {
+				if tr.GetSid() == trackSID {
+					tr.Muted = true
+				}
+			}
+		}
+	}
+	for _, parts := range c.participantsByRoom {
+		for _, p := range parts {
+			if p.GetIdentity() != identity {
+				continue
+			}
+			for _, tr := range p.GetTracks() {
+				if tr.GetSid() == trackSID {
+					tr.Muted = true
+				}
+			}
+		}
+	}
+	return nil
+}
+
 type fakeBreakoutRepo struct{}
 
 func (fakeBreakoutRepo) Create(context.Context, *entity.BreakoutRoom) error { return nil }
+func (fakeBreakoutRepo) CreateRoomsWithinCap(context.Context, uuid.UUID, int, []entity.BreakoutRoom) error {
+	return nil
+}
 func (fakeBreakoutRepo) GetByID(context.Context, uuid.UUID) (*entity.BreakoutRoom, error) {
 	return nil, cerrors.NotFound("breakout room not found")
 }

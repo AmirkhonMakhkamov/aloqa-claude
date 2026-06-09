@@ -22,6 +22,12 @@ const (
 	realtimeEventStatusPublished  = "published"
 	realtimeEventStatusFailed     = "failed"
 	realtimeEventStatusDead       = "dead"
+
+	// realtimeReplayWindow bounds how far back ReplayRoom re-delivers events to
+	// a (re)subscribing client. A fresh tab subscribes with no cursor and must
+	// not receive the entire replayable backlog; older state is rehydrated by
+	// the normal on-load REST queries. (zombie-calls)
+	realtimeReplayWindow = "24 hours"
 )
 
 type RealtimeRepo struct {
@@ -248,9 +254,18 @@ func (r *RealtimeRepo) ReplayRoom(ctx context.Context, room string, afterSequenc
 		  AND replayable = true
 		  AND subject = $1
 		  AND sequence > $2
+		  -- (zombie-calls) Bound the freshness ONLY for call.started, the single
+		  -- durable type that seeds an in-call surface on the client. A fresh tab
+		  -- has no cursor (afterSequence = 0) and would otherwise replay weeks-old
+		  -- call.started events and render phantom "zombie" calls; this window is
+		  -- defense-in-depth on top of the end-path tombstone. Every other
+		  -- replayable type (message.created/updated/deleted, calendar, call
+		  -- lifecycle) is left UNBOUNDED so a client reconnecting after a long
+		  -- offline gap still catches up on real events it missed.
+		  AND (type <> 'call.started' OR created_at > now() - $4::interval)
 		ORDER BY sequence ASC
 		LIMIT $3
-	`, subject, afterSequence, limit)
+	`, subject, afterSequence, limit, realtimeReplayWindow)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: replay room events: %w", err)
 	}

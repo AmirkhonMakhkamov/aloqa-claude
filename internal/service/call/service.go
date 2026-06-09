@@ -88,6 +88,21 @@ type CancelCallResult struct {
 	Ended bool `json:"ended"`
 }
 
+type InviteSkip struct {
+	UserID uuid.UUID `json:"user_id"`
+	Reason string    `json:"reason"`
+}
+
+type InviteResult struct {
+	Invited []entity.CallParticipant `json:"invited"`
+	Skipped []InviteSkip             `json:"skipped"`
+}
+
+type StartCallAccessOptions struct {
+	AccessLevel      entity.AccessLevel
+	InvitedMemberIDs []uuid.UUID
+}
+
 // Service handles call lifecycle, participant management, and WebRTC signaling.
 type Service struct {
 	calls            repository.CallRepository
@@ -262,10 +277,36 @@ func (s *Service) AuthorizeGuestLink(ctx context.Context, workspaceID, callID, u
 	if call.Status == entity.CallStatusEnded {
 		return nil, cerrors.CallEnded("call has already ended")
 	}
-	if err := s.requireHostOrCoHost(ctx, callID, userID); err != nil {
+	if err := s.authorizeGuestLinkActor(ctx, call, userID); err != nil {
 		return nil, err
 	}
 	return call, nil
+}
+
+func (s *Service) authorizeGuestLinkActor(ctx context.Context, call *entity.Call, userID uuid.UUID) error {
+	participant, err := s.calls.GetParticipant(ctx, call.ID, userID)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return cerrors.Forbidden("user is not a participant in this call")
+		}
+		return cerrors.Internal("failed to get participant", err)
+	}
+	if participant.Role == entity.CallRoleHost || participant.Role == entity.CallRoleCoHost {
+		return nil
+	}
+	if isPrivateChannelLessCall(call) {
+		return cerrors.Forbidden("only host or co-host can add guests to a private call")
+	}
+	if call.Settings.ResolvedWhoCanAddGuests() != entity.WhoCanAddGuestsEveryone {
+		return cerrors.Forbidden("only host or co-host can add guests to this call")
+	}
+	if participant.Status != entity.ParticipantStatusConnected {
+		return cerrors.Forbidden("only connected participants can add guests")
+	}
+	if participant.IsGuest {
+		return cerrors.Forbidden("guests cannot add guests")
+	}
+	return nil
 }
 
 func (s *Service) requireChannelAccess(ctx context.Context, ch *entity.Channel, userID uuid.UUID) error {
@@ -347,6 +388,7 @@ func (s *Service) requireCallAccess(ctx context.Context, workspaceID, callID, us
 	if _, merr := s.members.GetMember(ctx, call.WorkspaceID, userID); merr == nil {
 		isMember = true
 	}
+	hasCallGuestGrant := false
 	if !isMember && s.guests != nil {
 		// One grants query derives BOTH the is-guest flag and per-call access,
 		// instead of separate IsGuest + HasCallAccess round-trips on this hot path.
@@ -354,6 +396,7 @@ func (s *Service) requireCallAccess(ctx context.Context, workspaceID, callID, us
 		if gerr != nil {
 			return nil, gerr
 		}
+		hasCallGuestGrant = hasCall
 		if isGuest {
 			if hasCall {
 				return call, nil
@@ -400,10 +443,86 @@ func (s *Service) requireCallAccess(ctx context.Context, workspaceID, callID, us
 		}
 		return call, nil
 	}
+	if isPrivateChannelLessCall(call) {
+		allowed, err := s.canAccessPrivateChannelLessCall(ctx, call, userID, isMember, hasCallGuestGrant)
+		if err != nil {
+			return nil, err
+		}
+		if !allowed {
+			return nil, cerrors.Forbidden("you do not have access to this private call")
+		}
+		return call, nil
+	}
 	if err := s.canAccessWorkspaceContent(ctx, call.WorkspaceID, userID); err != nil {
 		return nil, err
 	}
 	return call, nil
+}
+
+func isPrivateChannelLessCall(call *entity.Call) bool {
+	return call != nil &&
+		call.ChannelID == nil &&
+		call.Type != entity.CallTypeOneToOne &&
+		call.AccessLevel.Resolved() == entity.AccessLevelPrivate
+}
+
+func (s *Service) canAccessPrivateChannelLessCall(
+	ctx context.Context,
+	call *entity.Call,
+	userID uuid.UUID,
+	isWorkspaceMember bool,
+	hasCallGuestGrant bool,
+) (bool, error) {
+	if call.CreatedBy == userID || hasCallGuestGrant {
+		return true, nil
+	}
+	participant, err := s.calls.GetParticipant(ctx, call.ID, userID)
+	if err == nil {
+		if participant.Role == entity.CallRoleHost || participant.Role == entity.CallRoleCoHost {
+			return true, nil
+		}
+		if participant.Status == entity.ParticipantStatusConnected {
+			return true, nil
+		}
+	} else if appErr, ok := cerrors.AsAppError(err); !ok || appErr.Code != cerrors.CodeNotFound {
+		return false, cerrors.Internal("failed to check call participation", err)
+	}
+	if !isWorkspaceMember {
+		return false, nil
+	}
+	invited, err := s.calls.IsInvited(ctx, call.ID, userID)
+	if err != nil {
+		return false, cerrors.Internal("failed to check private call invite", err)
+	}
+	return invited, nil
+}
+
+func (s *Service) canUserEnterPrivateChannelLessCall(ctx context.Context, call *entity.Call, userID uuid.UUID) error {
+	if !isPrivateChannelLessCall(call) {
+		return nil
+	}
+	isMember := false
+	if _, err := s.members.GetMember(ctx, call.WorkspaceID, userID); err == nil {
+		isMember = true
+	} else if appErr, ok := cerrors.AsAppError(err); !ok || appErr.Code != cerrors.CodeNotFound {
+		return cerrors.Internal("failed to verify workspace membership", err)
+	}
+	hasCallGuestGrant := false
+	if !isMember && s.guests != nil {
+		allowed, err := s.guests.HasCallAccess(ctx, call.WorkspaceID, call.ID, userID)
+		if err != nil {
+			return err
+		}
+		hasCallGuestGrant = allowed
+	}
+	allowed, err := s.canAccessPrivateChannelLessCall(ctx, call, userID, isMember, hasCallGuestGrant)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return cerrors.Forbidden("you do not have access to this private call")
+	}
+	return nil
 }
 
 // CanAccessCall verifies that a user can access a call in a workspace.
@@ -433,6 +552,16 @@ func (s *Service) ensureCollaborationChannelAccess(ctx context.Context, ch *enti
 // passwords are rejected as invalid input rather than failing to hash. #4.
 const maxJoinPasswordBytes = 72
 
+// ValidateNewCallSettings exposes the package-private validateCallSettings on the
+// service so other services that build a call inline (e.g. the calendar service's
+// transactional StartCallFromEvent path, which writes the call row directly rather
+// than going through StartCall) can run the SAME field validation StartCall runs.
+// Without this the tx path could persist a settings tuple StartCall would reject,
+// diverging the two scheduled-call paths (ALK-819 review).
+func (s *Service) ValidateNewCallSettings(callType entity.CallType, settings entity.CallSettings) error {
+	return validateCallSettings(callType, settings)
+}
+
 func validateCallSettings(callType entity.CallType, settings entity.CallSettings) error {
 	switch callType {
 	case entity.CallTypeOneToOne, entity.CallTypeGroup, entity.CallTypeMeeting, entity.CallTypeWebinar, entity.CallTypeSelector:
@@ -444,6 +573,19 @@ func validateCallSettings(callType entity.CallType, settings entity.CallSettings
 	}
 	if settings.EntryMode != "" && !settings.EntryMode.Valid() {
 		return cerrors.InvalidInput("invalid entry_mode")
+	}
+	// breakout_creation / max_breakout_rooms are validated only when explicitly
+	// set (zero values mean "unset" and are normalised to host / 8 on read),
+	// mirroring the entry_mode tolerance above so legacy/omitting clients keep
+	// working while the PATCH and create paths reject genuinely invalid input.
+	if settings.BreakoutCreation != "" && !settings.BreakoutCreation.Valid() {
+		return cerrors.InvalidInput("invalid breakout_creation")
+	}
+	if settings.MaxBreakoutRooms != 0 && (settings.MaxBreakoutRooms < 1 || settings.MaxBreakoutRooms > 8) {
+		return cerrors.InvalidInput("max_breakout_rooms must be between 1 and 8")
+	}
+	if settings.WhoCanAddGuests != "" && !settings.WhoCanAddGuests.Valid() {
+		return cerrors.InvalidInput("invalid who_can_add_guests")
 	}
 	return nil
 }
@@ -682,20 +824,21 @@ func (s *Service) userActiveCall(ctx context.Context, workspaceID, userID uuid.U
 	return nil, nil
 }
 
-func (s *Service) StartCall(
-	ctx context.Context,
-	workspaceID, userID uuid.UUID,
-	callType entity.CallType,
-	title string,
-	channelID *uuid.UUID,
-	settings entity.CallSettings,
-	joinPassword string,
-) (*entity.Call, error) {
+// FinalizeNewCallSettings resolves a caller-supplied call-settings tuple to the
+// concrete, server-authoritative values a freshly created call must carry. It is
+// the single source of truth for new-call finalisation: StartCall applies it on
+// every ad-hoc/channel/DM/meeting creation, and the calendar service applies it
+// on the scheduled-call (StartCallFromEvent) tx path that writes the call entity
+// directly — so both paths persist byte-identical settings for the same input.
+//
+// It does NOT validate (that is validateCallSettings' job, run before this on the
+// StartCall path) and never returns an error; callers that need validation must
+// run it on the raw settings first.
+func (s *Service) FinalizeNewCallSettings(callType entity.CallType, settings entity.CallSettings) entity.CallSettings {
+	// Group/meeting calls always start with breakout enabled; the host disables
+	// it at runtime. This is a server invariant, not a presettable option.
 	if callType == entity.CallTypeGroup || callType == entity.CallTypeMeeting {
 		settings.BreakoutRooms = true
-	}
-	if err := validateCallSettings(callType, settings); err != nil {
-		return nil, err
 	}
 	// Recording is only offerable when egress is configured server-side; advertise
 	// an honest capability so the FE control gate (settings.recording) is truthful (ALK-701).
@@ -708,6 +851,19 @@ func (s *Service) StartCall(
 	// the default rather than an unconditional override.
 	settings.Chat = true
 
+	// Default the member-permission policies to permissive (true) at creation so
+	// every new call carries concrete pointer values; a legacy row that predates
+	// these fields keeps nil and resolves to true via the entity accessors. A
+	// caller that set an explicit value is respected. (ALK-812 / S4.)
+	if settings.MembersCanUnmuteMic == nil {
+		permissive := true
+		settings.MembersCanUnmuteMic = &permissive
+	}
+	if settings.MembersCanEnableCamera == nil {
+		permissive := true
+		settings.MembersCanEnableCamera = &permissive
+	}
+
 	// Resolve the entry mode at creation so the persisted row (and every API read)
 	// carries a concrete value. When the caller omits entry_mode we derive it from
 	// the legacy waiting_room flag (backwards-compatible: existing/programmatic
@@ -719,6 +875,55 @@ func (s *Service) StartCall(
 	entryMode := settings.ResolvedEntryMode()
 	settings.EntryMode = entryMode
 	settings.WaitingRoom = entryMode == entity.EntryModeManualAdmit
+	settings.BreakoutCreation = settings.ResolvedBreakoutCreation()
+	settings.MaxBreakoutRooms = settings.ResolvedMaxBreakoutRooms()
+	settings.WhoCanAddGuests = settings.ResolvedWhoCanAddGuests()
+	return settings
+}
+
+func (s *Service) StartCall(
+	ctx context.Context,
+	workspaceID, userID uuid.UUID,
+	callType entity.CallType,
+	title string,
+	channelID *uuid.UUID,
+	settings entity.CallSettings,
+	joinPassword string,
+) (*entity.Call, error) {
+	return s.StartCallWithAccess(ctx, workspaceID, userID, callType, title, channelID, settings, joinPassword, StartCallAccessOptions{})
+}
+
+func (s *Service) StartCallWithAccess(
+	ctx context.Context,
+	workspaceID, userID uuid.UUID,
+	callType entity.CallType,
+	title string,
+	channelID *uuid.UUID,
+	settings entity.CallSettings,
+	joinPassword string,
+	accessOptions StartCallAccessOptions,
+) (*entity.Call, error) {
+	if err := validateCallSettings(callType, settings); err != nil {
+		return nil, err
+	}
+	accessLevel := entity.AccessLevelPublic
+	if accessOptions.AccessLevel != "" {
+		if !accessOptions.AccessLevel.Valid() {
+			return nil, cerrors.InvalidInput("invalid access_level")
+		}
+		accessLevel = accessOptions.AccessLevel
+	}
+	if len(accessOptions.InvitedMemberIDs) > 0 && accessLevel != entity.AccessLevelPrivate {
+		return nil, cerrors.InvalidInput("invited_member_ids require private access")
+	}
+	if accessLevel == entity.AccessLevelPrivate && (channelID != nil || callType == entity.CallTypeOneToOne) {
+		return nil, cerrors.InvalidInput("private access is only supported for channel-less multi-party calls")
+	}
+	// Resolve the entry mode here too so the password branch below sees the
+	// concrete mode; FinalizeNewCallSettings resolves it identically before
+	// persisting so the two stay in lock-step.
+	settings = s.FinalizeNewCallSettings(callType, settings)
+	entryMode := settings.EntryMode
 
 	var joinPasswordHash string
 	if entryMode == entity.EntryModePassword {
@@ -739,6 +944,11 @@ func (s *Service) StartCall(
 	}
 
 	if err := s.requireWorkspaceMember(ctx, workspaceID, userID); err != nil {
+		return nil, err
+	}
+
+	invitedMemberIDs, err := s.validateInvitedMemberIDs(ctx, workspaceID, accessOptions.InvitedMemberIDs)
+	if err != nil {
 		return nil, err
 	}
 
@@ -790,6 +1000,7 @@ func (s *Service) StartCall(
 		Status:           entity.CallStatusRinging,
 		Title:            title,
 		CreatedBy:        userID,
+		AccessLevel:      accessLevel,
 		Settings:         settings,
 		JoinPasswordHash: joinPasswordHash,
 		StartedAt:        &now,
@@ -822,6 +1033,11 @@ func (s *Service) StartCall(
 			if err := scope.Calls().AddParticipant(ctx, participant); err != nil {
 				return err
 			}
+			if accessLevel == entity.AccessLevelPrivate && len(invitedMemberIDs) > 0 {
+				if err := scope.Calls().AddInvitedMembers(ctx, call.ID, invitedMemberIDs, userID); err != nil {
+					return err
+				}
+			}
 			return s.enqueueCallEventTx(ctx, scope, event.TypeCallStarted, call, userID)
 		}); err != nil {
 			slog.ErrorContext(ctx, "failed to create call transaction", "call_id", call.ID, "error", err)
@@ -838,6 +1054,13 @@ func (s *Service) StartCall(
 			slog.ErrorContext(ctx, "failed to add host participant", "call_id", call.ID, "user_id", userID, "error", err)
 			s.deleteLiveKitRoomBestEffort(ctx, call.ID)
 			return nil, cerrors.Internal("failed to add host participant", err)
+		}
+		if accessLevel == entity.AccessLevelPrivate && len(invitedMemberIDs) > 0 {
+			if err := s.calls.AddInvitedMembers(ctx, call.ID, invitedMemberIDs, userID); err != nil {
+				slog.ErrorContext(ctx, "failed to add private call invited members", "call_id", call.ID, "error", err)
+				s.deleteLiveKitRoomBestEffort(ctx, call.ID)
+				return nil, cerrors.Internal("failed to add private call invited members", err)
+			}
 		}
 		s.publishCallEvent(ctx, event.TypeCallStarted, call, userID)
 	}
@@ -856,6 +1079,31 @@ func (s *Service) StartCall(
 
 	slog.InfoContext(ctx, "call started", "call_id", call.ID, "type", callType, "user_id", userID)
 	return call, nil
+}
+
+func (s *Service) validateInvitedMemberIDs(ctx context.Context, workspaceID uuid.UUID, userIDs []uuid.UUID) ([]uuid.UUID, error) {
+	if len(userIDs) == 0 {
+		return nil, nil
+	}
+	seen := make(map[uuid.UUID]struct{}, len(userIDs))
+	validated := make([]uuid.UUID, 0, len(userIDs))
+	for _, userID := range userIDs {
+		if userID == uuid.Nil {
+			return nil, cerrors.InvalidInput("invited_member_ids must not contain nil")
+		}
+		if _, ok := seen[userID]; ok {
+			continue
+		}
+		seen[userID] = struct{}{}
+		if _, err := s.members.GetMember(ctx, workspaceID, userID); err != nil {
+			if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+				return nil, cerrors.InvalidInput("invited members must belong to the workspace")
+			}
+			return nil, cerrors.Internal("failed to verify invited member", err)
+		}
+		validated = append(validated, userID)
+	}
+	return validated, nil
 }
 
 // JoinCall adds a user as a participant to an active call.
@@ -914,6 +1162,9 @@ func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid
 		if existing.Status == entity.ParticipantStatusWaiting {
 			slog.InfoContext(ctx, "participant remains in waiting room", "call_id", callID, "user_id", userID)
 			return existing, nil
+		}
+		if existing.Status == entity.ParticipantStatusInvited && !guest {
+			return s.connectInvitedParticipant(ctx, call, existing)
 		}
 		// A guest who is not already connected (e.g. left then returned with the
 		// same session) must re-knock rather than silently reconnect (ALK-700) —
@@ -1066,6 +1317,59 @@ func (s *Service) JoinCall(ctx context.Context, workspaceID, callID, userID uuid
 	return participant, nil
 }
 
+func (s *Service) connectInvitedParticipant(ctx context.Context, call *entity.Call, participant *entity.CallParticipant) (*entity.CallParticipant, error) {
+	if s.tx != nil {
+		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
+			if scope.Calls() == nil {
+				return cerrors.Unavailable("call transaction scope is not configured")
+			}
+			if err := scope.Calls().UpdateParticipantStatus(ctx, participant.ID, entity.ParticipantStatusConnected); err != nil {
+				return err
+			}
+			participant.Status = entity.ParticipantStatusConnected
+			now := time.Now()
+			participant.JoinedAt = &now
+			if call.Status == entity.CallStatusRinging {
+				activated, err := activateRingingCall(ctx, scope.Calls(), call.ID)
+				if err != nil {
+					return err
+				}
+				if activated {
+					call.Status = entity.CallStatusActive
+				}
+			}
+			return s.enqueueParticipantEventTx(ctx, scope, event.TypeCallParticipantJoined, call, participant)
+		}); err != nil {
+			slog.ErrorContext(ctx, "failed to connect invited participant", "call_id", call.ID, "user_id", participant.UserID, "error", err)
+			return nil, serviceError("failed to connect invited participant", err)
+		}
+		slog.InfoContext(ctx, "invited participant joined call", "call_id", call.ID, "user_id", participant.UserID)
+		return participant, nil
+	}
+
+	if err := s.calls.UpdateParticipantStatus(ctx, participant.ID, entity.ParticipantStatusConnected); err != nil {
+		slog.ErrorContext(ctx, "failed to connect invited participant", "participant_id", participant.ID, "error", err)
+		return nil, cerrors.Internal("failed to update participant status", err)
+	}
+	participant.Status = entity.ParticipantStatusConnected
+	now := time.Now()
+	participant.JoinedAt = &now
+	if call.Status == entity.CallStatusRinging {
+		activated, err := activateRingingCall(ctx, s.calls, call.ID)
+		if err != nil {
+			slog.ErrorContext(ctx, "failed to activate ringing call for invited participant", "call_id", call.ID, "error", err)
+			return nil, serviceError("failed to activate call", err)
+		}
+		if activated {
+			call.Status = entity.CallStatusActive
+		}
+	}
+	s.publishParticipantEvent(ctx, event.TypeCallParticipantJoined, call, participant)
+
+	slog.InfoContext(ctx, "invited participant joined call", "call_id", call.ID, "user_id", participant.UserID)
+	return participant, nil
+}
+
 // AdmitParticipant moves a participant from the waiting room to the call.
 // Only host or co-host can admit participants.
 func (s *Service) AdmitParticipant(ctx context.Context, workspaceID, callID, userID, targetUserID uuid.UUID) error {
@@ -1088,6 +1392,9 @@ func (s *Service) AdmitParticipant(ctx context.Context, workspaceID, callID, use
 
 	if participant.Status != entity.ParticipantStatusWaiting {
 		return cerrors.Conflict("participant is not in the waiting room")
+	}
+	if err := s.canUserEnterPrivateChannelLessCall(ctx, call, targetUserID); err != nil {
+		return err
 	}
 
 	if err := s.calls.UpdateParticipantStatus(ctx, participant.ID, entity.ParticipantStatusConnected); err != nil {
@@ -1134,6 +1441,9 @@ func (s *Service) AdmitAll(ctx context.Context, workspaceID, callID, userID uuid
 	for _, p := range participants {
 		if p.Status != entity.ParticipantStatusWaiting {
 			continue
+		}
+		if err := s.canUserEnterPrivateChannelLessCall(ctx, call, p.UserID); err != nil {
+			return err
 		}
 		if err := s.calls.UpdateParticipantStatus(ctx, p.ID, entity.ParticipantStatusConnected); err != nil {
 			slog.ErrorContext(ctx, "failed to admit participant", "participant_id", p.ID, "error", err)
@@ -1211,6 +1521,144 @@ func (s *Service) RejectParticipant(ctx context.Context, workspaceID, callID, us
 	return nil
 }
 
+func (s *Service) InviteParticipants(ctx context.Context, workspaceID, callID, actorUserID uuid.UUID, targetUserIDs []uuid.UUID) (*InviteResult, error) {
+	call, err := s.requireCallAccess(ctx, workspaceID, callID, actorUserID)
+	if err != nil {
+		return nil, err
+	}
+	if call.Status == entity.CallStatusEnded {
+		return nil, cerrors.Forbidden("call has already ended")
+	}
+	if err := s.requireHostOrCoHost(ctx, callID, actorUserID); err != nil {
+		return nil, err
+	}
+
+	// Phase 1: validate every target (dedup + nil + workspace membership) BEFORE
+	// any side effect, so a bad id in the batch fails the whole request with 422
+	// without having already inserted/rung earlier valid targets (atomic 422).
+	seen := make(map[uuid.UUID]struct{}, len(targetUserIDs))
+	targets := make([]uuid.UUID, 0, len(targetUserIDs))
+	for _, targetUserID := range targetUserIDs {
+		if targetUserID == uuid.Nil {
+			return nil, cerrors.InvalidInput("user_ids must not contain nil")
+		}
+		if _, ok := seen[targetUserID]; ok {
+			continue
+		}
+		seen[targetUserID] = struct{}{}
+
+		if _, err := s.members.GetMember(ctx, call.WorkspaceID, targetUserID); err != nil {
+			if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+				return nil, cerrors.Unprocessable("user is not a workspace member")
+			}
+			slog.ErrorContext(ctx, "failed to verify invite target membership", "workspace_id", call.WorkspaceID, "user_id", targetUserID, "error", err)
+			return nil, cerrors.Internal("failed to verify workspace membership", err)
+		}
+		targets = append(targets, targetUserID)
+	}
+
+	// Phase 2: per-target access check + transition table + ring (mutations).
+	result := &InviteResult{
+		Invited: []entity.CallParticipant{},
+		Skipped: []InviteSkip{},
+	}
+	if isPrivateChannelLessCall(call) && len(targets) > 0 {
+		if err := s.calls.AddInvitedMembers(ctx, callID, targets, actorUserID); err != nil {
+			slog.ErrorContext(ctx, "failed to add private call invited members", "call_id", callID, "error", err)
+			return nil, cerrors.Internal("failed to add private call invited members", err)
+		}
+	}
+	for _, targetUserID := range targets {
+		if err := s.CanAccessCall(ctx, workspaceID, callID, targetUserID); err != nil {
+			// Only a genuine access denial means "skip, no_access". An infrastructure
+			// error must surface, not be silently swallowed as a successful skip.
+			if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeForbidden {
+				result.Skipped = append(result.Skipped, InviteSkip{UserID: targetUserID, Reason: "no_access"})
+				continue
+			}
+			slog.ErrorContext(ctx, "failed to check invite target call access", "call_id", callID, "user_id", targetUserID, "error", err)
+			return nil, cerrors.Internal("failed to verify call access", err)
+		}
+
+		existing, err := s.calls.GetParticipant(ctx, callID, targetUserID)
+		if err != nil {
+			if appErr, ok := cerrors.AsAppError(err); !ok || appErr.Code != cerrors.CodeNotFound {
+				slog.ErrorContext(ctx, "failed to get invite target participant", "call_id", callID, "user_id", targetUserID, "error", err)
+				return nil, cerrors.Internal("failed to get participant", err)
+			}
+		}
+
+		if existing == nil {
+			participant := &entity.CallParticipant{
+				ID:     id.New(),
+				CallID: callID,
+				UserID: targetUserID,
+				Role:   entity.CallRoleParticipant,
+				Status: entity.ParticipantStatusInvited,
+			}
+			if err := s.calls.AddParticipant(ctx, participant); err != nil {
+				slog.ErrorContext(ctx, "failed to add invited participant", "call_id", callID, "user_id", targetUserID, "error", err)
+				return nil, cerrors.Internal("failed to invite participant", err)
+			}
+			s.publishCallInvited(ctx, call, targetUserID, actorUserID)
+			result.Invited = append(result.Invited, *participant)
+			continue
+		}
+
+		switch existing.Status {
+		case entity.ParticipantStatusConnected:
+			result.Skipped = append(result.Skipped, InviteSkip{UserID: targetUserID, Reason: "already_connected"})
+		case entity.ParticipantStatusJoining:
+			result.Skipped = append(result.Skipped, InviteSkip{UserID: targetUserID, Reason: "joining"})
+		case entity.ParticipantStatusWaiting:
+			result.Skipped = append(result.Skipped, InviteSkip{UserID: targetUserID, Reason: "waiting"})
+		case entity.ParticipantStatusInvited, entity.ParticipantStatusDeclined, entity.ParticipantStatusDisconnected:
+			if existing.Status != entity.ParticipantStatusInvited {
+				if err := s.calls.UpdateParticipantStatus(ctx, existing.ID, entity.ParticipantStatusInvited); err != nil {
+					slog.ErrorContext(ctx, "failed to reset participant to invited", "participant_id", existing.ID, "error", err)
+					return nil, cerrors.Internal("failed to invite participant", err)
+				}
+				existing.Status = entity.ParticipantStatusInvited
+			}
+			s.publishCallInvited(ctx, call, targetUserID, actorUserID)
+			result.Invited = append(result.Invited, *existing)
+		default:
+			return nil, cerrors.Internal("unknown participant status", fmt.Errorf("status %q", existing.Status))
+		}
+	}
+
+	return result, nil
+}
+
+func (s *Service) DeclineCall(ctx context.Context, workspaceID, callID, userID uuid.UUID) error {
+	call, err := s.requireCallAccess(ctx, workspaceID, callID, userID)
+	if err != nil {
+		return err
+	}
+
+	participant, err := s.calls.GetParticipant(ctx, callID, userID)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return nil
+		}
+		slog.ErrorContext(ctx, "failed to get participant for decline", "call_id", callID, "user_id", userID, "error", err)
+		return cerrors.Internal("failed to get participant", err)
+	}
+
+	if participant.Status != entity.ParticipantStatusInvited && participant.Status != entity.ParticipantStatusWaiting {
+		return nil
+	}
+
+	if err := s.calls.UpdateParticipantStatus(ctx, participant.ID, entity.ParticipantStatusDeclined); err != nil {
+		slog.ErrorContext(ctx, "failed to decline call", "call_id", callID, "user_id", userID, "error", err)
+		return cerrors.Internal("failed to decline call", err)
+	}
+	participant.Status = entity.ParticipantStatusDeclined
+	s.publishParticipantEvent(ctx, event.TypeCallParticipantUpdated, call, participant)
+
+	return nil
+}
+
 // ListWaiting returns participants currently in the waiting room.
 func (s *Service) ListWaiting(ctx context.Context, workspaceID, callID, userID uuid.UUID) ([]entity.CallParticipant, error) {
 	if _, err := s.requireCallAccess(ctx, workspaceID, callID, userID); err != nil {
@@ -1257,12 +1705,17 @@ func (s *Service) LeaveCall(ctx context.Context, workspaceID, callID, userID uui
 	}
 
 	if participant.Status == entity.ParticipantStatusDisconnected {
+		if err := s.clearPinnedParticipantIfMatches(ctx, call, userID, userID); err != nil {
+			slog.ErrorContext(ctx, "failed to clear pinned participant on duplicate leave", "call_id", callID, "user_id", userID, "error", err)
+			return nil, cerrors.Internal("failed to clear pinned participant", err)
+		}
 		s.removeLiveKitParticipantBestEffort(ctx, callID, userID)
 		return &LeaveCallResult{AlreadyLeft: true}, nil
 	}
 
 	autoEnded := false
 	alreadyLeft := false
+	pinnedParticipantCleared := false
 	if s.tx != nil {
 		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
 			if scope.Calls() == nil {
@@ -1279,6 +1732,13 @@ func (s *Service) LeaveCall(ctx context.Context, workspaceID, callID, userID uui
 			markParticipantDisconnected(participant, entity.ParticipantLeftReasonLeft)
 			if err := s.enqueueParticipantEventTx(ctx, scope, event.TypeCallParticipantLeft, call, participant); err != nil {
 				return err
+			}
+			if callPinsParticipant(call, userID) {
+				if err := scope.Calls().SetPinnedParticipantUserID(ctx, callID, nil); err != nil {
+					return err
+				}
+				call.PinnedParticipantUserID = nil
+				pinnedParticipantCleared = true
 			}
 			participants, err := scope.Calls().ListParticipants(ctx, callID)
 			if err != nil {
@@ -1314,6 +1774,10 @@ func (s *Service) LeaveCall(ctx context.Context, workspaceID, callID, userID uui
 		} else {
 			markParticipantDisconnected(participant, entity.ParticipantLeftReasonLeft)
 			s.publishParticipantEvent(ctx, event.TypeCallParticipantLeft, call, participant)
+			if err := s.clearPinnedParticipantIfMatches(ctx, call, userID, userID); err != nil {
+				slog.ErrorContext(ctx, "failed to clear pinned participant on leave", "call_id", callID, "user_id", userID, "error", err)
+				return nil, cerrors.Internal("failed to clear pinned participant", err)
+			}
 
 			participants, err := s.calls.ListParticipants(ctx, callID)
 			if err != nil {
@@ -1336,6 +1800,10 @@ func (s *Service) LeaveCall(ctx context.Context, workspaceID, callID, userID uui
 		}
 	}
 
+	if pinnedParticipantCleared {
+		s.publishCallControlEvent(ctx, event.TypeCallPinnedChanged, call, userID,
+			event.PinnedParticipantPayload{CallID: callID, PinnedParticipantUserID: nil})
+	}
 	s.removeLiveKitParticipantBestEffort(ctx, callID, userID)
 	if alreadyLeft {
 		return &LeaveCallResult{AlreadyLeft: true}, nil
@@ -1526,7 +1994,21 @@ func (s *Service) ListActiveCalls(ctx context.Context, workspaceID, userID uuid.
 		slog.ErrorContext(ctx, "failed to list active calls", "workspace_id", workspaceID, "error", err)
 		return nil, cerrors.Internal("failed to list active calls", err)
 	}
-	return calls, nil
+	filtered := make([]entity.Call, 0, len(calls))
+	for i := range calls {
+		call := calls[i]
+		if isPrivateChannelLessCall(&call) {
+			allowed, err := s.canAccessPrivateChannelLessCall(ctx, &call, userID, true, false)
+			if err != nil {
+				return nil, err
+			}
+			if !allowed {
+				continue
+			}
+		}
+		filtered = append(filtered, call)
+	}
+	return filtered, nil
 }
 
 // ListActiveSummaries returns the enriched ActiveCallSummary projection used
@@ -1544,7 +2026,26 @@ func (s *Service) ListActiveSummaries(ctx context.Context, workspaceID, userID u
 		slog.ErrorContext(ctx, "failed to list active call summaries", "workspace_id", workspaceID, "error", err)
 		return nil, cerrors.Internal("failed to list active call summaries", err)
 	}
-	return summaries, nil
+	filtered := make([]entity.ActiveCallSummary, 0, len(summaries))
+	for _, summary := range summaries {
+		if summary.AccessLevel.Resolved() == entity.AccessLevelPrivate &&
+			summary.ChannelID == nil &&
+			summary.Type != entity.CallTypeOneToOne {
+			call, err := s.calls.GetByID(ctx, summary.ID)
+			if err != nil {
+				return nil, s.wrapCallError(ctx, err, summary.ID, "filter active call summary")
+			}
+			allowed, err := s.canAccessPrivateChannelLessCall(ctx, call, userID, true, false)
+			if err != nil {
+				return nil, err
+			}
+			if !allowed {
+				continue
+			}
+		}
+		filtered = append(filtered, summary)
+	}
+	return filtered, nil
 }
 
 func (s *Service) ListRecentCalls(ctx context.Context, workspaceID, userID uuid.UUID, limit int, cursor string) (*RecentCallsResult, error) {
@@ -1571,16 +2072,50 @@ func (s *Service) ListRecentCalls(ctx context.Context, workspaceID, userID uuid.
 	if !ok {
 		return nil, cerrors.Unavailable("recent calls are not available")
 	}
-	calls, err := repo.ListRecentByWorkspace(ctx, workspaceID, limit, before)
-	if err != nil {
-		slog.ErrorContext(ctx, "failed to list recent calls", "workspace_id", workspaceID, "error", err)
-		return nil, cerrors.Internal("failed to list recent calls", err)
+	filtered := make([]entity.Call, 0, limit+1)
+	queryBefore := before
+	hasMore := false
+	for len(filtered) <= limit {
+		calls, err := repo.ListRecentByWorkspace(ctx, workspaceID, limit, queryBefore)
+		if err != nil {
+			slog.ErrorContext(ctx, "failed to list recent calls", "workspace_id", workspaceID, "error", err)
+			return nil, cerrors.Internal("failed to list recent calls", err)
+		}
+		if len(calls) == 0 {
+			break
+		}
+		if len(calls) > limit {
+			hasMore = true
+		}
+		for i := range calls {
+			call := calls[i]
+			if isPrivateChannelLessCall(&call) {
+				allowed, err := s.canAccessPrivateChannelLessCall(ctx, &call, userID, true, false)
+				if err != nil {
+					return nil, err
+				}
+				if !allowed {
+					continue
+				}
+			}
+			filtered = append(filtered, call)
+			if len(filtered) > limit {
+				break
+			}
+		}
+		if len(filtered) > limit || len(calls) <= limit {
+			break
+		}
+		nextBefore := calls[len(calls)-1].CreatedAt
+		queryBefore = &nextBefore
 	}
 
-	result := &RecentCallsResult{Calls: calls}
-	if len(calls) > limit {
-		result.NextCursor = calls[limit-1].CreatedAt.UTC().Format(time.RFC3339Nano)
-		result.Calls = calls[:limit]
+	result := &RecentCallsResult{Calls: filtered}
+	if len(filtered) > limit {
+		result.NextCursor = filtered[limit-1].CreatedAt.UTC().Format(time.RFC3339Nano)
+		result.Calls = filtered[:limit]
+	} else if len(filtered) == limit && hasMore {
+		result.NextCursor = filtered[limit-1].CreatedAt.UTC().Format(time.RFC3339Nano)
 	}
 	return result, nil
 }
@@ -1646,6 +2181,20 @@ func (s *Service) UpdateMedia(ctx context.Context, workspaceID, callID, userID u
 	// before, but evaluated against the effective state, not raw inputs.
 	if participant.Role == entity.CallRoleViewer && (!nextAudio || !nextVideo || nextScreen) {
 		return cerrors.Forbidden("viewers cannot publish media")
+	}
+	// Member-permission policy (ALK-812): a non host/co-host member may not unmute
+	// their mic or enable their camera when the meeting policy forbids it. Reject
+	// the explicit request (audio_muted=false → unmuted; video_muted=false → camera
+	// on) so the service-of-record row and the WS roster never advertise a publish
+	// the join-token CanPublishSources gate is already blocking. Host/co-host and
+	// patches that don't touch the denied field are unaffected.
+	if participant.Role != entity.CallRoleHost && participant.Role != entity.CallRoleCoHost {
+		if audioMuted != nil && !*audioMuted && !call.Settings.ResolvedMembersCanUnmuteMic() {
+			return cerrors.Forbidden("members cannot unmute the microphone in this call")
+		}
+		if videoMuted != nil && !*videoMuted && !call.Settings.ResolvedMembersCanEnableCamera() {
+			return cerrors.Forbidden("members cannot enable the camera in this call")
+		}
 	}
 	// Capacity check only when the patch flips screen-sharing ON. Toggling
 	// off, or leaving it untouched, never trips capacity.
@@ -1851,6 +2400,10 @@ func (s *Service) RemoveParticipant(ctx context.Context, workspaceID, callID, ac
 		markParticipantDisconnected(target, entity.ParticipantLeftReasonLeft)
 		s.publishParticipantEvent(ctx, event.TypeCallParticipantLeft, call, target)
 	}
+	if err := s.clearPinnedParticipantIfMatches(ctx, call, targetUserID, actorUserID); err != nil {
+		slog.ErrorContext(ctx, "failed to clear pinned participant on remove", "call_id", callID, "target_user_id", targetUserID, "error", err)
+		return cerrors.Internal("failed to clear pinned participant", err)
+	}
 	s.removeLiveKitParticipantBestEffort(ctx, callID, targetUserID)
 
 	slog.InfoContext(ctx, "participant removed by host", "call_id", callID, "actor_user_id", actorUserID, "target_user_id", targetUserID)
@@ -2012,8 +2565,7 @@ func (s *Service) publishCallEvent(ctx context.Context, evtType event.Type, call
 		channelID = *call.ChannelID
 	}
 
-	subject := fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID)
-	s.doPublish(ctx, evtType, subject, call.WorkspaceID, channelID, userID, event.CallPayload{Call: call})
+	s.publishCallScoped(ctx, evtType, call, channelID, userID, event.CallPayload{Call: call})
 }
 
 func (s *Service) publishParticipantEvent(ctx context.Context, evtType event.Type, call *entity.Call, p *entity.CallParticipant) {
@@ -2022,10 +2574,25 @@ func (s *Service) publishParticipantEvent(ctx context.Context, evtType event.Typ
 		channelID = *call.ChannelID
 	}
 
-	subject := fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID)
-	s.doPublish(ctx, evtType, subject, call.WorkspaceID, channelID, p.UserID, event.CallParticipantPayload{
+	s.publishCallScoped(ctx, evtType, call, channelID, p.UserID, event.CallParticipantPayload{
 		CallID:      call.ID,
 		Participant: p,
+	})
+}
+
+func (s *Service) publishCallInvited(ctx context.Context, call *entity.Call, inviteeUserID, inviterUserID uuid.UUID) {
+	var channelID *uuid.UUID
+	if call.ChannelID != nil {
+		channelID = call.ChannelID
+	}
+
+	subject := fmt.Sprintf("aloqa.signal.%s", inviteeUserID)
+	s.doPublish(ctx, event.TypeCallInvited, subject, call.WorkspaceID, uuid.Nil, inviterUserID, event.CallInvitedPayload{
+		CallID:        call.ID,
+		WorkspaceID:   call.WorkspaceID,
+		InviterUserID: inviterUserID,
+		CallType:      string(call.Type),
+		ChannelID:     channelID,
 	})
 }
 
@@ -2034,9 +2601,8 @@ func (s *Service) publishCallMessageEvent(ctx context.Context, evtType event.Typ
 	if call.ChannelID != nil {
 		channelID = *call.ChannelID
 	}
-	subject := fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID)
 	payload := callMessagePayloadFor(evtType, call, msg)
-	s.doPublish(ctx, evtType, subject, call.WorkspaceID, channelID, msg.SenderID, payload)
+	s.publishCallScoped(ctx, evtType, call, channelID, msg.SenderID, payload)
 }
 
 func (s *Service) publishRecordingEvent(ctx context.Context, evtType event.Type, call *entity.Call, rec *entity.Recording) {
@@ -2044,8 +2610,7 @@ func (s *Service) publishRecordingEvent(ctx context.Context, evtType event.Type,
 	if call.ChannelID != nil {
 		channelID = *call.ChannelID
 	}
-	subject := fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID)
-	s.doPublish(ctx, evtType, subject, call.WorkspaceID, channelID, rec.StartedBy, event.CallRecordingPayload{
+	s.publishCallScoped(ctx, evtType, call, channelID, rec.StartedBy, event.CallRecordingPayload{
 		CallID:    call.ID,
 		Recording: rec,
 	})
@@ -2067,7 +2632,7 @@ func (s *Service) enqueueCallEventTx(ctx context.Context, scope txscope.Scope, e
 	if call != nil && call.ChannelID != nil {
 		channelID = *call.ChannelID
 	}
-	return s.enqueueDurableEventTx(ctx, scope, evtType, fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID), call.WorkspaceID, channelID, userID, event.CallPayload{Call: call})
+	return s.enqueueCallScopedEventTx(ctx, scope, evtType, call, channelID, userID, event.CallPayload{Call: call})
 }
 
 func (s *Service) enqueueParticipantEventTx(ctx context.Context, scope txscope.Scope, evtType event.Type, call *entity.Call, p *entity.CallParticipant) error {
@@ -2075,7 +2640,7 @@ func (s *Service) enqueueParticipantEventTx(ctx context.Context, scope txscope.S
 	if call != nil && call.ChannelID != nil {
 		channelID = *call.ChannelID
 	}
-	return s.enqueueDurableEventTx(ctx, scope, evtType, fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID), call.WorkspaceID, channelID, p.UserID, event.CallParticipantPayload{
+	return s.enqueueCallScopedEventTx(ctx, scope, evtType, call, channelID, p.UserID, event.CallParticipantPayload{
 		CallID:      call.ID,
 		Participant: p,
 	})
@@ -2086,9 +2651,8 @@ func (s *Service) enqueueCallMessageEventTx(ctx context.Context, scope txscope.S
 	if call.ChannelID != nil {
 		channelID = *call.ChannelID
 	}
-	subject := fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID)
 	payload := callMessagePayloadFor(evtType, call, msg)
-	return s.enqueueDurableEventTx(ctx, scope, evtType, subject, call.WorkspaceID, channelID, msg.SenderID, payload)
+	return s.enqueueCallScopedEventTx(ctx, scope, evtType, call, channelID, msg.SenderID, payload)
 }
 
 func callMessagePayloadFor(evtType event.Type, call *entity.Call, msg *entity.CallMessage) any {
@@ -2119,6 +2683,92 @@ func (s *Service) enqueueDurableEventTx(ctx context.Context, scope txscope.Scope
 		return nil
 	}
 	return scope.EnqueueRealtime(ctx, evt, body)
+}
+
+func workspaceSubject(workspaceID uuid.UUID) string {
+	return fmt.Sprintf("aloqa.ws.%s", workspaceID)
+}
+
+func workspaceUserEventsSubject(workspaceID, userID uuid.UUID) string {
+	return fmt.Sprintf("aloqa.ws.%s.user.%s.events", workspaceID, userID)
+}
+
+func (s *Service) publishCallScoped(ctx context.Context, evtType event.Type, call *entity.Call, channelID, userID uuid.UUID, payload any) {
+	if !isPrivateChannelLessCall(call) {
+		s.doPublish(ctx, evtType, workspaceSubject(call.WorkspaceID), call.WorkspaceID, channelID, userID, payload)
+		return
+	}
+	s.publishPrivateCallScoped(ctx, evtType, call, channelID, userID, payload)
+}
+
+func (s *Service) publishPrivateCallScoped(ctx context.Context, evtType event.Type, call *entity.Call, channelID, userID uuid.UUID, payload any) {
+	recipients, err := s.privateCallEventRecipients(ctx, s.calls, call)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to resolve private call event recipients", "call_id", call.ID, "type", evtType, "error", err)
+		return
+	}
+	for _, recipientID := range recipients {
+		s.doPublish(ctx, evtType, workspaceUserEventsSubject(call.WorkspaceID, recipientID), call.WorkspaceID, channelID, userID, payload)
+	}
+}
+
+func (s *Service) enqueueCallScopedEventTx(ctx context.Context, scope txscope.Scope, evtType event.Type, call *entity.Call, channelID, userID uuid.UUID, payload any) error {
+	if !isPrivateChannelLessCall(call) {
+		return s.enqueueDurableEventTx(ctx, scope, evtType, workspaceSubject(call.WorkspaceID), call.WorkspaceID, channelID, userID, payload)
+	}
+	if scope == nil || scope.Calls() == nil {
+		return cerrors.Unavailable("call transaction scope is not configured")
+	}
+	recipients, err := s.privateCallEventRecipients(ctx, scope.Calls(), call)
+	if err != nil {
+		return err
+	}
+	for _, recipientID := range recipients {
+		if err := s.enqueueDurableEventTx(ctx, scope, evtType, workspaceUserEventsSubject(call.WorkspaceID, recipientID), call.WorkspaceID, channelID, userID, payload); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) privateCallEventRecipients(ctx context.Context, calls repository.CallRepository, call *entity.Call) ([]uuid.UUID, error) {
+	seen := map[uuid.UUID]struct{}{}
+	recipients := []uuid.UUID{}
+	add := func(userID uuid.UUID) {
+		if userID == uuid.Nil {
+			return
+		}
+		if _, ok := seen[userID]; ok {
+			return
+		}
+		seen[userID] = struct{}{}
+		recipients = append(recipients, userID)
+	}
+	add(call.CreatedBy)
+
+	participants, err := calls.ListParticipants(ctx, call.ID)
+	if err != nil {
+		return nil, cerrors.Internal("failed to list private call participants for event fanout", err)
+	}
+	for _, participant := range participants {
+		if participant.Role == entity.CallRoleHost || participant.Role == entity.CallRoleCoHost ||
+			participant.Status == entity.ParticipantStatusConnected ||
+			participant.Status == entity.ParticipantStatusJoining ||
+			participant.Status == entity.ParticipantStatusWaiting ||
+			participant.Status == entity.ParticipantStatusInvited {
+			add(participant.UserID)
+		}
+	}
+
+	invited, err := calls.ListInvitedMembers(ctx, call.ID)
+	if err != nil {
+		return nil, cerrors.Internal("failed to list private call invitees for event fanout", err)
+	}
+	for _, userID := range invited {
+		add(userID)
+	}
+
+	return recipients, nil
 }
 
 func (s *Service) doPublish(ctx context.Context, evtType event.Type, subject string, workspaceID, channelID, userID uuid.UUID, payload any) {

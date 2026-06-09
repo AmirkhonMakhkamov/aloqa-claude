@@ -748,7 +748,7 @@ func (s *Service) listDirectoryMembers(ctx context.Context, workspaceID uuid.UUI
 	)
 
 	for {
-		page, err := s.members.ListMembers(ctx, workspaceID, pagination.Params{Cursor: cursor, Limit: pagination.MaxLimit})
+		page, err := s.members.ListMembers(ctx, workspaceID, pagination.Params{Cursor: cursor, Limit: pagination.MaxLimit}, "")
 		if err != nil {
 			return nil, err
 		}

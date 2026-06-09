@@ -26,22 +26,59 @@ type LiveKitSettings struct {
 
 const liveKitWebhookClaimLease = 2 * time.Minute
 
-// screenShareSources returns the publishable track sources for a participant.
-// Hosts/co-hosts and granted participants may publish screen + audio; everyone
-// else who can publish is limited to camera + microphone. Setting CanPublishSources
-// supersedes CanPublish, so the SDK cannot publish a screen track unless listed.
-func screenShareSources(canShare bool) []livekitpb.TrackSource {
-	base := []livekitpb.TrackSource{livekitpb.TrackSource_CAMERA, livekitpb.TrackSource_MICROPHONE}
-	if canShare {
-		return append(base, livekitpb.TrackSource_SCREEN_SHARE, livekitpb.TrackSource_SCREEN_SHARE_AUDIO)
+// publishSources returns the publishable LiveKit track sources for the given
+// per-source gates. Setting CanPublishSources supersedes CanPublish, so the SDK
+// can only publish a source listed here. An EMPTY result means "no source" — the
+// caller MUST then also set CanPublish=false, because LiveKit treats an empty
+// CanPublishSources list as "no restriction" (ALK-812).
+func publishSources(canMic, canCam, canShare bool) []livekitpb.TrackSource {
+	sources := make([]livekitpb.TrackSource, 0, 4)
+	if canCam {
+		sources = append(sources, livekitpb.TrackSource_CAMERA)
 	}
-	return base
+	if canMic {
+		sources = append(sources, livekitpb.TrackSource_MICROPHONE)
+	}
+	if canShare {
+		sources = append(sources, livekitpb.TrackSource_SCREEN_SHARE, livekitpb.TrackSource_SCREEN_SHARE_AUDIO)
+	}
+	return sources
+}
+
+// screenShareSources is the legacy camera+microphone(+screen) gate, preserved as
+// a thin wrapper for callers that only vary the screen grant.
+func screenShareSources(canShare bool) []livekitpb.TrackSource {
+	return publishSources(true, true, canShare)
 }
 
 // canShareScreen reports whether a participant may publish a screen-share track:
 // hosts/co-hosts always may; everyone else needs an explicit per-participant grant.
+// (This is the ALK-697 per-participant grant only; the ALK-812 meeting-level
+// screen_sharing policy is applied on top via resolveMemberPublish.)
 func canShareScreen(p entity.CallParticipant) bool {
 	return p.Role == entity.CallRoleHost || p.Role == entity.CallRoleCoHost || p.CanScreenShare
+}
+
+// resolveMemberPublish resolves a participant's publishable sources from their
+// role and the meeting-level member-permission policy (ALK-812). Host/co-host
+// publish everything; viewers publish nothing; every other role ("member":
+// presenter/participant/guest) is gated by the policy — microphone iff
+// members_can_unmute_mic, camera iff members_can_enable_camera, screen iff the
+// meeting screen_sharing toggle AND the per-participant ALK-697 grant. canPublish
+// is false when no source is allowed (empty CanPublishSources must clear it).
+func resolveMemberPublish(role entity.CallRole, settings entity.CallSettings, hasScreenGrant bool) (canMic, canCam, canShare, canPublish bool) {
+	switch role {
+	case entity.CallRoleHost, entity.CallRoleCoHost:
+		return true, true, true, true
+	case entity.CallRoleViewer:
+		return false, false, false, false
+	default:
+		canMic = settings.ResolvedMembersCanUnmuteMic()
+		canCam = settings.ResolvedMembersCanEnableCamera()
+		canShare = settings.ScreenSharing && hasScreenGrant
+		canPublish = canMic || canCam || canShare
+		return canMic, canCam, canShare, canPublish
+	}
 }
 
 // LiveKitJoinInfo is appended to the StartCall / JoinCall response so the FE
@@ -101,8 +138,8 @@ func (s *Service) IssueLiveKitJoinInfo(ctx context.Context, call *entity.Call, u
 		return nil, cerrors.Forbidden("participant is not connected")
 	}
 
-	canPublish := participant.Role != entity.CallRoleViewer
-	return s.mintLiveKitToken(call.ID.String(), userID, displayName, canPublish, canShareScreen(*participant))
+	canMic, canCam, canShare, _ := resolveMemberPublish(participant.Role, call.Settings, participant.CanScreenShare)
+	return s.mintLiveKitToken(call.ID.String(), userID, displayName, canMic, canCam, canShare)
 }
 
 // IssueLiveKitBreakoutJoinInfo signs an access token granting the user
@@ -129,18 +166,20 @@ func (s *Service) IssueLiveKitBreakoutJoinInfo(ctx context.Context, call *entity
 		return nil, cerrors.Forbidden("participant is not connected")
 	}
 
-	canPublish := participant.Role != entity.CallRoleViewer
+	canMic, canCam, canShare, _ := resolveMemberPublish(participant.Role, call.Settings, participant.CanScreenShare)
 	roomName := breakoutLiveKitRoomName(call.ID, breakoutRoomID)
-	return s.mintLiveKitToken(roomName, userID, "", canPublish, canShareScreen(*participant))
+	return s.mintLiveKitToken(roomName, userID, "", canMic, canCam, canShare)
 }
 
 // mintLiveKitToken signs a LiveKit access token for the given room and user.
 // Shared by the main-room and breakout-room join flows so the grant/signing
-// logic stays in one place. When canPublish is true the publishable track
-// sources are gated by canShareScreen — non-granted, non-host participants get
-// camera + microphone only, so the SDK cannot publish a screen track at all.
-func (s *Service) mintLiveKitToken(roomName string, userID uuid.UUID, displayName string, canPublish, canShare bool) (*LiveKitJoinInfo, error) {
-	canPublishFlag := canPublish
+// logic stays in one place. The publishable track sources are gated per-source
+// (mic/cam/screen) by the caller via resolveMemberPublish; when no source is
+// allowed CanPublish is cleared so an empty source list cannot be read by LiveKit
+// as "no restriction" (ALK-812).
+func (s *Service) mintLiveKitToken(roomName string, userID uuid.UUID, displayName string, canMic, canCam, canShare bool) (*LiveKitJoinInfo, error) {
+	sources := publishSources(canMic, canCam, canShare)
+	canPublishFlag := len(sources) > 0
 	canSubscribe := true
 	canPublishData := true
 	grant := &auth.VideoGrant{
@@ -150,10 +189,10 @@ func (s *Service) mintLiveKitToken(roomName string, userID uuid.UUID, displayNam
 		CanSubscribe:   &canSubscribe,
 		CanPublishData: &canPublishData,
 	}
-	if canPublish {
-		// Setting CanPublishSources supersedes CanPublish; only sharers get
-		// the screen + screen-audio sources (ALK-697).
-		grant.SetCanPublishSources(screenShareSources(canShare))
+	if canPublishFlag {
+		// CanPublishSources supersedes CanPublish; only the per-source-gated
+		// sources are publishable (ALK-697 screen grant + ALK-812 member policy).
+		grant.SetCanPublishSources(sources)
 	}
 
 	name := displayName
@@ -570,6 +609,9 @@ func (s *Service) handleLiveKitParticipantLeft(ctx context.Context, callID uuid.
 		if disconnected {
 			markParticipantDisconnected(participant, entity.ParticipantLeftReasonLeft)
 			s.publishParticipantEvent(ctx, event.TypeCallParticipantLeft, call, participant)
+			if err := s.clearPinnedParticipantIfMatches(ctx, call, userID, userID); err != nil {
+				return cerrors.Internal("failed to clear pinned participant on livekit leave", err)
+			}
 		}
 	}
 
@@ -673,6 +715,9 @@ func (s *Service) handleLiveKitBreakoutWebhook(ctx context.Context, ev *livekitp
 		if disconnected {
 			markParticipantDisconnected(participant, entity.ParticipantLeftReasonLeft)
 			s.publishParticipantEvent(ctx, event.TypeCallParticipantLeft, call, participant)
+			if err := s.clearPinnedParticipantIfMatches(ctx, call, userID, userID); err != nil {
+				return cerrors.Internal("failed to clear pinned participant on breakout leave", err)
+			}
 		}
 	}
 

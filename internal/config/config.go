@@ -25,6 +25,18 @@ type Config struct {
 	Realtime      RealtimeConfig
 	Observability ObservabilityConfig
 	CORS          CORSConfig
+	Perf          PerfConfig
+}
+
+// PerfConfig holds the service tokens for the performance-telemetry ingest
+// endpoints (epic ALK-849). Both are optional: when a token is empty the
+// matching endpoint self-disables and responds 503, so an environment that has
+// not provisioned perf storage never breaks.
+type PerfConfig struct {
+	// LabIngestToken authorizes POST /api/v1/perf/lab (CI lab runs).
+	LabIngestToken string
+	// RumIngestToken authorizes POST /api/v1/perf/rum (FE BFF-forwarded field events).
+	RumIngestToken string
 }
 
 // LiveKitConfig holds connection parameters for the LiveKit SFU.
@@ -444,6 +456,10 @@ func Load() (*Config, error) {
 		},
 		CORS: CORSConfig{
 			AllowedOrigins: envList("CORS_ALLOWED_ORIGINS", defaultDevCORSOrigins()),
+		},
+		Perf: PerfConfig{
+			LabIngestToken: env("ALOQA_PERF_INGEST_TOKEN", ""),
+			RumIngestToken: env("ALOQA_RUM_INGEST_TOKEN", ""),
 		},
 	}
 

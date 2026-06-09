@@ -232,7 +232,17 @@ func (r *SearchRepo) EnqueueDelete(ctx context.Context, workspaceID uuid.UUID, r
 }
 
 func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.SearchResults, error) {
-	query := `
+	var orderClause string
+	switch strings.ToLower(strings.TrimSpace(params.Sort)) {
+	case "alphabetical":
+		orderClause = "ORDER BY title ASC, score DESC, updated_at DESC"
+	case "date":
+		orderClause = "ORDER BY created_at DESC, score DESC"
+	default:
+		orderClause = "ORDER BY score DESC, updated_at DESC, created_at DESC"
+	}
+
+	baseQuery := `
 			WITH search_query AS (
 				SELECT websearch_to_tsquery($1::regconfig, $2) AS tsq
 			),
@@ -246,6 +256,14 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 					WHEN si.resource_type = 'user' THEN NULL
 					ELSE c.id
 				END AS channel_id,
+				CASE
+					WHEN si.resource_type = 'channel' THEN ch.name
+					ELSE c.name
+				END AS channel_name,
+				CASE
+					WHEN si.resource_type = 'channel' THEN ch.type::text
+					ELSE c.type::text
+				END AS channel_type,
 				CASE
 					WHEN si.title <> '' THEN si.title
 					WHEN si.resource_type = 'message' THEN LEFT(si.content, 80)
@@ -311,10 +329,9 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 				AND wm_user.user_id = u.id
 				WHERE si.workspace_id = $3
 					AND si.tsv @@ search_query.tsq
-					AND ($4::uuid IS NULL OR si.channel_id = $4)
-					AND ($5 = '' OR si.resource_type = $5)
-					AND ($6::timestamptz IS NULL OR si.created_at >= $6)
-					AND ($7::timestamptz IS NULL OR si.created_at <= $7)
+					AND ($4 = '' OR si.resource_type = $4)
+					AND ($5::timestamptz IS NULL OR si.created_at >= $5)
+					AND ($6::timestamptz IS NULL OR si.created_at <= $6)
 					AND (
 						(
 							si.resource_type = 'message'
@@ -322,7 +339,7 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 							AND m.deleted_at IS NULL
 							AND c.id IS NOT NULL
 							AND NOT c.archived
-							AND c.id = ANY($8::uuid[])
+							AND c.id = ANY($7::uuid[])
 						)
 						OR (
 							si.resource_type = 'file'
@@ -331,19 +348,19 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 							AND fm.deleted_at IS NULL
 							AND c.id IS NOT NULL
 							AND NOT c.archived
-							AND c.id = ANY($8::uuid[])
+							AND c.id = ANY($7::uuid[])
 						)
 						OR (
 							si.resource_type = 'channel'
 							AND ch.id IS NOT NULL
 							AND NOT ch.archived
-							AND ch.id = ANY($8::uuid[])
+							AND ch.id = ANY($7::uuid[])
 						)
 						OR (
 							si.resource_type = 'user'
 							AND u.id IS NOT NULL
 							AND u.status = 'active'
-							AND $9::boolean
+							AND $8::boolean
 							AND wm_user.user_id IS NOT NULL
 						)
 					)
@@ -353,6 +370,8 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 			resource_id,
 			workspace_id,
 			channel_id,
+			channel_name,
+			channel_type,
 			title,
 			snippet,
 			score,
@@ -371,14 +390,13 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 			user_updated_at,
 			COUNT(*) OVER()
 		FROM ranked
-			ORDER BY score DESC, updated_at DESC, created_at DESC
-			LIMIT $10 OFFSET $11`
+			` + orderClause + `
+			LIMIT $9 OFFSET $10`
 
-	rows, err := r.db.Query(ctx, query,
+	rows, err := r.db.Query(ctx, baseQuery,
 		r.textConfig,
 		strings.TrimSpace(params.Query),
 		params.WorkspaceID,
-		params.ChannelID,
 		strings.TrimSpace(params.Type),
 		params.DateFrom,
 		params.DateTo,
@@ -397,6 +415,8 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 	for rows.Next() {
 		var result search.Result
 		var (
+			channelName     sql.NullString
+			channelType     sql.NullString
 			userID          uuid.NullUUID
 			userEmail       sql.NullString
 			userDisplayName sql.NullString
@@ -414,6 +434,8 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 			&result.ID,
 			&result.WorkspaceID,
 			&result.ChannelID,
+			&channelName,
+			&channelType,
 			&result.Title,
 			&result.Snippet,
 			&result.Score,
@@ -434,6 +456,8 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 		); err != nil {
 			return nil, fmt.Errorf("postgres: scan search result: %w", err)
 		}
+		result.ChannelName = channelName.String
+		result.ChannelType = channelType.String
 		if userID.Valid {
 			user := &entity.User{
 				ID:          userID.UUID,

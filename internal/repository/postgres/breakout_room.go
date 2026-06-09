@@ -48,6 +48,52 @@ func (r *BreakoutRoomRepo) Create(ctx context.Context, room *entity.BreakoutRoom
 	return nil
 }
 
+func (r *BreakoutRoomRepo) CreateRoomsWithinCap(ctx context.Context, callID uuid.UUID, maxRooms int, rooms []entity.BreakoutRoom) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin create breakout rooms within cap: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// hashtextextended yields a 64-bit key (vs hashtext's 32-bit) so unrelated
+	// call ids are far less likely to collide and needlessly serialise on the
+	// same advisory lock. Transaction-scoped: released on commit/rollback.
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", callID.String()); err != nil {
+		return fmt.Errorf("postgres: lock breakout room cap: %w", err)
+	}
+
+	var activeCount int
+	if err := tx.QueryRow(ctx, "SELECT count(*) FROM breakout_rooms WHERE call_id=$1 AND status='active'", callID).Scan(&activeCount); err != nil {
+		return fmt.Errorf("postgres: count active breakout rooms: %w", err)
+	}
+	if activeCount+len(rooms) > maxRooms {
+		return cerrors.InvalidInput("breakout room limit reached")
+	}
+
+	query := `
+		INSERT INTO breakout_rooms (id, call_id, name, created_by, time_limit, closes_at, status, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
+	for _, room := range rooms {
+		if _, err := tx.Exec(ctx, query,
+			room.ID,
+			room.CallID,
+			room.Name,
+			room.CreatedBy,
+			room.TimeLimit,
+			room.ClosesAt,
+			room.Status,
+			room.CreatedAt,
+		); err != nil {
+			return fmt.Errorf("postgres: create breakout room within cap: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit create breakout rooms within cap: %w", err)
+	}
+	return nil
+}
+
 func (r *BreakoutRoomRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.BreakoutRoom, error) {
 	query := `
 		SELECT id, call_id, name, created_by, time_limit, closes_at, status, created_at, closed_at

@@ -45,6 +45,7 @@ const (
 	TypeCallParticipantJoined  Type = "call.participant.joined"
 	TypeCallParticipantLeft    Type = "call.participant.left"
 	TypeCallParticipantUpdated Type = "call.participant.updated"
+	TypeCallInvited            Type = "call.invited"
 	TypeCallQualityAdapted     Type = "call.quality.adapted"
 	TypeCallMessageCreated     Type = "call.message.created"
 	TypeCallMessageDeleted     Type = "call.message.deleted"
@@ -59,6 +60,9 @@ const (
 	TypeCallShareRequestCreated  Type = "call.share_request.created"
 	TypeCallShareRequestResolved Type = "call.share_request.resolved"
 	TypeCallFeaturedShareUpdated Type = "call.featured_share.updated"
+	TypeCallPinnedChanged        Type = "call.pinned.changed"
+	TypeCallParticipantMuted     Type = "call.participant.muted"
+	TypeCallAskUnmute            Type = "call.ask-unmute"
 
 	// Waiting room events.
 	TypeWaitingRoomJoined   Type = "waiting_room.joined"
@@ -71,6 +75,7 @@ const (
 	TypeBreakoutRoomsAllClosed   Type = "breakout.rooms.all_closed"
 	TypeBreakoutParticipantMoved Type = "breakout.participant.moved"
 	TypeBreakoutBroadcast        Type = "breakout.broadcast"
+	TypeBreakoutRoomInvite       Type = "breakout.room.invite"
 
 	// Signaling events (WebRTC).
 	TypeSignalOffer     Type = "signal.offer"
@@ -122,7 +127,8 @@ func DefinitionForType(t Type) Definition {
 	case TypeTypingStarted, TypeCallTypingStarted, TypeSignalOffer, TypeSignalAnswer, TypeSignalCandidate,
 		TypeCallHandRaised, TypeCallHandLowered, TypeCallReaction,
 		TypeCallShareRequestCreated, TypeCallShareRequestResolved, TypeCallFeaturedShareUpdated,
-		TypeBreakoutBroadcast:
+		TypeCallPinnedChanged, TypeCallParticipantMuted, TypeCallAskUnmute,
+		TypeBreakoutBroadcast, TypeBreakoutRoomInvite, TypeCallInvited:
 		return Definition{
 			Version:          CurrentVersion,
 			DeliverySemantic: DeliveryEphemeral,
@@ -268,8 +274,9 @@ type CallPayload struct {
 }
 
 type CallSettingsChangedPayload struct {
-	CallID   uuid.UUID           `json:"call_id"`
-	Settings entity.CallSettings `json:"settings"`
+	CallID      uuid.UUID           `json:"call_id"`
+	AccessLevel entity.AccessLevel  `json:"access_level"`
+	Settings    entity.CallSettings `json:"settings"`
 }
 
 type CallMessagePayload struct {
@@ -290,6 +297,16 @@ type CallTypingPayload struct {
 type CallParticipantPayload struct {
 	CallID      uuid.UUID               `json:"call_id"`
 	Participant *entity.CallParticipant `json:"participant"`
+}
+
+// CallInvitedPayload is the per-user ring delivered to a workspace member the
+// host invited into an ongoing call. Ephemeral (not persisted to the outbox).
+type CallInvitedPayload struct {
+	CallID        uuid.UUID  `json:"call_id"`
+	WorkspaceID   uuid.UUID  `json:"workspace_id"`
+	InviterUserID uuid.UUID  `json:"inviter_user_id"`
+	CallType      string     `json:"call_type"`
+	ChannelID     *uuid.UUID `json:"channel_id,omitempty"`
 }
 
 type CallQualityPayload struct {
@@ -353,6 +370,31 @@ type FeaturedSharePayload struct {
 	FeaturedShareUserID *uuid.UUID `json:"featured_share_user_id"`
 }
 
+// PinnedParticipantPayload announces the host's participant pin for everyone;
+// a nil PinnedParticipantUserID clears the global pin. (ALK-813)
+type PinnedParticipantPayload struct {
+	CallID                  uuid.UUID  `json:"call_id"`
+	PinnedParticipantUserID *uuid.UUID `json:"pinned_participant_user_id"`
+}
+
+// CallParticipantMutedPayload announces a host-enforced mic/camera state
+// change. Each field is optional so mic-only and camera-only actions can share
+// the same event contract. (ALK-813)
+type CallParticipantMutedPayload struct {
+	CallID     uuid.UUID `json:"call_id"`
+	UserID     uuid.UUID `json:"user_id"`
+	AudioMuted *bool     `json:"audio_muted,omitempty"`
+	VideoMuted *bool     `json:"video_muted,omitempty"`
+}
+
+// CallAskUnmutePayload asks one participant to unmute without forcing media
+// state. (ALK-813)
+type CallAskUnmutePayload struct {
+	CallID            uuid.UUID `json:"call_id"`
+	UserID            uuid.UUID `json:"user_id"`
+	RequestedByUserID uuid.UUID `json:"requested_by_user_id"`
+}
+
 type BreakoutRoomPayload struct {
 	CallID uuid.UUID            `json:"call_id"`
 	Room   *entity.BreakoutRoom `json:"room"`
@@ -372,6 +414,14 @@ type BreakoutBroadcastPayload struct {
 	CallID  uuid.UUID `json:"call_id"`
 	UserID  uuid.UUID `json:"user_id"`
 	Message string    `json:"message"`
+}
+
+type BreakoutRoomInvitePayload struct {
+	CallID         uuid.UUID `json:"call_id"`
+	BreakoutRoomID uuid.UUID `json:"breakout_room_id"`
+	InviterUserID  uuid.UUID `json:"inviter_user_id"`
+	InviteeUserID  uuid.UUID `json:"invitee_user_id"`
+	RoomName       string    `json:"room_name,omitempty"`
 }
 
 type UserCalendarPayload struct {

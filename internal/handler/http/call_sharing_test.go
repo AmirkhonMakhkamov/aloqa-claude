@@ -144,6 +144,39 @@ func TestRevokeScreenShareHTTP(t *testing.T) {
 	})
 }
 
+func TestParticipantModerationHTTP(t *testing.T) {
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	targetID := uuid.New()
+
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "mute", method: http.MethodPost, path: "/participants/" + targetID.String() + "/mute"},
+		{name: "ask unmute", method: http.MethodPost, path: "/participants/" + targetID.String() + "/ask-unmute"},
+		{name: "disable camera", method: http.MethodPost, path: "/participants/" + targetID.String() + "/disable-camera"},
+	} {
+		t.Run(tc.name+" host returns 204", func(t *testing.T) {
+			router := newShareControlHTTPRouter(workspaceID, callID, hostID, targetID, entity.CallRoleHost)
+			res := performCallInteractionRequest(router, tc.method, workspaceID, callID, tc.path, "", true)
+			if res.Code != http.StatusNoContent {
+				t.Fatalf("status = %d, want 204, body=%s", res.Code, res.Body.String())
+			}
+		})
+
+		t.Run(tc.name+" non-host returns 403", func(t *testing.T) {
+			router := newShareControlHTTPRouter(workspaceID, callID, hostID, targetID, entity.CallRoleParticipant)
+			res := performCallInteractionRequest(router, tc.method, workspaceID, callID, tc.path, "", true)
+			if res.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403, body=%s", res.Code, res.Body.String())
+			}
+		})
+	}
+}
+
 func TestSetFeaturedShareHTTP(t *testing.T) {
 	workspaceID := uuid.New()
 	callID := uuid.New()
@@ -181,6 +214,49 @@ func TestSetFeaturedShareHTTP(t *testing.T) {
 		router := newShareControlHTTPRouter(workspaceID, callID, hostID, targetID, entity.CallRoleHost)
 		res := performCallInteractionRequest(router, http.MethodPut, workspaceID, callID,
 			"/featured-share", `{"user_id":`, true)
+		if res.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400, body=%s", res.Code, res.Body.String())
+		}
+	})
+}
+
+func TestSetPinnedParticipantHTTP(t *testing.T) {
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	targetID := uuid.New()
+
+	t.Run("host set returns 204", func(t *testing.T) {
+		router := newShareControlHTTPRouter(workspaceID, callID, hostID, targetID, entity.CallRoleHost)
+		res := performCallInteractionRequest(router, http.MethodPut, workspaceID, callID,
+			"/pinned-participant", `{"user_id":"`+targetID.String()+`"}`, true)
+		if res.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204, body=%s", res.Code, res.Body.String())
+		}
+	})
+
+	t.Run("host clear returns 204", func(t *testing.T) {
+		router := newShareControlHTTPRouter(workspaceID, callID, hostID, targetID, entity.CallRoleHost)
+		res := performCallInteractionRequest(router, http.MethodPut, workspaceID, callID,
+			"/pinned-participant", `{"user_id":null}`, true)
+		if res.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204, body=%s", res.Code, res.Body.String())
+		}
+	})
+
+	t.Run("non-host returns 403", func(t *testing.T) {
+		router := newShareControlHTTPRouter(workspaceID, callID, hostID, targetID, entity.CallRoleParticipant)
+		res := performCallInteractionRequest(router, http.MethodPut, workspaceID, callID,
+			"/pinned-participant", `{"user_id":"`+targetID.String()+`"}`, true)
+		if res.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403, body=%s", res.Code, res.Body.String())
+		}
+	})
+
+	t.Run("malformed body returns 400", func(t *testing.T) {
+		router := newShareControlHTTPRouter(workspaceID, callID, hostID, targetID, entity.CallRoleHost)
+		res := performCallInteractionRequest(router, http.MethodPut, workspaceID, callID,
+			"/pinned-participant", `{"user_id":`, true)
 		if res.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400, body=%s", res.Code, res.Body.String())
 		}

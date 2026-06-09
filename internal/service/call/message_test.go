@@ -140,11 +140,19 @@ func TestSendCallMessageAccessAndStateErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("chat disabled", func(t *testing.T) {
+	t.Run("chat disabled rejects a member", func(t *testing.T) {
 		f := newCallMessageServiceFixture()
 		f.calls.calls[f.callID].Settings.Chat = false
 		if _, err := f.svc.SendCallMessage(ctx, f.workspaceID, f.callID, f.senderID, "hello"); !hasCode(err, cerrors.CodeForbidden) {
 			t.Fatalf("SendCallMessage chat disabled error = %v, want FORBIDDEN", err)
+		}
+	})
+
+	t.Run("chat disabled still allows the host (ALK-812)", func(t *testing.T) {
+		f := newCallMessageServiceFixture()
+		f.calls.calls[f.callID].Settings.Chat = false
+		if _, err := f.svc.SendCallMessage(ctx, f.workspaceID, f.callID, f.hostID, "hello"); err != nil {
+			t.Fatalf("host SendCallMessage with chat disabled error = %v, want nil", err)
 		}
 	})
 

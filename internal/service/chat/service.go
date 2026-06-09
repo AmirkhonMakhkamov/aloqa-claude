@@ -1058,7 +1058,7 @@ const (
 type mentionableMemberSearcher interface {
 	SearchMentionableMembers(
 		ctx context.Context,
-		channelID uuid.UUID,
+		channelID, excludeUserID uuid.UUID,
 		query string,
 		limit int,
 	) ([]entity.MentionSuggestion, error)
@@ -1093,7 +1093,8 @@ func (s *Service) SearchChannelMentions(
 		return []entity.MentionSuggestion{}, nil
 	}
 
-	results, err := searcher.SearchMentionableMembers(ctx, channelID, strings.TrimSpace(query), limit)
+	// Exclude the requesting user — you never @mention yourself.
+	results, err := searcher.SearchMentionableMembers(ctx, channelID, userID, strings.TrimSpace(query), limit)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to search channel mentions", "channel_id", channelID, "error", err)
 		return nil, cerrors.Internal("failed to search channel mentions", err)

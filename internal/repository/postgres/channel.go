@@ -413,7 +413,7 @@ func (r *ChannelRepo) ListMembers(ctx context.Context, channelID uuid.UUID) ([]e
 // case-insensitive. An empty query returns the first `limit` members.
 func (r *ChannelRepo) SearchMentionableMembers(
 	ctx context.Context,
-	channelID uuid.UUID,
+	channelID, excludeUserID uuid.UUID,
 	query string,
 	limit int,
 ) ([]entity.MentionSuggestion, error) {
@@ -426,15 +426,16 @@ func (r *ChannelRepo) SearchMentionableMembers(
 		FROM channel_members cm
 		JOIN users u ON u.id = cm.user_id
 		WHERE cm.channel_id = $1
+		  AND u.id <> $2
 		  AND (
-		    $2 = ''
-		    OR u.display_name ILIKE '%' || $2 || '%'
-		    OR split_part(u.email, '@', 1) ILIKE $2 || '%'
+		    $3 = ''
+		    OR u.display_name ILIKE '%' || $3 || '%'
+		    OR split_part(u.email, '@', 1) ILIKE $3 || '%'
 		  )
 		ORDER BY u.display_name
-		LIMIT $3`
+		LIMIT $4`
 
-	rows, err := r.db.Query(ctx, q, channelID, query, limit)
+	rows, err := r.db.Query(ctx, q, channelID, excludeUserID, query, limit)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: search mentionable members: %w", err)
 	}

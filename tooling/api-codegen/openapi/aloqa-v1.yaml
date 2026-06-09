@@ -26,6 +26,12 @@ x-ws-payloads:
     $ref: '#/components/schemas/CallInvitedPayload'
   call.settings.changed:
     $ref: '#/components/schemas/CallSettingsChangedPayload'
+  call.pinned.changed:
+    $ref: '#/components/schemas/PinnedParticipantPayload'
+  call.participant.muted:
+    $ref: '#/components/schemas/CallParticipantMutedPayload'
+  call.ask-unmute:
+    $ref: '#/components/schemas/CallAskUnmutePayload'
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -868,7 +874,7 @@ paths:
           description: Redemption result
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/AuthSession' }
+              schema: { $ref: '#/components/schemas/RedeemInviteResponse' }
 
   # -- Admin (members / roles / audit-log only) -----------------------------
   /api/v1/workspaces/{workspaceID}/admin/members:
@@ -1274,6 +1280,63 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /api/v1/workspaces/{workspaceID}/calls/{callID}/participants/{userID}/mute:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/CallID'
+      - name: userID
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      summary: Force-mute a participant's microphone (host/co-host)
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Participant microphone muted }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/workspaces/{workspaceID}/calls/{callID}/participants/{userID}/ask-unmute:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/CallID'
+      - name: userID
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      summary: Ask a participant to unmute without forcing media state (host/co-host)
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Ask-to-unmute request broadcast }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/workspaces/{workspaceID}/calls/{callID}/participants/{userID}/disable-camera:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/CallID'
+      - name: userID
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      summary: Force-disable a participant's camera (host/co-host)
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Participant camera disabled }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /api/v1/workspaces/{workspaceID}/calls/{callID}/featured-share:
     parameters:
       - $ref: '#/components/parameters/WorkspaceID'
@@ -1289,6 +1352,26 @@ paths:
             schema: { $ref: '#/components/schemas/SetFeaturedShareRequest' }
       responses:
         '204': { description: Featured share updated }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/workspaces/{workspaceID}/calls/{callID}/pinned-participant:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceID'
+      - $ref: '#/components/parameters/CallID'
+    put:
+      summary: Pin one participant for everyone (host/co-host)
+      tags: [calls]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetPinnedParticipantRequest' }
+      responses:
+        '204': { description: Global participant pin updated }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
@@ -1873,7 +1956,35 @@ components:
       type: object
       required: [display_name]
       properties:
+        email:
+          type: string
+          format: email
+          description: Optional for call-scoped guest links; required for email-scoped workspace/channel invites.
         display_name: { type: string, minLength: 1 }
+
+    RedeemInviteResponse:
+      type: object
+      required: [user, workspace_id, channel_ids, access_token, refresh_token, expires_in]
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        workspace_id: { $ref: '#/components/schemas/UUID' }
+        call_id:
+          allOf:
+            - $ref: '#/components/schemas/UUID'
+          nullable: true
+          description: Present for call-scoped guest links.
+        session_id:
+          type: string
+          description: Session cookie identifier returned when the backend issues a guest session.
+        channel_ids:
+          type: array
+          description: Channel grants for the redeemed invite. Call-scoped links return an empty array, never null.
+          items: { $ref: '#/components/schemas/UUID' }
+        access_token: { type: string }
+        refresh_token: { type: string }
+        expires_in:
+          type: integer
+          description: Access token lifetime in seconds.
 
     WorkspaceMember:
       type: object
@@ -2308,6 +2419,11 @@ components:
             - $ref: '#/components/schemas/UUID'
           nullable: true
           description: User whose screen-share the host featured for everyone; absent/null when none. (ALK-697)
+        pinned_participant_user_id:
+          allOf:
+            - $ref: '#/components/schemas/UUID'
+          nullable: true
+          description: Participant the host/co-host pinned for everyone; absent/null when none. (ALK-813)
         created_at:
           allOf:
             - $ref: '#/components/schemas/IsoDatetime'
@@ -2424,6 +2540,40 @@ components:
         call_id: { $ref: '#/components/schemas/UUID' }
         access_level: { $ref: '#/components/schemas/CallAccessLevel' }
         settings: { $ref: '#/components/schemas/CallSettings' }
+
+    PinnedParticipantPayload:
+      type: object
+      description: WebSocket payload for `call.pinned.changed`; null clears the global pin.
+      required: [call_id, pinned_participant_user_id]
+      properties:
+        call_id: { $ref: '#/components/schemas/UUID' }
+        pinned_participant_user_id:
+          allOf:
+            - $ref: '#/components/schemas/UUID'
+          nullable: true
+
+    CallParticipantMutedPayload:
+      type: object
+      description: WebSocket payload for host-enforced participant mic/camera state.
+      required: [call_id, user_id]
+      properties:
+        call_id: { $ref: '#/components/schemas/UUID' }
+        user_id: { $ref: '#/components/schemas/UUID' }
+        audio_muted:
+          type: boolean
+          description: Present when the host forced the participant's microphone state.
+        video_muted:
+          type: boolean
+          description: Present when the host forced the participant's camera state.
+
+    CallAskUnmutePayload:
+      type: object
+      description: WebSocket payload for `call.ask-unmute`.
+      required: [call_id, user_id, requested_by_user_id]
+      properties:
+        call_id: { $ref: '#/components/schemas/UUID' }
+        user_id: { $ref: '#/components/schemas/UUID' }
+        requested_by_user_id: { $ref: '#/components/schemas/UUID' }
 
     StartCallRequest:
       type: object
@@ -2552,6 +2702,16 @@ components:
             - $ref: '#/components/schemas/UUID'
           nullable: true
           description: Participant whose screen-share to feature for everyone; null clears it.
+
+    SetPinnedParticipantRequest:
+      type: object
+      description: Body for PUT /calls/{callID}/pinned-participant; a null user_id clears the global participant pin. (ALK-813)
+      properties:
+        user_id:
+          allOf:
+            - $ref: '#/components/schemas/UUID'
+          nullable: true
+          description: Participant to pin for everyone; null clears it.
 
     TurnCredentials:
       type: object

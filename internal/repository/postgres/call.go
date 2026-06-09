@@ -153,8 +153,8 @@ func (r *CallRepo) Create(ctx context.Context, call *entity.Call) error {
 	}
 
 	query := `
-		INSERT INTO calls (id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, end_reason, featured_share_user_id, created_at, join_password_hash, access_level)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`
+		INSERT INTO calls (id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, end_reason, featured_share_user_id, pinned_participant_user_id, created_at, join_password_hash, access_level)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`
 
 	_, err = r.db.Exec(ctx, query,
 		call.ID,
@@ -170,6 +170,7 @@ func (r *CallRepo) Create(ctx context.Context, call *entity.Call) error {
 		call.EndedAt,
 		nullableCallEndReason(call.EndReason),
 		call.FeaturedShareUserID,
+		call.PinnedParticipantUserID,
 		call.CreatedAt,
 		nullableString(call.JoinPasswordHash),
 		string(call.AccessLevel.Resolved()),
@@ -186,7 +187,7 @@ func (r *CallRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Call, err
 	// GetCall use) because it is the sole consumer; the list/recents projections
 	// never verify a password and never expose the hash (#4).
 	query := `
-		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, created_at, COALESCE(join_password_hash, ''), COALESCE(access_level, 'public')
+		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, pinned_participant_user_id, created_at, COALESCE(join_password_hash, ''), COALESCE(access_level, 'public')
 		FROM calls
 		WHERE id = $1`
 
@@ -207,6 +208,7 @@ func (r *CallRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Call, err
 		&call.EndedAt,
 		&call.EndReason,
 		&call.FeaturedShareUserID,
+		&call.PinnedParticipantUserID,
 		&call.CreatedAt,
 		&call.JoinPasswordHash,
 		&call.AccessLevel,
@@ -231,7 +233,7 @@ func (r *CallRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Call, err
 
 func (r *CallRepo) ListActiveByWorkspace(ctx context.Context, workspaceID uuid.UUID) ([]entity.Call, error) {
 	query := `
-		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, created_at, COALESCE(access_level, 'public')
+		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, pinned_participant_user_id, created_at, COALESCE(access_level, 'public')
 		FROM calls
 		WHERE workspace_id = $1 AND status != 'ended'
 		ORDER BY created_at DESC`
@@ -261,6 +263,7 @@ func (r *CallRepo) ListActiveByWorkspace(ctx context.Context, workspaceID uuid.U
 			&call.EndedAt,
 			&call.EndReason,
 			&call.FeaturedShareUserID,
+			&call.PinnedParticipantUserID,
 			&call.CreatedAt,
 			&call.AccessLevel,
 		); err != nil {
@@ -296,7 +299,7 @@ func (r *CallRepo) ListStaleOpen(ctx context.Context, before time.Time, limit in
 	}
 
 	query := `
-		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, created_at, COALESCE(access_level, 'public')
+		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, pinned_participant_user_id, created_at, COALESCE(access_level, 'public')
 		FROM calls
 		WHERE status IN ('ringing', 'active')
 		  AND COALESCE(started_at, created_at) < $1
@@ -328,6 +331,7 @@ func (r *CallRepo) ListStaleOpen(ctx context.Context, before time.Time, limit in
 			&call.EndedAt,
 			&call.EndReason,
 			&call.FeaturedShareUserID,
+			&call.PinnedParticipantUserID,
 			&call.CreatedAt,
 			&call.AccessLevel,
 		); err != nil {
@@ -570,7 +574,7 @@ func (r *CallRepo) ListRecentByWorkspace(ctx context.Context, workspaceID uuid.U
 	}
 
 	query := `
-		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, created_at, COALESCE(access_level, 'public')
+		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, pinned_participant_user_id, created_at, COALESCE(access_level, 'public')
 		FROM calls
 		WHERE workspace_id = $1`
 	args := []any{workspaceID}
@@ -608,6 +612,7 @@ func (r *CallRepo) ListRecentByWorkspace(ctx context.Context, workspaceID uuid.U
 			&call.EndedAt,
 			&call.EndReason,
 			&call.FeaturedShareUserID,
+			&call.PinnedParticipantUserID,
 			&call.CreatedAt,
 			&call.AccessLevel,
 		); err != nil {
@@ -1250,6 +1255,16 @@ func (r *CallRepo) SetFeaturedShareUserID(ctx context.Context, callID uuid.UUID,
 	_, err := r.db.Exec(ctx, `UPDATE calls SET featured_share_user_id = $2 WHERE id = $1`, callID, userID)
 	if err != nil {
 		return fmt.Errorf("postgres: set call featured_share_user_id: %w", err)
+	}
+	return nil
+}
+
+// SetPinnedParticipantUserID sets (or clears with nil) the host-pinned
+// participant pick on a call row. Passing nil writes SQL NULL. (ALK-813)
+func (r *CallRepo) SetPinnedParticipantUserID(ctx context.Context, callID uuid.UUID, userID *uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `UPDATE calls SET pinned_participant_user_id = $2 WHERE id = $1`, callID, userID)
+	if err != nil {
+		return fmt.Errorf("postgres: set call pinned_participant_user_id: %w", err)
 	}
 	return nil
 }

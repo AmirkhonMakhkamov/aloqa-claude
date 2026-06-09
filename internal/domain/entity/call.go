@@ -331,12 +331,13 @@ type Call struct {
 	// is stored in a dedicated calls column (migration 051), never in the
 	// settings JSONB, and is marshalled with json:"-" so it is never exposed by
 	// the API. Only JoinCall reads it (bcrypt compare). Hydrated by GetByID.
-	JoinPasswordHash    string        `json:"-"`
-	StartedAt           *time.Time    `json:"started_at,omitempty"`
-	EndedAt             *time.Time    `json:"ended_at,omitempty"`
-	EndReason           CallEndReason `json:"end_reason,omitempty"`
-	FeaturedShareUserID *uuid.UUID    `json:"featured_share_user_id,omitempty"`
-	CreatedAt           time.Time     `json:"created_at"`
+	JoinPasswordHash        string        `json:"-"`
+	StartedAt               *time.Time    `json:"started_at,omitempty"`
+	EndedAt                 *time.Time    `json:"ended_at,omitempty"`
+	EndReason               CallEndReason `json:"end_reason,omitempty"`
+	FeaturedShareUserID     *uuid.UUID    `json:"featured_share_user_id,omitempty"`
+	PinnedParticipantUserID *uuid.UUID    `json:"pinned_participant_user_id,omitempty"`
+	CreatedAt               time.Time     `json:"created_at"`
 }
 
 type CallParticipant struct {

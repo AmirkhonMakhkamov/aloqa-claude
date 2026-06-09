@@ -60,6 +60,9 @@ const (
 	TypeCallShareRequestCreated  Type = "call.share_request.created"
 	TypeCallShareRequestResolved Type = "call.share_request.resolved"
 	TypeCallFeaturedShareUpdated Type = "call.featured_share.updated"
+	TypeCallPinnedChanged        Type = "call.pinned.changed"
+	TypeCallParticipantMuted     Type = "call.participant.muted"
+	TypeCallAskUnmute            Type = "call.ask-unmute"
 
 	// Waiting room events.
 	TypeWaitingRoomJoined   Type = "waiting_room.joined"
@@ -124,6 +127,7 @@ func DefinitionForType(t Type) Definition {
 	case TypeTypingStarted, TypeCallTypingStarted, TypeSignalOffer, TypeSignalAnswer, TypeSignalCandidate,
 		TypeCallHandRaised, TypeCallHandLowered, TypeCallReaction,
 		TypeCallShareRequestCreated, TypeCallShareRequestResolved, TypeCallFeaturedShareUpdated,
+		TypeCallPinnedChanged, TypeCallParticipantMuted, TypeCallAskUnmute,
 		TypeBreakoutBroadcast, TypeBreakoutRoomInvite, TypeCallInvited:
 		return Definition{
 			Version:          CurrentVersion,
@@ -364,6 +368,31 @@ type ShareRequestResolvedPayload struct {
 type FeaturedSharePayload struct {
 	CallID              uuid.UUID  `json:"call_id"`
 	FeaturedShareUserID *uuid.UUID `json:"featured_share_user_id"`
+}
+
+// PinnedParticipantPayload announces the host's participant pin for everyone;
+// a nil PinnedParticipantUserID clears the global pin. (ALK-813)
+type PinnedParticipantPayload struct {
+	CallID                  uuid.UUID  `json:"call_id"`
+	PinnedParticipantUserID *uuid.UUID `json:"pinned_participant_user_id"`
+}
+
+// CallParticipantMutedPayload announces a host-enforced mic/camera state
+// change. Each field is optional so mic-only and camera-only actions can share
+// the same event contract. (ALK-813)
+type CallParticipantMutedPayload struct {
+	CallID     uuid.UUID `json:"call_id"`
+	UserID     uuid.UUID `json:"user_id"`
+	AudioMuted *bool     `json:"audio_muted,omitempty"`
+	VideoMuted *bool     `json:"video_muted,omitempty"`
+}
+
+// CallAskUnmutePayload asks one participant to unmute without forcing media
+// state. (ALK-813)
+type CallAskUnmutePayload struct {
+	CallID            uuid.UUID `json:"call_id"`
+	UserID            uuid.UUID `json:"user_id"`
+	RequestedByUserID uuid.UUID `json:"requested_by_user_id"`
 }
 
 type BreakoutRoomPayload struct {

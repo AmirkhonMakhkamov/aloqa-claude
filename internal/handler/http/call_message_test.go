@@ -370,6 +370,9 @@ func (r *fakeHTTPCallRepo) SetCanScreenShare(context.Context, uuid.UUID, bool) e
 func (r *fakeHTTPCallRepo) SetFeaturedShareUserID(context.Context, uuid.UUID, *uuid.UUID) error {
 	return nil
 }
+func (r *fakeHTTPCallRepo) SetPinnedParticipantUserID(context.Context, uuid.UUID, *uuid.UUID) error {
+	return nil
+}
 
 func (r *fakeHTTPCallRepo) RemoveParticipant(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 

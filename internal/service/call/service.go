@@ -1705,12 +1705,17 @@ func (s *Service) LeaveCall(ctx context.Context, workspaceID, callID, userID uui
 	}
 
 	if participant.Status == entity.ParticipantStatusDisconnected {
+		if err := s.clearPinnedParticipantIfMatches(ctx, call, userID, userID); err != nil {
+			slog.ErrorContext(ctx, "failed to clear pinned participant on duplicate leave", "call_id", callID, "user_id", userID, "error", err)
+			return nil, cerrors.Internal("failed to clear pinned participant", err)
+		}
 		s.removeLiveKitParticipantBestEffort(ctx, callID, userID)
 		return &LeaveCallResult{AlreadyLeft: true}, nil
 	}
 
 	autoEnded := false
 	alreadyLeft := false
+	pinnedParticipantCleared := false
 	if s.tx != nil {
 		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
 			if scope.Calls() == nil {
@@ -1727,6 +1732,13 @@ func (s *Service) LeaveCall(ctx context.Context, workspaceID, callID, userID uui
 			markParticipantDisconnected(participant, entity.ParticipantLeftReasonLeft)
 			if err := s.enqueueParticipantEventTx(ctx, scope, event.TypeCallParticipantLeft, call, participant); err != nil {
 				return err
+			}
+			if callPinsParticipant(call, userID) {
+				if err := scope.Calls().SetPinnedParticipantUserID(ctx, callID, nil); err != nil {
+					return err
+				}
+				call.PinnedParticipantUserID = nil
+				pinnedParticipantCleared = true
 			}
 			participants, err := scope.Calls().ListParticipants(ctx, callID)
 			if err != nil {
@@ -1762,6 +1774,10 @@ func (s *Service) LeaveCall(ctx context.Context, workspaceID, callID, userID uui
 		} else {
 			markParticipantDisconnected(participant, entity.ParticipantLeftReasonLeft)
 			s.publishParticipantEvent(ctx, event.TypeCallParticipantLeft, call, participant)
+			if err := s.clearPinnedParticipantIfMatches(ctx, call, userID, userID); err != nil {
+				slog.ErrorContext(ctx, "failed to clear pinned participant on leave", "call_id", callID, "user_id", userID, "error", err)
+				return nil, cerrors.Internal("failed to clear pinned participant", err)
+			}
 
 			participants, err := s.calls.ListParticipants(ctx, callID)
 			if err != nil {
@@ -1784,6 +1800,10 @@ func (s *Service) LeaveCall(ctx context.Context, workspaceID, callID, userID uui
 		}
 	}
 
+	if pinnedParticipantCleared {
+		s.publishCallControlEvent(ctx, event.TypeCallPinnedChanged, call, userID,
+			event.PinnedParticipantPayload{CallID: callID, PinnedParticipantUserID: nil})
+	}
 	s.removeLiveKitParticipantBestEffort(ctx, callID, userID)
 	if alreadyLeft {
 		return &LeaveCallResult{AlreadyLeft: true}, nil
@@ -2379,6 +2399,10 @@ func (s *Service) RemoveParticipant(ctx context.Context, workspaceID, callID, ac
 	if disconnected {
 		markParticipantDisconnected(target, entity.ParticipantLeftReasonLeft)
 		s.publishParticipantEvent(ctx, event.TypeCallParticipantLeft, call, target)
+	}
+	if err := s.clearPinnedParticipantIfMatches(ctx, call, targetUserID, actorUserID); err != nil {
+		slog.ErrorContext(ctx, "failed to clear pinned participant on remove", "call_id", callID, "target_user_id", targetUserID, "error", err)
+		return cerrors.Internal("failed to clear pinned participant", err)
 	}
 	s.removeLiveKitParticipantBestEffort(ctx, callID, targetUserID)
 

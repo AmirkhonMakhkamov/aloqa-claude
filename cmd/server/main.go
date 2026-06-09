@@ -43,6 +43,7 @@ import (
 	"aloqa/internal/service/mediaops"
 	"aloqa/internal/service/notification"
 	"aloqa/internal/service/observability"
+	perfsvc "aloqa/internal/service/perf"
 	"aloqa/internal/service/presence"
 	realtimesvc "aloqa/internal/service/realtime"
 	"aloqa/internal/service/recording"
@@ -198,6 +199,7 @@ func run() error {
 	savedRepo := postgres.NewSavedRepo(pool)
 	mediaRepo := postgres.NewMediaRepo(pool)
 	calendarRepo := postgres.NewCalendarRepo(pool)
+	perfRepo := postgres.NewPerfRepo(pool)
 
 	// File/object storage.
 	var fileStore storage.Storage
@@ -521,6 +523,8 @@ func run() error {
 	})
 
 	// HTTP handlers.
+	perfSvc := perfsvc.NewService(perfRepo)
+
 	authHandler := httphandler.NewAuthHandler(authSvc)
 	accountHandler := httphandler.NewAccountHandler(authSvc)
 	channelHandler := httphandler.NewChannelHandler(chatSvc)
@@ -545,6 +549,7 @@ func run() error {
 	requestMetrics := middleware.NewRequestMetricsCollector()
 	metricsHandler := httphandler.NewMetricsHandler(observabilitySvc, httphandler.WithHTTPMetrics(requestMetrics, "aloqa"))
 	guestHandler := httphandler.NewGuestHandler(guestSvc)
+	perfHandler := httphandler.NewPerfHandler(perfSvc, cfg.Perf.LabIngestToken, cfg.Perf.RumIngestToken)
 	wsHandler := wshandler.NewHandler(hub, chatSvc, callSvc, wsStateStore, realtimePublisher, cfg.Realtime.ReplayLimit, cfg.CORS.AllowedOrigins...)
 	wsHandler.SetObserver(observabilitySvc)
 
@@ -566,6 +571,7 @@ func run() error {
 		Admin:            adminHandler,
 		Metrics:          metricsHandler,
 		Guests:           guestHandler,
+		Perf:             perfHandler,
 		WS:               wsHandler,
 		Validator:        authSvc,
 		PersonalResolver: authSvc,

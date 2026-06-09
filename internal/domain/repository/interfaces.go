@@ -28,7 +28,7 @@ type WorkspaceRepository interface {
 
 	AddMember(ctx context.Context, m *entity.WorkspaceMember) error
 	GetMember(ctx context.Context, workspaceID, userID uuid.UUID) (*entity.WorkspaceMember, error)
-	ListMembers(ctx context.Context, workspaceID uuid.UUID, p pagination.Params) ([]entity.WorkspaceMember, error)
+	ListMembers(ctx context.Context, workspaceID uuid.UUID, p pagination.Params, search string) ([]entity.WorkspaceMember, error)
 	UpdateMemberRole(ctx context.Context, workspaceID, userID uuid.UUID, role entity.WorkspaceRole) error
 	RemoveMember(ctx context.Context, workspaceID, userID uuid.UUID) error
 }

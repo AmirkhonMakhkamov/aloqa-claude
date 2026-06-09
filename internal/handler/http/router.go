@@ -30,6 +30,7 @@ type RouterDeps struct {
 	Admin            *AdminHandler
 	Metrics          *MetricsHandler
 	Guests           *GuestHandler
+	Perf             *PerfHandler
 	WS               *wshandler.Handler
 	Validator        middleware.TokenValidator
 	PersonalResolver middleware.PersonalWorkspaceResolver
@@ -127,6 +128,20 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 	// so no global auth middleware applies.
 	if deps.LiveKit != nil {
 		r.Post(deps.LiveKit.WebhookPath(), deps.LiveKit.Webhook)
+	}
+
+	// Perf telemetry ingest (public). No user session: each handler verifies a
+	// static service token in constant time. Lab runs are POSTed by CI; RUM
+	// batches are forwarded by the FE BFF. Per-IP rate limiting is intentionally
+	// NOT applied here — all RUM traffic originates from the BFF's single IP, so
+	// a per-IP cap would throttle legitimate field events. The trade-off: those
+	// events all share ONE IP's slice of the global 2400/min cap above, which a
+	// burst could exhaust; a token/endpoint-scoped or per-session limiter is the
+	// proper control and is deferred to the infra layer (handoff doc §2). The
+	// batch size (<=200 events) and lab metric count are bounded in the handlers.
+	if deps.Perf != nil {
+		r.Post("/api/v1/perf/lab", deps.Perf.IngestLab)
+		r.Post("/api/v1/perf/rum", deps.Perf.IngestRUM)
 	}
 
 	// Authenticated routes.
@@ -336,6 +351,7 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 		r.Route("/{callID}", func(r chi.Router) {
 			r.Get("/", deps.Calls.Get)
 			r.Post("/join", deps.Calls.Join)
+			r.Post("/decline", deps.Calls.DeclineCall)
 			r.Post("/leave", deps.Calls.Leave)
 			r.Post("/cancel", deps.Calls.Cancel)
 			r.Post("/end", deps.Calls.End)
@@ -343,6 +359,7 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 			r.Delete("/hand", deps.Calls.LowerHand)
 			r.Post("/reactions", deps.Calls.SendCallReaction)
 			r.Post("/turn-credentials", deps.Calls.TurnCredentials)
+			r.Post("/participants", deps.Calls.AddParticipants)
 			r.Get("/participants", deps.Calls.Participants)
 			r.Put("/participants/{userID}/role", deps.Calls.UpdateParticipantRole)
 			r.Delete("/participants/{userID}", deps.Calls.RemoveParticipant)

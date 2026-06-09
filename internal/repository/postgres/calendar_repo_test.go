@@ -21,6 +21,71 @@ type calendarRepoTestEnv struct {
 	calendarID  uuid.UUID
 }
 
+func TestEventSettingsColumnRoundTrip(t *testing.T) {
+	// nil settings -> SQL NULL (nil bytes) -> nil pointer.
+	raw, err := eventSettingsColumn(nil)
+	if err != nil {
+		t.Fatalf("eventSettingsColumn(nil) error = %v", err)
+	}
+	if raw != nil {
+		t.Fatalf("eventSettingsColumn(nil) = %q, want nil", string(raw))
+	}
+	got, err := scanEventSettings(nil)
+	if err != nil {
+		t.Fatalf("scanEventSettings(nil) error = %v", err)
+	}
+	if got != nil {
+		t.Fatalf("scanEventSettings(nil) = %+v, want nil", got)
+	}
+
+	// JSON null bytes also decode to nil.
+	got, err = scanEventSettings([]byte("null"))
+	if err != nil {
+		t.Fatalf("scanEventSettings(null) error = %v", err)
+	}
+	if got != nil {
+		t.Fatalf("scanEventSettings(null) = %+v, want nil", got)
+	}
+
+	// A populated subset round-trips, preserving the present/absent pointers.
+	manualAdmit := entity.EntryModeManualAdmit
+	mute := true
+	maxRooms := 4
+	in := &entity.EventCallSettings{
+		EntryMode:        &manualAdmit,
+		MuteOnJoin:       &mute,
+		MaxBreakoutRooms: &maxRooms,
+	}
+	raw, err = eventSettingsColumn(in)
+	if err != nil {
+		t.Fatalf("eventSettingsColumn error = %v", err)
+	}
+	if !strings.Contains(string(raw), "manual_admit") {
+		t.Fatalf("marshalled settings = %q, want entry_mode", string(raw))
+	}
+	// The omitted breakout_creation key must not appear; an absent pointer field
+	// stays out of the JSONB so the start-call overlay leaves the default intact.
+	if strings.Contains(string(raw), `"breakout_creation"`) {
+		t.Fatalf("marshalled settings = %q, omitted key should not appear", string(raw))
+	}
+	out, err := scanEventSettings(raw)
+	if err != nil {
+		t.Fatalf("scanEventSettings error = %v", err)
+	}
+	if out == nil || out.EntryMode == nil || *out.EntryMode != entity.EntryModeManualAdmit {
+		t.Fatalf("round-trip EntryMode = %+v, want manual_admit", out)
+	}
+	if out.MuteOnJoin == nil || !*out.MuteOnJoin {
+		t.Fatalf("round-trip MuteOnJoin = %+v, want true", out)
+	}
+	if out.MaxBreakoutRooms == nil || *out.MaxBreakoutRooms != 4 {
+		t.Fatalf("round-trip MaxBreakoutRooms = %+v, want 4", out)
+	}
+	if out.BreakoutCreation != nil {
+		t.Fatalf("round-trip BreakoutCreation = %+v, want nil (omitted)", out)
+	}
+}
+
 func TestDiffReminderDefinitionsPreservesStableRowsAndDeletesOnlyRemoved(t *testing.T) {
 	userA := uuid.New()
 	userB := uuid.New()

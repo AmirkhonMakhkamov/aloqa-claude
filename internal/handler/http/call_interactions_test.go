@@ -196,6 +196,58 @@ func TestCallLeaveHTTPReturnsJSONBody(t *testing.T) {
 	}
 }
 
+func TestCallAddParticipantsHTTPReturnsInviteResult(t *testing.T) {
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	targetID := uuid.New()
+	router, _ := newCallParticipantsHTTPRouter(workspaceID, callID, hostID, entity.CallRoleHost, targetID, nil)
+
+	res := performCallInteractionRequest(router, http.MethodPost, workspaceID, callID, "/participants", `{"user_ids":["`+targetID.String()+`"]}`, true)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", res.Code, res.Body.String())
+	}
+	var body callsvc.InviteResult
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body.Invited) != 1 || body.Invited[0].UserID != targetID || body.Invited[0].Status != entity.ParticipantStatusInvited {
+		t.Fatalf("invited = %+v, want invited target", body.Invited)
+	}
+	if len(body.Skipped) != 0 {
+		t.Fatalf("skipped = %+v, want empty", body.Skipped)
+	}
+}
+
+func TestCallAddParticipantsHTTPRejectsNonHost(t *testing.T) {
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	actorID := uuid.New()
+	targetID := uuid.New()
+	router, _ := newCallParticipantsHTTPRouter(workspaceID, callID, actorID, entity.CallRoleParticipant, targetID, nil)
+
+	res := performCallInteractionRequest(router, http.MethodPost, workspaceID, callID, "/participants", `{"user_ids":["`+targetID.String()+`"]}`, true)
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403, body=%s", res.Code, res.Body.String())
+	}
+}
+
+func TestCallDeclineHTTPNoContent(t *testing.T) {
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	userID := uuid.New()
+	status := entity.ParticipantStatusInvited
+	router, calls := newCallParticipantsHTTPRouter(workspaceID, callID, userID, entity.CallRoleParticipant, userID, &status)
+
+	res := performCallInteractionRequest(router, http.MethodPost, workspaceID, callID, "/decline", "", true)
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204, body=%s", res.Code, res.Body.String())
+	}
+	if got := calls.participants[[2]uuid.UUID{callID, userID}].Status; got != entity.ParticipantStatusDeclined {
+		t.Fatalf("stored status = %q, want declined", got)
+	}
+}
+
 func TestCallCancelHTTPReturnsJSONBody(t *testing.T) {
 	userID := uuid.New()
 	workspaceID := uuid.New()
@@ -262,6 +314,57 @@ func newCallInteractionHTTPRouterWithMediaConfig(workspaceID, callID, userID uui
 	return router, calls
 }
 
+func newCallParticipantsHTTPRouter(workspaceID, callID, actorID uuid.UUID, actorRole entity.CallRole, targetID uuid.UUID, targetStatus *entity.ParticipantStatus) (http.Handler, *httpCallRepo) {
+	calls := &httpCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive, CreatedBy: actorID},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, actorID}: {
+				ID:     uuid.New(),
+				CallID: callID,
+				UserID: actorID,
+				Role:   actorRole,
+				Status: entity.ParticipantStatusConnected,
+			},
+		},
+	}
+	if targetStatus != nil {
+		calls.participants[[2]uuid.UUID{callID, targetID}] = &entity.CallParticipant{
+			ID:     uuid.New(),
+			CallID: callID,
+			UserID: targetID,
+			Role:   entity.CallRoleParticipant,
+			Status: *targetStatus,
+		}
+	}
+
+	workspaces := &httpWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, actorID}:  {WorkspaceID: workspaceID, UserID: actorID, Role: entity.WorkspaceRoleMember},
+		{workspaceID, targetID}: {WorkspaceID: workspaceID, UserID: targetID, Role: entity.WorkspaceRoleMember},
+	}}
+	svc := callsvc.NewService(calls, httpBreakoutRepo{}, httpChannelRepo{}, workspaces, httpNoopPublisher{}, nil, callsvc.MediaConfig{}, nil, nil)
+	router := NewRouter(RouterDeps{
+		Auth:             &AuthHandler{},
+		Account:          &AccountHandler{},
+		Channels:         &ChannelHandler{},
+		Messages:         &MessageHandler{},
+		Calls:            NewCallHandler(svc, nil),
+		Breakout:         &BreakoutHandler{},
+		Files:            &FileHandler{},
+		Presence:         &PresenceHandler{},
+		Recordings:       &RecordingHandler{},
+		Notifications:    &NotificationHandler{},
+		Search:           &SearchHandler{},
+		Admin:            &AdminHandler{},
+		Guests:           &GuestHandler{},
+		WS:               &wshandler.Handler{},
+		Validator:        fakeTokenValidator{userID: actorID},
+		PersonalResolver: fakePersonalResolver{workspaceID: workspaceID},
+	})
+	return router, calls
+}
+
 func performCallInteractionRequest(router http.Handler, method string, workspaceID, callID uuid.UUID, suffix, body string, authenticated bool) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, "/api/v1/workspaces/"+workspaceID.String()+"/calls/"+callID.String()+suffix, strings.NewReader(body))
 	if authenticated {
@@ -303,7 +406,7 @@ func (r *httpWorkspaceRepo) GetMember(_ context.Context, workspaceID, userID uui
 	}
 	return nil, cerrors.NotFound("workspace member not found")
 }
-func (r *httpWorkspaceRepo) ListMembers(context.Context, uuid.UUID, pagination.Params) ([]entity.WorkspaceMember, error) {
+func (r *httpWorkspaceRepo) ListMembers(context.Context, uuid.UUID, pagination.Params, string) ([]entity.WorkspaceMember, error) {
 	return nil, nil
 }
 func (r *httpWorkspaceRepo) UpdateMemberRole(context.Context, uuid.UUID, uuid.UUID, entity.WorkspaceRole) error {

@@ -46,7 +46,33 @@ func newCalendarHTTPFixture() calendarHTTPFixture {
 		})
 	})
 	router.Post("/events/{eventID}/occurrences/move", handler.MoveOccurrence)
+	router.Post("/events", handler.CreateEvent)
+	router.Patch("/events/{eventID}", handler.UpdateEvent)
+	router.Get("/events/{eventID}", handler.GetEvent)
 	return calendarHTTPFixture{wsID: wsID, userID: userID, repo: repo, router: router}
+}
+
+func (f calendarHTTPFixture) post(path, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	res := httptest.NewRecorder()
+	f.router.ServeHTTP(res, req)
+	return res
+}
+
+func (f calendarHTTPFixture) patch(path, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPatch, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	res := httptest.NewRecorder()
+	f.router.ServeHTTP(res, req)
+	return res
+}
+
+func (f calendarHTTPFixture) get(path string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	res := httptest.NewRecorder()
+	f.router.ServeHTTP(res, req)
+	return res
 }
 
 func (f calendarHTTPFixture) serve(eventID uuid.UUID, body string) *httptest.ResponseRecorder {
@@ -238,6 +264,183 @@ func TestMoveOccurrenceRouteRegistered(t *testing.T) {
 	}
 }
 
+// --- ALK-819 / S11: per-event call-settings preconfig over HTTP -------------
+
+func TestCreateEventHandler_RejectsPasswordEntryMode(t *testing.T) {
+	f := newCalendarHTTPFixture()
+	body := `{"calendar_id":"` + uuid.NewString() + `","title":"Planning",` +
+		`"location":{"type":"aloqa_meet"},"scheduled_at":"2026-06-01T10:00:00Z","duration_minutes":30,` +
+		`"settings":{"entry_mode":"password"}}`
+	res := f.post("/events", body)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+	}
+	_, msg := decodeErrBody(t, res)
+	if !strings.Contains(msg, "password") {
+		t.Fatalf("message=%q missing password rejection", msg)
+	}
+}
+
+func TestCreateEventHandler_RejectsMaxBreakoutRoomsOutOfRange(t *testing.T) {
+	f := newCalendarHTTPFixture()
+	body := `{"calendar_id":"` + uuid.NewString() + `","title":"Planning",` +
+		`"location":{"type":"aloqa_meet"},"scheduled_at":"2026-06-01T10:00:00Z","duration_minutes":30,` +
+		`"settings":{"max_breakout_rooms":9}}`
+	res := f.post("/events", body)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+	}
+	_, msg := decodeErrBody(t, res)
+	if !strings.Contains(msg, "max_breakout_rooms") {
+		t.Fatalf("message=%q missing max_breakout_rooms rejection", msg)
+	}
+}
+
+func TestCreateEventHandler_PersistsSettings(t *testing.T) {
+	f := newCalendarHTTPFixture()
+	body := `{"calendar_id":"` + uuid.NewString() + `","title":"Planning",` +
+		`"location":{"type":"aloqa_meet"},"scheduled_at":"2026-06-01T10:00:00Z","duration_minutes":30,` +
+		`"settings":{"entry_mode":"manual_admit","mute_on_join":true,"max_breakout_rooms":4}}`
+	res := f.post("/events", body)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+	}
+	var ev entity.CalendarEvent
+	if err := json.Unmarshal(res.Body.Bytes(), &ev); err != nil {
+		t.Fatalf("decode: %v raw=%s", err, res.Body.String())
+	}
+	if ev.Settings == nil {
+		t.Fatalf("settings not echoed")
+	}
+	if ev.Settings.EntryMode == nil || *ev.Settings.EntryMode != entity.EntryModeManualAdmit {
+		t.Fatalf("entry_mode=%v want manual_admit", ev.Settings.EntryMode)
+	}
+	if ev.Settings.MuteOnJoin == nil || !*ev.Settings.MuteOnJoin {
+		t.Fatalf("mute_on_join=%v want true", ev.Settings.MuteOnJoin)
+	}
+	if ev.Settings.MaxBreakoutRooms == nil || *ev.Settings.MaxBreakoutRooms != 4 {
+		t.Fatalf("max_breakout_rooms=%v want 4", ev.Settings.MaxBreakoutRooms)
+	}
+}
+
+func TestCreateEventHandler_DropsSettingsForNonMeet(t *testing.T) {
+	f := newCalendarHTTPFixture()
+	body := `{"calendar_id":"` + uuid.NewString() + `","title":"Sync",` +
+		`"location":{"type":"external_link","value":"https://example.com"},` +
+		`"scheduled_at":"2026-06-01T10:00:00Z","duration_minutes":30,` +
+		`"settings":{"mute_on_join":true}}`
+	res := f.post("/events", body)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+	}
+	var ev entity.CalendarEvent
+	if err := json.Unmarshal(res.Body.Bytes(), &ev); err != nil {
+		t.Fatalf("decode: %v raw=%s", err, res.Body.String())
+	}
+	if ev.Settings != nil {
+		t.Fatalf("settings=%+v want nil for non-meet", ev.Settings)
+	}
+}
+
+// TestCreateEventHandler_RejectsMalformedSettingsForNonMeet guards the ALK-819
+// review create/update symmetry fix: a malformed settings payload must yield the
+// same 400 on create as on update even when the event is non-meet. Previously the
+// create path dropped settings for a non-meet location WITHOUT validating field
+// values, so a bad payload was silently swallowed on create but rejected on
+// update. Now create validates-then-drops like update.
+func TestCreateEventHandler_RejectsMalformedSettingsForNonMeet(t *testing.T) {
+	f := newCalendarHTTPFixture()
+	body := `{"calendar_id":"` + uuid.NewString() + `","title":"Sync",` +
+		`"location":{"type":"external_link","value":"https://example.com"},` +
+		`"scheduled_at":"2026-06-01T10:00:00Z","duration_minutes":30,` +
+		`"settings":{"max_breakout_rooms":9}}`
+	res := f.post("/events", body)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400 (validate before non-meet drop)", res.Code, res.Body.String())
+	}
+	_, msg := decodeErrBody(t, res)
+	if !strings.Contains(msg, "max_breakout_rooms") {
+		t.Fatalf("message=%q missing max_breakout_rooms rejection", msg)
+	}
+}
+
+func createMeetEventForUpdate(t *testing.T, f calendarHTTPFixture) uuid.UUID {
+	t.Helper()
+	body := `{"calendar_id":"` + uuid.NewString() + `","title":"Planning",` +
+		`"location":{"type":"aloqa_meet"},"scheduled_at":"2026-06-01T10:00:00Z","duration_minutes":30,` +
+		`"settings":{"mute_on_join":true}}`
+	res := f.post("/events", body)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("seed create status=%d body=%s", res.Code, res.Body.String())
+	}
+	var ev entity.CalendarEvent
+	if err := json.Unmarshal(res.Body.Bytes(), &ev); err != nil {
+		t.Fatalf("seed decode: %v", err)
+	}
+	return ev.ID
+}
+
+func updatedEvent(t *testing.T, res *httptest.ResponseRecorder) entity.CalendarEvent {
+	t.Helper()
+	if res.Code != http.StatusOK {
+		t.Fatalf("update status=%d body=%s", res.Code, res.Body.String())
+	}
+	var ev entity.CalendarEvent
+	if err := json.Unmarshal(res.Body.Bytes(), &ev); err != nil {
+		t.Fatalf("update decode: %v raw=%s", err, res.Body.String())
+	}
+	return ev
+}
+
+func TestUpdateEventHandler_SettingsAbsentLeavesUnchanged(t *testing.T) {
+	f := newCalendarHTTPFixture()
+	eventID := createMeetEventForUpdate(t, f)
+	ev := updatedEvent(t, f.patch("/events/"+eventID.String(), `{"title":"Planning v2"}`))
+	if ev.Settings == nil || ev.Settings.MuteOnJoin == nil || !*ev.Settings.MuteOnJoin {
+		t.Fatalf("absent settings key cleared preconfig: %+v", ev.Settings)
+	}
+}
+
+func TestUpdateEventHandler_SettingsNullClears(t *testing.T) {
+	f := newCalendarHTTPFixture()
+	eventID := createMeetEventForUpdate(t, f)
+	ev := updatedEvent(t, f.patch("/events/"+eventID.String(), `{"settings":null}`))
+	if ev.Settings != nil {
+		t.Fatalf("explicit null did not clear settings: %+v", ev.Settings)
+	}
+}
+
+func TestUpdateEventHandler_SettingsObjectReplaces(t *testing.T) {
+	f := newCalendarHTTPFixture()
+	eventID := createMeetEventForUpdate(t, f)
+	ev := updatedEvent(t, f.patch("/events/"+eventID.String(), `{"settings":{"max_breakout_rooms":2}}`))
+	if ev.Settings == nil || ev.Settings.MaxBreakoutRooms == nil || *ev.Settings.MaxBreakoutRooms != 2 {
+		t.Fatalf("settings not replaced: %+v", ev.Settings)
+	}
+	if ev.Settings.MuteOnJoin != nil {
+		t.Fatalf("replacement kept stale mute_on_join: %+v", ev.Settings)
+	}
+}
+
+func TestUpdateEventHandler_RejectsPasswordEntryMode(t *testing.T) {
+	f := newCalendarHTTPFixture()
+	eventID := createMeetEventForUpdate(t, f)
+	res := f.patch("/events/"+eventID.String(), `{"settings":{"entry_mode":"password"}}`)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+	}
+}
+
+func TestUpdateEventHandler_RelocatingToNonMeetClearsSettings(t *testing.T) {
+	f := newCalendarHTTPFixture()
+	eventID := createMeetEventForUpdate(t, f)
+	ev := updatedEvent(t, f.patch("/events/"+eventID.String(),
+		`{"location":{"type":"external_link","value":"https://example.com"}}`))
+	if ev.Settings != nil {
+		t.Fatalf("relocation to non-meet did not clear settings: %+v", ev.Settings)
+	}
+}
+
 type fakeMoveCalHTTPTxManager struct {
 	repo *fakeMoveCalendarRepo
 }
@@ -338,8 +541,8 @@ func (r *fakeMoveCalendarRepo) ListUserCalendars(context.Context, uuid.UUID, uui
 	return nil, nil
 }
 
-func (r *fakeMoveCalendarRepo) GetUserCalendar(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*entity.UserCalendar, error) {
-	return nil, cerrors.NotFound("calendar not found")
+func (r *fakeMoveCalendarRepo) GetUserCalendar(_ context.Context, workspaceID, calendarID, ownerID uuid.UUID) (*entity.UserCalendar, error) {
+	return &entity.UserCalendar{ID: calendarID, WorkspaceID: workspaceID, OwnerID: ownerID, IsDefault: true}, nil
 }
 
 func (r *fakeMoveCalendarRepo) CreateUserCalendar(context.Context, *entity.UserCalendar) error {
@@ -446,7 +649,7 @@ func (m fakeCalHTTPMembers) GetMember(_ context.Context, workspaceID, userID uui
 	return nil, cerrors.NotFound("workspace member not found")
 }
 
-func (m fakeCalHTTPMembers) ListMembers(context.Context, uuid.UUID, pagination.Params) ([]entity.WorkspaceMember, error) {
+func (m fakeCalHTTPMembers) ListMembers(context.Context, uuid.UUID, pagination.Params, string) ([]entity.WorkspaceMember, error) {
 	return nil, nil
 }
 

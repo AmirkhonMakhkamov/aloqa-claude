@@ -309,6 +309,21 @@ func (r *fakeHTTPCallRepo) UpdateSettings(_ context.Context, id uuid.UUID, setti
 	return cerrors.NotFound("call not found")
 }
 func (r *fakeHTTPCallRepo) End(context.Context, uuid.UUID) error { return nil }
+func (r *fakeHTTPCallRepo) UpdateAccessLevel(context.Context, uuid.UUID, entity.AccessLevel) error {
+	return nil
+}
+func (r *fakeHTTPCallRepo) AddInvitedMembers(context.Context, uuid.UUID, []uuid.UUID, uuid.UUID) error {
+	return nil
+}
+func (r *fakeHTTPCallRepo) IsInvited(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return false, nil
+}
+func (r *fakeHTTPCallRepo) ListInvitedMembers(context.Context, uuid.UUID) ([]uuid.UUID, error) {
+	return nil, nil
+}
+func (r *fakeHTTPCallRepo) SnapshotConnectedIntoInvited(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
 func (r *fakeHTTPCallRepo) AddParticipant(_ context.Context, p *entity.CallParticipant) error {
 	r.participants[[2]uuid.UUID{p.CallID, p.UserID}] = p
 	return nil

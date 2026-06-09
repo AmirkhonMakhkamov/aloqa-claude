@@ -58,6 +58,12 @@ func TestCanSubscribeAuthorizesKnownRoomTypes(t *testing.T) {
 	if handler.canSubscribe(ctx, client, "aloqa.ws."+otherUserID.String()+".events") {
 		t.Fatalf("user events subscription for another user was allowed")
 	}
+	if !handler.canSubscribe(ctx, client, "aloqa.ws."+workspaceID.String()+".user."+userID.String()+".events") {
+		t.Fatalf("workspace user events subscription was denied")
+	}
+	if handler.canSubscribe(ctx, client, "aloqa.ws."+workspaceID.String()+".user."+otherUserID.String()+".events") {
+		t.Fatalf("workspace user events subscription for another user was allowed")
+	}
 	if handler.canSubscribe(ctx, client, "channel:"+privateChannelID.String()) {
 		t.Fatalf("private channel subscription without channel membership was allowed")
 	}
@@ -269,6 +275,73 @@ func TestHandleCallTypingBroadcastsWhenAccessGranted(t *testing.T) {
 	}
 }
 
+func TestHandleCallTypingForPrivateCallUsesUserScopedRooms(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	userID := uuid.New()
+	otherUserID := uuid.New()
+	outsiderID := uuid.New()
+
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {
+				ID:          callID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeMeeting,
+				Status:      entity.CallStatusActive,
+				CreatedBy:   userID,
+				AccessLevel: entity.AccessLevelPrivate,
+			},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, userID}:      {ID: uuid.New(), CallID: callID, UserID: userID, Role: entity.CallRoleHost, Status: entity.ParticipantStatusConnected},
+			{callID, otherUserID}: {ID: uuid.New(), CallID: callID, UserID: otherUserID, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	callSvc := calldomain.NewService(calls, nil, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, calldomain.MediaConfig{}, nil, nil)
+	chatSvc := chatdomain.NewService(
+		&fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{}, members: map[[2]uuid.UUID]*entity.ChannelMember{}},
+		nil, workspaces, nil, noopPublisher{}, nil, nil, nil, nil,
+	)
+	hub := platformws.NewHub(&fakeStateStore{rooms: map[string][]string{}, seq: map[string]int64{}})
+	hubCtx, hubCancel := context.WithCancel(context.Background())
+	go hub.Run(hubCtx)
+	t.Cleanup(hubCancel)
+
+	client := &platformws.Client{ID: uuid.New(), UserID: userID, SessionID: "session-1", ResumeKey: "resume-key", Send: make(chan []byte, 8)}
+	outsider := &platformws.Client{ID: uuid.New(), UserID: outsiderID, SessionID: "session-2", ResumeKey: "resume-key-2", Send: make(chan []byte, 8)}
+	hub.Register(client)
+	hub.Register(outsider)
+	hub.Subscribe(client.ID.String(), workspaceUserEventsRoom(workspaceID, userID))
+	hub.Subscribe(outsider.ID.String(), "aloqa.ws."+workspaceID.String())
+	handler := NewHandler(hub, chatSvc, callSvc, nil, nil, 0)
+
+	payload := json.RawMessage(`{"workspace_id":"` + workspaceID.String() + `","call_id":"` + callID.String() + `"}`)
+	handler.handleMessage(ctx, client, ClientMessage{Type: "call_typing", Payload: payload})
+
+	select {
+	case data := <-client.Send:
+		var msg ServerMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			t.Fatalf("failed to unmarshal private broadcast: %v", err)
+		}
+		if msg.Type != string(event.TypeCallTypingStarted) {
+			t.Fatalf("broadcast type = %q, want %q", msg.Type, event.TypeCallTypingStarted)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected private call typing broadcast")
+	}
+	select {
+	case data := <-outsider.Send:
+		t.Fatalf("workspace-only subscriber received private typing event: %s", data)
+	case <-time.After(25 * time.Millisecond):
+	}
+}
+
 func TestHandleCallTypingDeniedWhenNoAccess(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -299,7 +372,8 @@ type noopPublisher struct{}
 func (noopPublisher) Publish(context.Context, string, []byte) error { return nil }
 
 type fakeCallRepo struct {
-	calls map[uuid.UUID]*entity.Call
+	calls        map[uuid.UUID]*entity.Call
+	participants map[[2]uuid.UUID]*entity.CallParticipant
 }
 
 func (r *fakeCallRepo) Create(context.Context, *entity.Call) error { return nil }
@@ -316,16 +390,40 @@ func (r *fakeCallRepo) UpdateStatus(context.Context, uuid.UUID, entity.CallStatu
 func (r *fakeCallRepo) UpdateSettings(context.Context, uuid.UUID, entity.CallSettings) error {
 	return nil
 }
-func (r *fakeCallRepo) End(context.Context, uuid.UUID) error                          { return nil }
+func (r *fakeCallRepo) End(context.Context, uuid.UUID) error { return nil }
+func (r *fakeCallRepo) UpdateAccessLevel(context.Context, uuid.UUID, entity.AccessLevel) error {
+	return nil
+}
+func (r *fakeCallRepo) AddInvitedMembers(context.Context, uuid.UUID, []uuid.UUID, uuid.UUID) error {
+	return nil
+}
+func (r *fakeCallRepo) IsInvited(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return false, nil
+}
+func (r *fakeCallRepo) ListInvitedMembers(context.Context, uuid.UUID) ([]uuid.UUID, error) {
+	return nil, nil
+}
+func (r *fakeCallRepo) SnapshotConnectedIntoInvited(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
 func (r *fakeCallRepo) AddParticipant(context.Context, *entity.CallParticipant) error { return nil }
 func (r *fakeCallRepo) AddParticipantIfCapacity(context.Context, *entity.CallParticipant, int) error {
 	return nil
 }
-func (r *fakeCallRepo) GetParticipant(context.Context, uuid.UUID, uuid.UUID) (*entity.CallParticipant, error) {
+func (r *fakeCallRepo) GetParticipant(_ context.Context, callID, userID uuid.UUID) (*entity.CallParticipant, error) {
+	if participant := r.participants[[2]uuid.UUID{callID, userID}]; participant != nil {
+		return participant, nil
+	}
 	return nil, cerrors.NotFound("participant not found")
 }
-func (r *fakeCallRepo) ListParticipants(context.Context, uuid.UUID) ([]entity.CallParticipant, error) {
-	return nil, nil
+func (r *fakeCallRepo) ListParticipants(_ context.Context, callID uuid.UUID) ([]entity.CallParticipant, error) {
+	participants := []entity.CallParticipant{}
+	for key, participant := range r.participants {
+		if key[0] == callID {
+			participants = append(participants, *participant)
+		}
+	}
+	return participants, nil
 }
 func (r *fakeCallRepo) UpdateParticipantStatus(context.Context, uuid.UUID, entity.ParticipantStatus) error {
 	return nil

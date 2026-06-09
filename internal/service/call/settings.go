@@ -2,7 +2,6 @@ package call
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 
 	"github.com/google/uuid"
@@ -11,6 +10,7 @@ import (
 	"aloqa/internal/domain/entity"
 	"aloqa/internal/domain/event"
 	"aloqa/internal/pkg/cerrors"
+	"aloqa/internal/platform/txscope"
 )
 
 // CallSettingsPatch describes a partial call settings update. Pointer fields
@@ -24,10 +24,12 @@ type CallSettingsPatch struct {
 	BreakoutRooms          *bool
 	BreakoutCreation       *entity.BreakoutCreationPolicy
 	MaxBreakoutRooms       *int
+	AccessLevel            *entity.AccessLevel
 	ScreenSharing          *bool
 	Chat                   *bool
 	MembersCanUnmuteMic    *bool
 	MembersCanEnableCamera *bool
+	WhoCanAddGuests        *entity.WhoCanAddGuestsPolicy
 }
 
 // UpdateCallSettings applies host-controlled partial settings updates to a
@@ -50,8 +52,9 @@ func (s *Service) UpdateCallSettings(ctx context.Context, callID, actorID uuid.U
 	// and broadcast.
 	if patch.EntryMode == nil && patch.MuteOnJoin == nil && patch.BreakoutRooms == nil &&
 		patch.BreakoutCreation == nil && patch.MaxBreakoutRooms == nil &&
-		patch.ScreenSharing == nil && patch.Chat == nil &&
-		patch.MembersCanUnmuteMic == nil && patch.MembersCanEnableCamera == nil {
+		patch.AccessLevel == nil && patch.ScreenSharing == nil && patch.Chat == nil &&
+		patch.MembersCanUnmuteMic == nil && patch.MembersCanEnableCamera == nil &&
+		patch.WhoCanAddGuests == nil {
 		return call, nil
 	}
 
@@ -78,6 +81,26 @@ func (s *Service) UpdateCallSettings(ctx context.Context, callID, actorID uuid.U
 	}
 	if patch.MembersCanEnableCamera != nil {
 		settings.MembersCanEnableCamera = patch.MembersCanEnableCamera
+	}
+	if patch.WhoCanAddGuests != nil {
+		policy := *patch.WhoCanAddGuests
+		if !policy.Valid() {
+			return nil, cerrors.InvalidInput("invalid who_can_add_guests")
+		}
+		settings.WhoCanAddGuests = policy
+	}
+
+	accessLevel := call.AccessLevel.Resolved()
+	nextAccessLevel := accessLevel
+	if patch.AccessLevel != nil {
+		level := *patch.AccessLevel
+		if !level.Valid() {
+			return nil, cerrors.InvalidInput("invalid access_level")
+		}
+		if level == entity.AccessLevelPrivate && (call.ChannelID != nil || call.Type == entity.CallTypeOneToOne) {
+			return nil, cerrors.InvalidInput("private access is only supported for channel-less multi-party calls")
+		}
+		nextAccessLevel = level
 	}
 
 	if patch.EntryMode != nil {
@@ -140,10 +163,11 @@ func (s *Service) UpdateCallSettings(ctx context.Context, callID, actorID uuid.U
 		if err := s.enforceMemberPublishPolicy(ctx, callID, settings); err != nil {
 			return nil, err // stored setting unchanged; no broadcast
 		}
-		if err := s.calls.UpdateSettings(ctx, callID, settings); err != nil {
+		if err := s.persistCallSettingsAndAccess(ctx, call, settings, nextAccessLevel, actorID); err != nil {
 			return nil, s.wrapCallError(ctx, err, callID, "update call settings")
 		}
 		call.Settings = settings
+		call.AccessLevel = nextAccessLevel
 		s.publishCallSettingsChanged(ctx, call)
 		// Close the join-during-enforcement window: a member who joined mid-flip
 		// minted a stale permissive token. Best-effort (the persisted policy is
@@ -155,10 +179,11 @@ func (s *Service) UpdateCallSettings(ctx context.Context, callID, actorID uuid.U
 	// Capture whether a publish field changed BEFORE mutating call.Settings —
 	// otherwise the comparison below would be settings-vs-itself (always false).
 	publishChanged := publishAffectingChanged(call.Settings, settings)
-	if err := s.calls.UpdateSettings(ctx, callID, settings); err != nil {
+	if err := s.persistCallSettingsAndAccess(ctx, call, settings, nextAccessLevel, actorID); err != nil {
 		return nil, s.wrapCallError(ctx, err, callID, "update call settings")
 	}
 	call.Settings = settings
+	call.AccessLevel = nextAccessLevel
 	if publishChanged {
 		// A permissive publish flip (false→true): re-apply best-effort so the new
 		// allowance reaches connected members without a rejoin. resolveMemberPublish
@@ -168,6 +193,44 @@ func (s *Service) UpdateCallSettings(ctx context.Context, callID, actorID uuid.U
 	s.publishCallSettingsChanged(ctx, call)
 
 	return call, nil
+}
+
+func (s *Service) persistCallSettingsAndAccess(
+	ctx context.Context,
+	call *entity.Call,
+	settings entity.CallSettings,
+	nextAccessLevel entity.AccessLevel,
+	actorID uuid.UUID,
+) error {
+	currentAccessLevel := call.AccessLevel.Resolved()
+	accessChanged := nextAccessLevel != currentAccessLevel
+	if s.tx != nil && accessChanged {
+		return s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
+			if scope.Calls() == nil {
+				return cerrors.Unavailable("call transaction scope is not configured")
+			}
+			if currentAccessLevel == entity.AccessLevelPublic && nextAccessLevel == entity.AccessLevelPrivate {
+				if err := scope.Calls().SnapshotConnectedIntoInvited(ctx, call.ID, actorID); err != nil {
+					return err
+				}
+			}
+			if err := scope.Calls().UpdateAccessLevel(ctx, call.ID, nextAccessLevel); err != nil {
+				return err
+			}
+			return scope.Calls().UpdateSettings(ctx, call.ID, settings)
+		})
+	}
+	if accessChanged {
+		if currentAccessLevel == entity.AccessLevelPublic && nextAccessLevel == entity.AccessLevelPrivate {
+			if err := s.calls.SnapshotConnectedIntoInvited(ctx, call.ID, actorID); err != nil {
+				return err
+			}
+		}
+		if err := s.calls.UpdateAccessLevel(ctx, call.ID, nextAccessLevel); err != nil {
+			return err
+		}
+	}
+	return s.calls.UpdateSettings(ctx, call.ID, settings)
 }
 
 // publishRestrictionTightened reports whether the patch tightens any member
@@ -293,9 +356,9 @@ func (s *Service) publishCallSettingsChanged(ctx context.Context, call *entity.C
 		channelID = *call.ChannelID
 	}
 
-	subject := fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID)
-	s.doPublish(ctx, event.TypeCallSettingsChanged, subject, call.WorkspaceID, channelID, call.CreatedBy, event.CallSettingsChangedPayload{
-		CallID:   call.ID,
-		Settings: call.Settings,
+	s.publishCallScoped(ctx, event.TypeCallSettingsChanged, call, channelID, call.CreatedBy, event.CallSettingsChangedPayload{
+		CallID:      call.ID,
+		AccessLevel: call.AccessLevel.Resolved(),
+		Settings:    call.Settings,
 	})
 }

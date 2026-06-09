@@ -217,10 +217,12 @@ type startCallSettings struct {
 }
 
 type startCallRequest struct {
-	Type      entity.CallType   `json:"type"`
-	Title     string            `json:"title"`
-	ChannelID *string           `json:"channel_id,omitempty"`
-	Settings  startCallSettings `json:"settings"`
+	Type             entity.CallType   `json:"type"`
+	Title            string            `json:"title"`
+	ChannelID        *string           `json:"channel_id,omitempty"`
+	AccessLevel      *string           `json:"access_level,omitempty"`
+	InvitedMemberIDs []string          `json:"invited_member_ids,omitempty"`
+	Settings         startCallSettings `json:"settings"`
 }
 
 type joinCallRequest struct {
@@ -249,7 +251,24 @@ func (h *CallHandler) Start(w http.ResponseWriter, r *http.Request) {
 		channelID = &parsed
 	}
 
-	c, err := h.svc.StartCall(r.Context(), wsID, userID, req.Type, req.Title, channelID, req.Settings.CallSettings, req.Settings.Password)
+	accessOptions := call.StartCallAccessOptions{}
+	if req.AccessLevel != nil {
+		accessLevel := entity.AccessLevel(*req.AccessLevel)
+		accessOptions.AccessLevel = accessLevel
+	}
+	if len(req.InvitedMemberIDs) > 0 {
+		accessOptions.InvitedMemberIDs = make([]uuid.UUID, 0, len(req.InvitedMemberIDs))
+		for _, rawUserID := range req.InvitedMemberIDs {
+			parsed, err := id.Parse(rawUserID)
+			if err != nil {
+				writeErr(w, err)
+				return
+			}
+			accessOptions.InvitedMemberIDs = append(accessOptions.InvitedMemberIDs, parsed)
+		}
+	}
+
+	c, err := h.svc.StartCallWithAccess(r.Context(), wsID, userID, req.Type, req.Title, channelID, req.Settings.CallSettings, req.Settings.Password, accessOptions)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -637,10 +656,12 @@ type updateSettingsRequest struct {
 	BreakoutRooms          *bool   `json:"breakout_rooms,omitempty"`
 	BreakoutCreation       *string `json:"breakout_creation,omitempty"`
 	MaxBreakoutRooms       *int    `json:"max_breakout_rooms,omitempty"`
+	AccessLevel            *string `json:"access_level,omitempty"`
 	ScreenSharing          *bool   `json:"screen_sharing,omitempty"`
 	Chat                   *bool   `json:"chat,omitempty"`
 	MembersCanUnmuteMic    *bool   `json:"members_can_unmute_mic,omitempty"`
 	MembersCanEnableCamera *bool   `json:"members_can_enable_camera,omitempty"`
+	WhoCanAddGuests        *string `json:"who_can_add_guests,omitempty"`
 }
 
 func (h *CallHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
@@ -680,6 +701,14 @@ func (h *CallHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if req.BreakoutCreation != nil {
 		policy := entity.BreakoutCreationPolicy(*req.BreakoutCreation)
 		patch.BreakoutCreation = &policy
+	}
+	if req.AccessLevel != nil {
+		level := entity.AccessLevel(*req.AccessLevel)
+		patch.AccessLevel = &level
+	}
+	if req.WhoCanAddGuests != nil {
+		policy := entity.WhoCanAddGuestsPolicy(*req.WhoCanAddGuests)
+		patch.WhoCanAddGuests = &policy
 	}
 
 	updated, err := h.svc.UpdateCallSettings(r.Context(), callID, userID, patch)

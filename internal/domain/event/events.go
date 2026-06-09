@@ -274,8 +274,9 @@ type CallPayload struct {
 }
 
 type CallSettingsChangedPayload struct {
-	CallID   uuid.UUID           `json:"call_id"`
-	Settings entity.CallSettings `json:"settings"`
+	CallID      uuid.UUID           `json:"call_id"`
+	AccessLevel entity.AccessLevel  `json:"access_level"`
+	Settings    entity.CallSettings `json:"settings"`
 }
 
 type CallMessagePayload struct {

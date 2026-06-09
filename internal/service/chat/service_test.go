@@ -109,8 +109,20 @@ func TestCreateChannelAddsSelectedWorkspaceMembers(t *testing.T) {
 	if member := channels.members[[2]uuid.UUID{channel.ID, memberID}]; member == nil || member.Role != entity.ChannelRoleMember {
 		t.Fatalf("selected channel membership missing or wrong: %+v", member)
 	}
-	if !publisher.hasEvent("aloqa.ws."+workspaceID.String(), eventpkg.TypeChannelCreated) {
-		t.Fatalf("channel.created was not published to workspace subject; subjects=%v", publisher.subjects())
+	workspaceSubject := "aloqa.ws." + workspaceID.String()
+	if publisher.hasEvent(workspaceSubject, eventpkg.TypeChannelCreated) {
+		t.Fatalf("private channel.created leaked to workspace subject; subjects=%v", publisher.subjects())
+	}
+	memberSubject := workspaceUserEventsSubject(workspaceID, memberID)
+	if !publisher.hasEvent(memberSubject, eventpkg.TypeChannelCreated) {
+		t.Fatalf("channel.created was not published to selected member subject; subjects=%v", publisher.subjects())
+	}
+	payload, ok := publisher.channelCreatedPayload(memberSubject)
+	if !ok || payload.Channel == nil {
+		t.Fatalf("channel.created payload missing on selected member subject")
+	}
+	if !hasUUID(payload.Channel.Members, creatorID) || !hasUUID(payload.Channel.Members, memberID) {
+		t.Fatalf("channel.created members = %v, want creator and selected member", payload.Channel.Members)
 	}
 }
 
@@ -195,6 +207,96 @@ func TestUpdateChannelRejectsArchivedNameEdit(t *testing.T) {
 
 	if _, err := svc.UpdateChannel(ctx, channelID, userID, "new-name", "new-topic", nil); err == nil {
 		t.Fatal("expected Forbidden when editing name/topic on archived channel")
+	}
+}
+
+func TestUpdateChannelDeletesSearchDocumentWhenArchived(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	userID := uuid.New()
+	channelID := uuid.New()
+	topic := "Launches"
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {
+				ID:          channelID,
+				WorkspaceID: &workspaceID,
+				Name:        "announcements",
+				Topic:       &topic,
+				Type:        entity.ChannelTypePublic,
+				CreatedBy:   userID,
+			},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, userID}: {ChannelID: channelID, UserID: userID, Role: entity.ChannelRoleOwner},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleOwner},
+	}}
+	search := &recordingSearchIndexer{}
+	svc := NewService(channels, nil, workspaces, nil, noopPublisher{}, nil, nil, search, nil)
+
+	archived := true
+	if _, err := svc.UpdateChannel(ctx, channelID, userID, "announcements", topic, &archived); err != nil {
+		t.Fatalf("UpdateChannel archive returned error: %v", err)
+	}
+	if len(search.indexedChannels) != 0 {
+		t.Fatalf("indexed channels = %v, want none for archived channel", search.indexedChannels)
+	}
+	if len(search.deletedChannels) != 1 || search.deletedChannels[0] != channelID {
+		t.Fatalf("deleted channels = %v, want [%s]", search.deletedChannels, channelID)
+	}
+}
+
+func TestUpdateChannelDeletesSearchDocumentWhenArchivedInTransaction(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	userID := uuid.New()
+	channelID := uuid.New()
+	topic := "Launches"
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {
+				ID:          channelID,
+				WorkspaceID: &workspaceID,
+				Name:        "announcements",
+				Topic:       &topic,
+				Type:        entity.ChannelTypePublic,
+				CreatedBy:   userID,
+			},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, userID}: {ChannelID: channelID, UserID: userID, Role: entity.ChannelRoleOwner},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleOwner},
+	}}
+	search := &recordingSearchQueue{}
+	txScope := &fakeChatTxScope{channels: channels, search: search}
+	txManager := &fakeChatTxManager{scope: txScope}
+	svc := NewService(channels, nil, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+	svc.SetTransactionManager(txManager)
+
+	archived := true
+	if _, err := svc.UpdateChannel(ctx, channelID, userID, "announcements", topic, &archived); err != nil {
+		t.Fatalf("UpdateChannel archive returned error: %v", err)
+	}
+	if txManager.calls != 1 {
+		t.Fatalf("transaction calls = %d, want 1", txManager.calls)
+	}
+	if len(search.upserts) != 0 {
+		t.Fatalf("upserted docs = %v, want none for archived channel", search.upserts)
+	}
+	if len(search.deletes) != 1 {
+		t.Fatalf("delete calls = %v, want one channel delete", search.deletes)
+	}
+	deleteCall := search.deletes[0]
+	if deleteCall.workspaceID != workspaceID || deleteCall.resourceType != searchsvc.ResourceTypeChannel || deleteCall.resourceID != channelID {
+		t.Fatalf("delete call = %+v, want workspace=%s type=%s resource=%s", deleteCall, workspaceID, searchsvc.ResourceTypeChannel, channelID)
 	}
 }
 
@@ -1433,6 +1535,80 @@ func TestListChannelsHidesRecipientDMWithOnlyDeletedMessages(t *testing.T) {
 	}
 }
 
+func TestListChannelsUsesMembershipForWorkspaceMembersWithAccessPolicy(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	userID := uuid.New()
+	joinedPublicID := uuid.New()
+	unjoinedPublicID := uuid.New()
+	joinedPrivateID := uuid.New()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			joinedPublicID:   {ID: joinedPublicID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic, Name: "joined"},
+			unjoinedPublicID: {ID: unjoinedPublicID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic, Name: "unjoined"},
+			joinedPrivateID:  {ID: joinedPrivateID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePrivate, Name: "private"},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{joinedPublicID, userID}:  {ChannelID: joinedPublicID, UserID: userID},
+			{joinedPrivateID, userID}: {ChannelID: joinedPrivateID, UserID: userID},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	svc := NewService(channels, nil, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+	svc.SetAccessPolicy(accesspolicy.NewChecker(workspaces, channels, nil, nil))
+
+	got, err := svc.ListChannels(ctx, workspaceID, userID)
+	if err != nil {
+		t.Fatalf("ListChannels returned error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("channels length = %d, want 2: %+v", len(got), got)
+	}
+	for _, ch := range got {
+		if ch.ID == unjoinedPublicID {
+			t.Fatalf("ListChannels returned unjoined public channel: %+v", got)
+		}
+	}
+}
+
+func TestListChannelsFiltersCollaborationAccessForWorkspaceMembers(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	userID := uuid.New()
+	otherUserID := uuid.New()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypeDM, Name: ""},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, userID}:      {ChannelID: channelID, UserID: userID},
+			{channelID, otherUserID}: {ChannelID: channelID, UserID: otherUserID},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	svc := NewService(channels, nil, workspaces, nil, noopPublisher{}, nil, fakeCollabChecker{
+		decision: collabaccess.Decision{Managed: true, Allowed: false},
+	}, nil, nil)
+	svc.SetAccessPolicy(accesspolicy.NewChecker(workspaces, channels, nil, fakeCollabChecker{
+		decision: collabaccess.Decision{Managed: true, Allowed: false},
+	}))
+
+	got, err := svc.ListChannels(ctx, workspaceID, userID)
+	if err != nil {
+		t.Fatalf("ListChannels returned error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("channels = %+v, want collaboration-revoked DM hidden", got)
+	}
+}
+
 func TestListDirectoryReadsAllPaginatedMembersAndChannels(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -1530,8 +1706,12 @@ func TestJoinAndLeaveChannelUseTransactionalEventEnqueue(t *testing.T) {
 	if channels.members[[2]uuid.UUID{channelID, userID}] != nil {
 		t.Fatalf("member still present after transactional leave")
 	}
-	if len(txScope.events) != 2 || txScope.events[1].Type != eventpkg.TypeMemberLeft {
-		t.Fatalf("events after leave = %+v, want member.left", txScope.events)
+	if len(txScope.events) != 3 ||
+		txScope.events[1].Type != eventpkg.TypeMemberLeft ||
+		txScope.events[2].Type != eventpkg.TypeMemberLeft ||
+		txScope.events[1].Subject != "aloqa.chat."+channelID.String() ||
+		txScope.events[2].Subject != workspaceUserEventsSubject(workspaceID, userID) {
+		t.Fatalf("events after leave = %+v, want channel and per-user member.left", txScope.events)
 	}
 }
 
@@ -1589,7 +1769,8 @@ func TestAddChannelMembersRequiresManagerAndWorkspaceMembership(t *testing.T) {
 		{workspaceID, memberID}: {WorkspaceID: workspaceID, UserID: memberID, Role: entity.WorkspaceRoleMember},
 		{workspaceID, targetID}: {WorkspaceID: workspaceID, UserID: targetID, Role: entity.WorkspaceRoleMember},
 	}}
-	svc := NewService(channels, nil, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+	publisher := &recordingSubjectPublisher{}
+	svc := NewService(channels, nil, workspaces, nil, publisher, nil, nil, nil, nil)
 
 	if _, err := svc.AddChannelMembers(ctx, channelID, memberID, []uuid.UUID{targetID}); !hasCode(err, cerrors.CodeForbidden) {
 		t.Fatalf("AddChannelMembers member error = %v, want FORBIDDEN", err)
@@ -1607,6 +1788,18 @@ func TestAddChannelMembersRequiresManagerAndWorkspaceMembership(t *testing.T) {
 	}
 	if member := channels.members[[2]uuid.UUID{channelID, targetID}]; member == nil || member.Role != entity.ChannelRoleMember {
 		t.Fatalf("target channel membership missing or wrong: %+v", member)
+	}
+	if publisher.hasEvent("aloqa.ws."+workspaceID.String(), eventpkg.TypeChannelCreated) {
+		t.Fatalf("private channel.created leaked to workspace subject; subjects=%v", publisher.subjects())
+	}
+	payload, ok := publisher.channelCreatedPayload(workspaceUserEventsSubject(workspaceID, targetID))
+	if !ok || payload.Channel == nil {
+		t.Fatalf("channel.created payload missing after AddChannelMembers")
+	}
+	if !hasUUID(payload.Channel.Members, ownerID) ||
+		!hasUUID(payload.Channel.Members, memberID) ||
+		!hasUUID(payload.Channel.Members, targetID) {
+		t.Fatalf("channel.created members = %v, want full current member list", payload.Channel.Members)
 	}
 }
 
@@ -1633,7 +1826,8 @@ func TestRemoveChannelMemberRequiresManagerAndProtectsOwner(t *testing.T) {
 		{workspaceID, adminID}:  {WorkspaceID: workspaceID, UserID: adminID, Role: entity.WorkspaceRoleAdmin},
 		{workspaceID, memberID}: {WorkspaceID: workspaceID, UserID: memberID, Role: entity.WorkspaceRoleMember},
 	}}
-	svc := NewService(channels, nil, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+	publisher := &recordingSubjectPublisher{}
+	svc := NewService(channels, nil, workspaces, nil, publisher, nil, nil, nil, nil)
 
 	if err := svc.RemoveChannelMember(ctx, channelID, memberID, adminID); !hasCode(err, cerrors.CodeForbidden) {
 		t.Fatalf("RemoveChannelMember member error = %v, want FORBIDDEN", err)
@@ -1646,6 +1840,15 @@ func TestRemoveChannelMemberRequiresManagerAndProtectsOwner(t *testing.T) {
 	}
 	if channels.members[[2]uuid.UUID{channelID, memberID}] != nil {
 		t.Fatalf("member still present after remove")
+	}
+	if !publisher.hasEvent("aloqa.chat."+channelID.String(), eventpkg.TypeMemberLeft) {
+		t.Fatalf("member.left was not published to channel subject; subjects=%v", publisher.subjects())
+	}
+	if publisher.hasEvent("aloqa.ws."+workspaceID.String(), eventpkg.TypeMemberLeft) {
+		t.Fatalf("member.left leaked to workspace subject; subjects=%v", publisher.subjects())
+	}
+	if !publisher.hasEvent(workspaceUserEventsSubject(workspaceID, memberID), eventpkg.TypeMemberLeft) {
+		t.Fatalf("member.left was not published to removed user subject; subjects=%v", publisher.subjects())
 	}
 }
 
@@ -1692,12 +1895,90 @@ func (p *recordingSubjectPublisher) hasEvent(subject string, typ eventpkg.Type) 
 	return false
 }
 
+func (p *recordingSubjectPublisher) channelCreatedPayload(subject string) (eventpkg.ChannelPayload, bool) {
+	for _, published := range p.events {
+		if published.subject != subject {
+			continue
+		}
+		var envelope struct {
+			Type    eventpkg.Type   `json:"type"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal(published.data, &envelope); err != nil || envelope.Type != eventpkg.TypeChannelCreated {
+			continue
+		}
+		var payload eventpkg.ChannelPayload
+		if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+			continue
+		}
+		return payload, true
+	}
+	return eventpkg.ChannelPayload{}, false
+}
+
 func (p *recordingSubjectPublisher) subjects() []string {
 	subjects := make([]string, 0, len(p.events))
 	for _, published := range p.events {
 		subjects = append(subjects, published.subject)
 	}
 	return subjects
+}
+
+func hasUUID(values []uuid.UUID, want uuid.UUID) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+type recordingSearchIndexer struct {
+	indexedChannels []uuid.UUID
+	deletedChannels []uuid.UUID
+}
+
+func (r *recordingSearchIndexer) IndexMessage(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, time.Time) error {
+	return nil
+}
+
+func (r *recordingSearchIndexer) DeleteMessage(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+
+func (r *recordingSearchIndexer) DeleteFile(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+
+func (r *recordingSearchIndexer) IndexChannel(_ context.Context, _, channelID uuid.UUID, _ string, _ string, _ time.Time, _ time.Time) error {
+	r.indexedChannels = append(r.indexedChannels, channelID)
+	return nil
+}
+
+func (r *recordingSearchIndexer) DeleteChannel(_ context.Context, _, channelID uuid.UUID) error {
+	r.deletedChannels = append(r.deletedChannels, channelID)
+	return nil
+}
+
+type searchDeleteCall struct {
+	workspaceID  uuid.UUID
+	resourceType searchsvc.ResourceType
+	resourceID   uuid.UUID
+}
+
+type recordingSearchQueue struct {
+	upserts []searchsvc.Document
+	deletes []searchDeleteCall
+}
+
+func (r *recordingSearchQueue) EnqueueUpsert(_ context.Context, doc searchsvc.Document) error {
+	r.upserts = append(r.upserts, doc)
+	return nil
+}
+
+func (r *recordingSearchQueue) EnqueueDelete(_ context.Context, workspaceID uuid.UUID, resourceType searchsvc.ResourceType, resourceID uuid.UUID) error {
+	r.deletes = append(r.deletes, searchDeleteCall{workspaceID: workspaceID, resourceType: resourceType, resourceID: resourceID})
+	return nil
 }
 
 type fakeWorkspaceRepo struct {
@@ -2164,6 +2445,7 @@ func (m *fakeChatTxManager) WithinTx(ctx context.Context, fn func(context.Contex
 type fakeChatTxScope struct {
 	messages repository.MessageRepository
 	channels repository.ChannelRepository
+	search   searchsvc.Indexer
 	events   []eventpkg.Event
 }
 
@@ -2180,7 +2462,7 @@ func (s *fakeChatTxScope) Invites() repository.GuestInviteRepository            
 func (s *fakeChatTxScope) GuestGrants() repository.GuestAccessRepository          { return nil }
 func (s *fakeChatTxScope) Roles() repository.WorkspaceRoleRepository              { return nil }
 func (s *fakeChatTxScope) Audit() repository.AuditRepository                      { return nil }
-func (s *fakeChatTxScope) SearchIndexer() searchsvc.Indexer                       { return nil }
+func (s *fakeChatTxScope) SearchIndexer() searchsvc.Indexer                       { return s.search }
 func (s *fakeChatTxScope) EnqueueRealtime(_ context.Context, evt eventpkg.Event, _ []byte) error {
 	s.events = append(s.events, evt)
 	return nil

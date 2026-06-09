@@ -28,6 +28,7 @@ type LiveKitRoomClient interface {
 	DeleteRoomByName(ctx context.Context, name string) error
 	RemoveParticipant(ctx context.Context, callID, userID uuid.UUID) error
 	ListParticipants(ctx context.Context, callID uuid.UUID) ([]*livekitpb.ParticipantInfo, error)
+	ListParticipantsByRoom(ctx context.Context, room string) ([]*livekitpb.ParticipantInfo, error)
 	// UpdateParticipant replaces a connected participant's LiveKit permission so
 	// a grant/revoke applies at the media plane with no rejoin. (ALK-697)
 	UpdateParticipant(ctx context.Context, room, identity string, perm *livekitpb.ParticipantPermission) error
@@ -154,7 +155,11 @@ func (c *liveKitRoomServiceClient) RemoveParticipant(ctx context.Context, callID
 }
 
 func (c *liveKitRoomServiceClient) ListParticipants(ctx context.Context, callID uuid.UUID) ([]*livekitpb.ParticipantInfo, error) {
-	resp, err := c.client.ListParticipants(ctx, &livekitpb.ListParticipantsRequest{Room: callID.String()})
+	return c.ListParticipantsByRoom(ctx, callID.String())
+}
+
+func (c *liveKitRoomServiceClient) ListParticipantsByRoom(ctx context.Context, room string) ([]*livekitpb.ParticipantInfo, error) {
+	resp, err := c.client.ListParticipants(ctx, &livekitpb.ListParticipantsRequest{Room: room})
 	if isTwirpCode(err, twirp.NotFound) {
 		return nil, nil
 	}

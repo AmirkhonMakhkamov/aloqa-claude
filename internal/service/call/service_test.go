@@ -1214,8 +1214,10 @@ func TestLiveKitBreakoutParticipantLeftMarksHardLeaveDisconnected(t *testing.T) 
 	leaver.BreakoutRoomID = &breakoutRoomID
 	host := connectedParticipant(callID, hostID, entity.CallRoleHost)
 
+	call := breakoutCall(callID, workspaceID, hostID)
+	call.PinnedParticipantUserID = &userID
 	calls := &fakeCallRepo{
-		calls: map[uuid.UUID]*entity.Call{callID: breakoutCall(callID, workspaceID, hostID)},
+		calls: map[uuid.UUID]*entity.Call{callID: call},
 		participants: map[[2]uuid.UUID]*entity.CallParticipant{
 			{callID, userID}: leaver,
 			{callID, hostID}: host,
@@ -1235,11 +1237,17 @@ func TestLiveKitBreakoutParticipantLeftMarksHardLeaveDisconnected(t *testing.T) 
 		t.Fatalf("HandleLiveKitWebhook returned error: %v", err)
 	}
 
+	if calls.calls[callID].PinnedParticipantUserID != nil {
+		t.Fatalf("pinned participant = %v, want nil", calls.calls[callID].PinnedParticipantUserID)
+	}
 	if leaver.Status != entity.ParticipantStatusDisconnected {
 		t.Fatalf("leaver status = %v, want disconnected", leaver.Status)
 	}
 	if got := countBreakoutEvents(t, pub.captures, event.TypeCallParticipantLeft); got != 1 {
 		t.Fatalf("call.participant.left events = %d, want 1", got)
+	}
+	if got := countBreakoutEvents(t, pub.captures, event.TypeCallPinnedChanged); got != 1 {
+		t.Fatalf("call.pinned.changed events = %d, want 1", got)
 	}
 	// Host is still connected, so the call must NOT auto-end.
 	if calls.calls[callID].Status == entity.CallStatusEnded {
@@ -2952,6 +2960,13 @@ func (r *fakeCallRepo) SetFeaturedShareUserID(_ context.Context, callID uuid.UUI
 	}
 	return cerrors.NotFound("call not found")
 }
+func (r *fakeCallRepo) SetPinnedParticipantUserID(_ context.Context, callID uuid.UUID, userID *uuid.UUID) error {
+	if c := r.calls[callID]; c != nil {
+		c.PinnedParticipantUserID = userID
+		return nil
+	}
+	return cerrors.NotFound("call not found")
+}
 func (r *fakeCallRepo) RemoveParticipant(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 
 type removedLiveKitParticipant struct {
@@ -2972,6 +2987,7 @@ type fakeLiveKitRoomClient struct {
 	deletedRoomNames      []string
 	removedParticipants   []removedLiveKitParticipant
 	participantsByCall    map[uuid.UUID][]*livekitpb.ParticipantInfo
+	participantsByRoom    map[string][]*livekitpb.ParticipantInfo
 	listParticipantsErr   error
 	listParticipantsCalls int
 	updatedParticipants   []updatedLiveKitParticipant
@@ -3014,10 +3030,21 @@ func (c *fakeLiveKitRoomClient) RemoveParticipant(_ context.Context, callID, use
 	return nil
 }
 
-func (c *fakeLiveKitRoomClient) ListParticipants(_ context.Context, callID uuid.UUID) ([]*livekitpb.ParticipantInfo, error) {
+func (c *fakeLiveKitRoomClient) ListParticipants(ctx context.Context, callID uuid.UUID) ([]*livekitpb.ParticipantInfo, error) {
+	return c.ListParticipantsByRoom(ctx, callID.String())
+}
+
+func (c *fakeLiveKitRoomClient) ListParticipantsByRoom(_ context.Context, room string) ([]*livekitpb.ParticipantInfo, error) {
 	c.listParticipantsCalls++
 	if c.listParticipantsErr != nil {
 		return nil, c.listParticipantsErr
+	}
+	if c.participantsByRoom != nil {
+		return c.participantsByRoom[room], nil
+	}
+	callID, err := uuid.Parse(room)
+	if err != nil {
+		return nil, nil
 	}
 	return c.participantsByCall[callID], nil
 }
@@ -3038,6 +3065,18 @@ func (c *fakeLiveKitRoomClient) MutePublishedTrack(_ context.Context, room, iden
 	// Reflect the mute so a subsequent ListParticipants sees the track muted (the
 	// real RoomService does this), letting an idempotent reconcile pass skip it.
 	for _, parts := range c.participantsByCall {
+		for _, p := range parts {
+			if p.GetIdentity() != identity {
+				continue
+			}
+			for _, tr := range p.GetTracks() {
+				if tr.GetSid() == trackSID {
+					tr.Muted = true
+				}
+			}
+		}
+	}
+	for _, parts := range c.participantsByRoom {
 		for _, p := range parts {
 			if p.GetIdentity() != identity {
 				continue

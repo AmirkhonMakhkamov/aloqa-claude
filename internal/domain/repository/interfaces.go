@@ -248,6 +248,9 @@ type CallRepository interface {
 	// SetFeaturedShareUserID sets (or clears with nil) the host-featured share
 	// pick on a call row. Keyed by callID since it's a calls-row update. (ALK-697)
 	SetFeaturedShareUserID(ctx context.Context, callID uuid.UUID, userID *uuid.UUID) error
+	// SetPinnedParticipantUserID sets (or clears with nil) the host-pinned
+	// participant pick on a call row. Keyed by callID since it's a calls-row update. (ALK-813)
+	SetPinnedParticipantUserID(ctx context.Context, callID uuid.UUID, userID *uuid.UUID) error
 	RemoveParticipant(ctx context.Context, callID, userID uuid.UUID) error
 }
 

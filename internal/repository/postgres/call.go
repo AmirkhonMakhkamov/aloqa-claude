@@ -153,8 +153,8 @@ func (r *CallRepo) Create(ctx context.Context, call *entity.Call) error {
 	}
 
 	query := `
-		INSERT INTO calls (id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, end_reason, featured_share_user_id, created_at, join_password_hash)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`
+		INSERT INTO calls (id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, end_reason, featured_share_user_id, pinned_participant_user_id, created_at, join_password_hash, access_level)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`
 
 	_, err = r.db.Exec(ctx, query,
 		call.ID,
@@ -170,8 +170,10 @@ func (r *CallRepo) Create(ctx context.Context, call *entity.Call) error {
 		call.EndedAt,
 		nullableCallEndReason(call.EndReason),
 		call.FeaturedShareUserID,
+		call.PinnedParticipantUserID,
 		call.CreatedAt,
 		nullableString(call.JoinPasswordHash),
+		string(call.AccessLevel.Resolved()),
 	)
 	if err != nil {
 		return fmt.Errorf("postgres: create call: %w", err)
@@ -185,7 +187,7 @@ func (r *CallRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Call, err
 	// GetCall use) because it is the sole consumer; the list/recents projections
 	// never verify a password and never expose the hash (#4).
 	query := `
-		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, created_at, COALESCE(join_password_hash, '')
+		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, pinned_participant_user_id, created_at, COALESCE(join_password_hash, ''), COALESCE(access_level, 'public')
 		FROM calls
 		WHERE id = $1`
 
@@ -206,8 +208,10 @@ func (r *CallRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Call, err
 		&call.EndedAt,
 		&call.EndReason,
 		&call.FeaturedShareUserID,
+		&call.PinnedParticipantUserID,
 		&call.CreatedAt,
 		&call.JoinPasswordHash,
+		&call.AccessLevel,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -222,13 +226,14 @@ func (r *CallRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Call, err
 	call.Settings.EntryMode = call.Settings.ResolvedEntryMode()
 	call.Settings.BreakoutCreation = call.Settings.ResolvedBreakoutCreation()
 	call.Settings.MaxBreakoutRooms = call.Settings.ResolvedMaxBreakoutRooms()
+	call.Settings.WhoCanAddGuests = call.Settings.ResolvedWhoCanAddGuests()
 
 	return call, nil
 }
 
 func (r *CallRepo) ListActiveByWorkspace(ctx context.Context, workspaceID uuid.UUID) ([]entity.Call, error) {
 	query := `
-		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, created_at
+		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, pinned_participant_user_id, created_at, COALESCE(access_level, 'public')
 		FROM calls
 		WHERE workspace_id = $1 AND status != 'ended'
 		ORDER BY created_at DESC`
@@ -258,7 +263,9 @@ func (r *CallRepo) ListActiveByWorkspace(ctx context.Context, workspaceID uuid.U
 			&call.EndedAt,
 			&call.EndReason,
 			&call.FeaturedShareUserID,
+			&call.PinnedParticipantUserID,
 			&call.CreatedAt,
+			&call.AccessLevel,
 		); err != nil {
 			return nil, fmt.Errorf("postgres: list active calls scan: %w", err)
 		}
@@ -269,6 +276,7 @@ func (r *CallRepo) ListActiveByWorkspace(ctx context.Context, workspaceID uuid.U
 		call.Settings.EntryMode = call.Settings.ResolvedEntryMode()
 		call.Settings.BreakoutCreation = call.Settings.ResolvedBreakoutCreation()
 		call.Settings.MaxBreakoutRooms = call.Settings.ResolvedMaxBreakoutRooms()
+		call.Settings.WhoCanAddGuests = call.Settings.ResolvedWhoCanAddGuests()
 
 		calls = append(calls, call)
 	}
@@ -291,7 +299,7 @@ func (r *CallRepo) ListStaleOpen(ctx context.Context, before time.Time, limit in
 	}
 
 	query := `
-		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, created_at
+		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, pinned_participant_user_id, created_at, COALESCE(access_level, 'public')
 		FROM calls
 		WHERE status IN ('ringing', 'active')
 		  AND COALESCE(started_at, created_at) < $1
@@ -323,7 +331,9 @@ func (r *CallRepo) ListStaleOpen(ctx context.Context, before time.Time, limit in
 			&call.EndedAt,
 			&call.EndReason,
 			&call.FeaturedShareUserID,
+			&call.PinnedParticipantUserID,
 			&call.CreatedAt,
+			&call.AccessLevel,
 		); err != nil {
 			return nil, fmt.Errorf("postgres: list stale open calls scan: %w", err)
 		}
@@ -334,6 +344,7 @@ func (r *CallRepo) ListStaleOpen(ctx context.Context, before time.Time, limit in
 		call.Settings.EntryMode = call.Settings.ResolvedEntryMode()
 		call.Settings.BreakoutCreation = call.Settings.ResolvedBreakoutCreation()
 		call.Settings.MaxBreakoutRooms = call.Settings.ResolvedMaxBreakoutRooms()
+		call.Settings.WhoCanAddGuests = call.Settings.ResolvedWhoCanAddGuests()
 
 		calls = append(calls, call)
 	}
@@ -440,6 +451,7 @@ func (r *CallRepo) ListActiveSummariesByWorkspace(
 			c.id, c.type, c.title, c.started_at, c.created_by,
 			c.channel_id, ch.name AS channel_name,
 			COALESCE(u.display_name, '') AS host_display_name,
+			COALESCE(c.access_level, 'public') AS access_level,
 			COALESCE((c.settings->>'recording')::bool, false) AS recording,
 			COALESCE(NOT (c.settings->>'waiting_room')::bool, true) AS is_open,
 			COALESCE(pc.participant_count, 0) AS participant_count,
@@ -477,6 +489,7 @@ func (r *CallRepo) ListActiveSummariesByWorkspace(
 			&s.ChannelID,
 			&s.ChannelName,
 			&s.HostDisplayName,
+			&s.AccessLevel,
 			&s.Recording,
 			&s.IsOpen,
 			&s.ParticipantCount,
@@ -561,7 +574,7 @@ func (r *CallRepo) ListRecentByWorkspace(ctx context.Context, workspaceID uuid.U
 	}
 
 	query := `
-		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, created_at
+		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, pinned_participant_user_id, created_at, COALESCE(access_level, 'public')
 		FROM calls
 		WHERE workspace_id = $1`
 	args := []any{workspaceID}
@@ -599,7 +612,9 @@ func (r *CallRepo) ListRecentByWorkspace(ctx context.Context, workspaceID uuid.U
 			&call.EndedAt,
 			&call.EndReason,
 			&call.FeaturedShareUserID,
+			&call.PinnedParticipantUserID,
 			&call.CreatedAt,
+			&call.AccessLevel,
 		); err != nil {
 			return nil, fmt.Errorf("postgres: list recent calls scan: %w", err)
 		}
@@ -609,6 +624,7 @@ func (r *CallRepo) ListRecentByWorkspace(ctx context.Context, workspaceID uuid.U
 		call.Settings.EntryMode = call.Settings.ResolvedEntryMode()
 		call.Settings.BreakoutCreation = call.Settings.ResolvedBreakoutCreation()
 		call.Settings.MaxBreakoutRooms = call.Settings.ResolvedMaxBreakoutRooms()
+		call.Settings.WhoCanAddGuests = call.Settings.ResolvedWhoCanAddGuests()
 		calls = append(calls, call)
 	}
 	if err := rows.Err(); err != nil {
@@ -653,6 +669,88 @@ func (r *CallRepo) UpdateSettings(ctx context.Context, id uuid.UUID, settings en
 		return cerrors.NotFound("call not found")
 	}
 
+	return nil
+}
+
+// UpdateAccessLevel sets the call's access_level column (ALK-814 / S6). The
+// service validates the value and only invokes it for channel-less calls.
+func (r *CallRepo) UpdateAccessLevel(ctx context.Context, id uuid.UUID, level entity.AccessLevel) error {
+	tag, err := r.db.Exec(ctx, `UPDATE calls SET access_level = $2 WHERE id = $1`, id, string(level.Resolved()))
+	if err != nil {
+		return fmt.Errorf("postgres: update call access level: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return cerrors.NotFound("call not found")
+	}
+	return nil
+}
+
+// AddInvitedMembers inserts workspace members into a private call's invite list
+// (idempotent — re-inviting is a no-op). Used at call creation and to snapshot
+// connected participants on a public->private flip. (ALK-814 / S6)
+func (r *CallRepo) AddInvitedMembers(ctx context.Context, callID uuid.UUID, userIDs []uuid.UUID, invitedBy uuid.UUID) error {
+	for _, userID := range userIDs {
+		if _, err := r.db.Exec(ctx,
+			`INSERT INTO call_invited_members (call_id, user_id, invited_by) VALUES ($1, $2, $3)
+			 ON CONFLICT (call_id, user_id) DO NOTHING`,
+			callID, userID, invitedBy,
+		); err != nil {
+			return fmt.Errorf("postgres: add invited member: %w", err)
+		}
+	}
+	return nil
+}
+
+// IsInvited reports whether a user is on a call's invite list. (ALK-814 / S6)
+func (r *CallRepo) IsInvited(ctx context.Context, callID, userID uuid.UUID) (bool, error) {
+	var exists bool
+	if err := r.db.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM call_invited_members WHERE call_id = $1 AND user_id = $2)`,
+		callID, userID,
+	).Scan(&exists); err != nil {
+		return false, fmt.Errorf("postgres: is invited: %w", err)
+	}
+	return exists, nil
+}
+
+// ListInvitedMembers returns the user IDs on a call's invite list. (ALK-814 / S6)
+func (r *CallRepo) ListInvitedMembers(ctx context.Context, callID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := r.db.Query(ctx, `SELECT user_id FROM call_invited_members WHERE call_id = $1`, callID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list invited members: %w", err)
+	}
+	defer rows.Close()
+	ids := make([]uuid.UUID, 0)
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("postgres: list invited members scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// SnapshotConnectedIntoInvited copies every currently-connected non-guest
+// participant into the invite list (idempotent) so a public->private flip never
+// strands an already-admitted member. (ALK-814 / S6)
+func (r *CallRepo) SnapshotConnectedIntoInvited(ctx context.Context, callID, invitedBy uuid.UUID) error {
+	// is_guest is a read-time projection (not a column) and guests are not in
+	// `users`, so filter to actual workspace members via a join — this both
+	// excludes guests and keeps the user_id FK satisfiable.
+	_, err := r.db.Exec(ctx,
+		`INSERT INTO call_invited_members (call_id, user_id, invited_by)
+		 SELECT cp.call_id, cp.user_id, $2
+		 FROM call_participants cp
+		 JOIN calls c ON c.id = cp.call_id
+		 JOIN workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = cp.user_id
+		 WHERE cp.call_id = $1 AND cp.status = 'connected'
+		 ON CONFLICT (call_id, user_id) DO NOTHING`,
+		callID, invitedBy,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: snapshot connected into invited: %w", err)
+	}
 	return nil
 }
 
@@ -1157,6 +1255,16 @@ func (r *CallRepo) SetFeaturedShareUserID(ctx context.Context, callID uuid.UUID,
 	_, err := r.db.Exec(ctx, `UPDATE calls SET featured_share_user_id = $2 WHERE id = $1`, callID, userID)
 	if err != nil {
 		return fmt.Errorf("postgres: set call featured_share_user_id: %w", err)
+	}
+	return nil
+}
+
+// SetPinnedParticipantUserID sets (or clears with nil) the host-pinned
+// participant pick on a call row. Passing nil writes SQL NULL. (ALK-813)
+func (r *CallRepo) SetPinnedParticipantUserID(ctx context.Context, callID uuid.UUID, userID *uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `UPDATE calls SET pinned_participant_user_id = $2 WHERE id = $1`, callID, userID)
+	if err != nil {
+		return fmt.Errorf("postgres: set call pinned_participant_user_id: %w", err)
 	}
 	return nil
 }

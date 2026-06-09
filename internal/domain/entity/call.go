@@ -110,6 +110,52 @@ const (
 	ParticipantLeftReasonMissed   ParticipantLeftReason = "missed"
 )
 
+// AccessLevel controls who may join a channel-less call (ALK-814 / S6). It is
+// stored in a dedicated calls column (default 'public'), never in the settings
+// JSONB, and is inert for channel-attached calls (access = channel membership)
+// and one_to_one (DM). 'private' restricts joining to the creator, host/co-host,
+// invited members (call_invited_members), currently-connected participants, and
+// guests holding a grant for this call.
+type AccessLevel string
+
+const (
+	AccessLevelPublic  AccessLevel = "public"
+	AccessLevelPrivate AccessLevel = "private"
+)
+
+func (a AccessLevel) Valid() bool {
+	switch a {
+	case AccessLevelPublic, AccessLevelPrivate:
+		return true
+	default:
+		return false
+	}
+}
+
+// Resolved returns the concrete access level, defaulting an empty/invalid value
+// to public so a legacy call (pre-migration 058) stays open.
+func (a AccessLevel) Resolved() AccessLevel {
+	if a.Valid() {
+		return a
+	}
+	return AccessLevelPublic
+}
+
+// WhoCanAddGuestsPolicy controls who may mint a call guest link (ALK-814 / S6).
+// Stored in the settings JSONB; the restrictive default ('host') applies to a
+// legacy call. For a private call the host/co-host requirement always applies
+// regardless of this policy (enforced in the service).
+type WhoCanAddGuestsPolicy string
+
+const (
+	WhoCanAddGuestsHost     WhoCanAddGuestsPolicy = "host"
+	WhoCanAddGuestsEveryone WhoCanAddGuestsPolicy = "everyone"
+)
+
+func (p WhoCanAddGuestsPolicy) Valid() bool {
+	return p == WhoCanAddGuestsHost || p == WhoCanAddGuestsEveryone
+}
+
 type CallSettings struct {
 	WaitingRoom      bool                   `json:"waiting_room"`
 	MuteOnJoin       bool                   `json:"mute_on_join"`
@@ -136,6 +182,18 @@ type CallSettings struct {
 	// wire is always a concrete bool; the persisted JSONB keeps the pointer.
 	MembersCanUnmuteMic    *bool `json:"members_can_unmute_mic"`
 	MembersCanEnableCamera *bool `json:"members_can_enable_camera"`
+	// WhoCanAddGuests (ALK-814 / S6) — empty resolves to host (restrictive).
+	WhoCanAddGuests WhoCanAddGuestsPolicy `json:"who_can_add_guests"`
+}
+
+// ResolvedWhoCanAddGuests defaults an empty/invalid policy to host (only
+// host/co-host may mint a guest link) — the restrictive, backward-compatible
+// default for a call created before S6.
+func (c CallSettings) ResolvedWhoCanAddGuests() WhoCanAddGuestsPolicy {
+	if c.WhoCanAddGuests.Valid() {
+		return c.WhoCanAddGuests
+	}
+	return WhoCanAddGuestsHost
 }
 
 // ResolvedMembersCanUnmuteMic reports whether members may unmute their mic,
@@ -231,6 +289,7 @@ type ActiveCallSummary struct {
 	ChannelName      *string          `json:"channel_name"`
 	HostUserID       uuid.UUID        `json:"host_user_id"`
 	HostDisplayName  string           `json:"host_display_name"`
+	AccessLevel      AccessLevel      `json:"access_level"`
 	Recording        bool             `json:"recording"`
 	IsOpen           bool             `json:"is_open"`
 	ParticipantCount int              `json:"participant_count"`
@@ -256,25 +315,29 @@ type ActiveCallObservation struct {
 }
 
 type Call struct {
-	ID              uuid.UUID    `json:"id"`
-	WorkspaceID     uuid.UUID    `json:"workspace_id"`
-	ChannelID       *uuid.UUID   `json:"channel_id,omitempty"`
-	Type            CallType     `json:"type"`
-	Status          CallStatus   `json:"status"`
-	Title           string       `json:"title,omitempty"`
-	CreatedBy       uuid.UUID    `json:"created_by"`
-	ScheduledCallID *uuid.UUID   `json:"scheduled_call_id,omitempty"`
-	Settings        CallSettings `json:"settings"`
+	ID              uuid.UUID  `json:"id"`
+	WorkspaceID     uuid.UUID  `json:"workspace_id"`
+	ChannelID       *uuid.UUID `json:"channel_id,omitempty"`
+	Type            CallType   `json:"type"`
+	Status          CallStatus `json:"status"`
+	Title           string     `json:"title,omitempty"`
+	CreatedBy       uuid.UUID  `json:"created_by"`
+	ScheduledCallID *uuid.UUID `json:"scheduled_call_id,omitempty"`
+	// AccessLevel (ALK-814 / S6) is stored in a dedicated calls column (migration
+	// 058), default 'public'. Inert for channel-attached and one_to_one calls.
+	AccessLevel AccessLevel  `json:"access_level"`
+	Settings    CallSettings `json:"settings"`
 	// JoinPasswordHash is the bcrypt hash of the password-mode join password. It
 	// is stored in a dedicated calls column (migration 051), never in the
 	// settings JSONB, and is marshalled with json:"-" so it is never exposed by
 	// the API. Only JoinCall reads it (bcrypt compare). Hydrated by GetByID.
-	JoinPasswordHash    string        `json:"-"`
-	StartedAt           *time.Time    `json:"started_at,omitempty"`
-	EndedAt             *time.Time    `json:"ended_at,omitempty"`
-	EndReason           CallEndReason `json:"end_reason,omitempty"`
-	FeaturedShareUserID *uuid.UUID    `json:"featured_share_user_id,omitempty"`
-	CreatedAt           time.Time     `json:"created_at"`
+	JoinPasswordHash        string        `json:"-"`
+	StartedAt               *time.Time    `json:"started_at,omitempty"`
+	EndedAt                 *time.Time    `json:"ended_at,omitempty"`
+	EndReason               CallEndReason `json:"end_reason,omitempty"`
+	FeaturedShareUserID     *uuid.UUID    `json:"featured_share_user_id,omitempty"`
+	PinnedParticipantUserID *uuid.UUID    `json:"pinned_participant_user_id,omitempty"`
+	CreatedAt               time.Time     `json:"created_at"`
 }
 
 type CallParticipant struct {

@@ -13,6 +13,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
 
+	"aloqa/internal/domain/entity"
 	"aloqa/internal/domain/event"
 	"aloqa/internal/middleware"
 	"aloqa/internal/pkg/id"
@@ -329,7 +330,8 @@ func (h *Handler) handleCallTyping(ctx context.Context, client *platformws.Clien
 		h.sendError(client, "websocket service unavailable")
 		return
 	}
-	if err := h.callSvc.CanAccessCall(ctx, workspaceID, callID, client.UserID); err != nil {
+	call, err := h.callSvc.GetCall(ctx, workspaceID, callID, client.UserID)
+	if err != nil {
 		h.sendError(client, "you do not have access to this call")
 		return
 	}
@@ -348,7 +350,47 @@ func (h *Handler) handleCallTyping(ctx context.Context, client *platformws.Clien
 		return
 	}
 
+	if isPrivateChannelLessCall(call) {
+		participants, err := h.callSvc.GetParticipants(ctx, workspaceID, callID, client.UserID)
+		if err != nil {
+			h.sendError(client, "you do not have access to this call")
+			return
+		}
+		seen := map[uuid.UUID]struct{}{}
+		for _, participant := range participants {
+			if !canReceivePrivateCallEvent(participant) {
+				continue
+			}
+			if _, ok := seen[participant.UserID]; ok {
+				continue
+			}
+			seen[participant.UserID] = struct{}{}
+			h.hub.BroadcastToRoom(workspaceUserEventsRoom(workspaceID, participant.UserID), data)
+		}
+		return
+	}
+
 	h.hub.BroadcastToRoom("aloqa.ws."+workspaceID.String(), data)
+}
+
+func isPrivateChannelLessCall(call *entity.Call) bool {
+	return call != nil &&
+		call.ChannelID == nil &&
+		call.Type != entity.CallTypeOneToOne &&
+		call.AccessLevel.Resolved() == entity.AccessLevelPrivate
+}
+
+func canReceivePrivateCallEvent(participant entity.CallParticipant) bool {
+	return participant.Role == entity.CallRoleHost ||
+		participant.Role == entity.CallRoleCoHost ||
+		participant.Status == entity.ParticipantStatusConnected ||
+		participant.Status == entity.ParticipantStatusJoining ||
+		participant.Status == entity.ParticipantStatusWaiting ||
+		participant.Status == entity.ParticipantStatusInvited
+}
+
+func workspaceUserEventsRoom(workspaceID, userID uuid.UUID) string {
+	return "aloqa.ws." + workspaceID.String() + ".user." + userID.String() + ".events"
 }
 
 type signalPayload struct {

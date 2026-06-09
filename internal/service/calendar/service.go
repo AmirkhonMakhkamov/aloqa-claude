@@ -880,6 +880,7 @@ func (s *Service) startCallFromEventTx(ctx context.Context, workspaceID, eventID
 			Title:           eventEntity.Title,
 			CreatedBy:       initiatorID,
 			ScheduledCallID: &scheduledCallID,
+			AccessLevel:     entity.AccessLevelPublic,
 			Settings:        callSettings,
 			StartedAt:       &now,
 			CreatedAt:       now,

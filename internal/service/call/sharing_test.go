@@ -262,6 +262,108 @@ func TestRequestScreenShareUngrantedBroadcastsCreatedAndGrantedNoOps(t *testing.
 	}
 }
 
+func TestMuteParticipantHostMutesLiveKitPersistsAndBroadcasts(t *testing.T) {
+	ctx := context.Background()
+	svc, calls, rooms, pub, workspaceID, callID, hostID, participantID := shareTestHarness(t, entity.CallStatusActive)
+	rooms.participantsByCall = map[uuid.UUID][]*livekitpb.ParticipantInfo{
+		callID: {
+			{Identity: participantID.String(), Tracks: []*livekitpb.TrackInfo{{Sid: "mic-1", Source: livekitpb.TrackSource_MICROPHONE}}},
+		},
+	}
+
+	if err := svc.MuteParticipant(ctx, workspaceID, callID, hostID, participantID); err != nil {
+		t.Fatalf("MuteParticipant error: %v", err)
+	}
+	if len(rooms.mutedTracks) != 1 || rooms.mutedTracks[0].trackSID != "mic-1" {
+		t.Fatalf("muted tracks = %+v, want mic-1", rooms.mutedTracks)
+	}
+	if p := calls.participants[[2]uuid.UUID{callID, participantID}]; p == nil || !p.AudioMuted {
+		t.Fatalf("audio_muted not persisted: %+v", p)
+	}
+	if got := countShareEvents(t, pub.captures, event.TypeCallParticipantUpdated); got != 1 {
+		t.Fatalf("participant.updated events = %d, want 1", got)
+	}
+	if got := countShareEvents(t, pub.captures, event.TypeCallParticipantMuted); got != 1 {
+		t.Fatalf("participant.muted events = %d, want 1", got)
+	}
+}
+
+func TestMuteParticipantInBreakoutRoomMutesBreakoutLiveKitRoom(t *testing.T) {
+	ctx := context.Background()
+	svc, calls, rooms, _, workspaceID, callID, hostID, participantID := shareTestHarness(t, entity.CallStatusActive)
+	breakoutRoomID := uuid.New()
+	participant := calls.participants[[2]uuid.UUID{callID, participantID}]
+	participant.BreakoutRoomID = &breakoutRoomID
+	roomName := breakoutLiveKitRoomName(callID, breakoutRoomID)
+	rooms.participantsByRoom = map[string][]*livekitpb.ParticipantInfo{
+		roomName: {
+			{Identity: participantID.String(), Tracks: []*livekitpb.TrackInfo{{Sid: "breakout-mic-1", Source: livekitpb.TrackSource_MICROPHONE}}},
+		},
+	}
+
+	if err := svc.MuteParticipant(ctx, workspaceID, callID, hostID, participantID); err != nil {
+		t.Fatalf("MuteParticipant error: %v", err)
+	}
+	if len(rooms.mutedTracks) != 1 {
+		t.Fatalf("muted tracks = %+v, want one breakout track", rooms.mutedTracks)
+	}
+	if rooms.mutedTracks[0].room != roomName || rooms.mutedTracks[0].trackSID != "breakout-mic-1" {
+		t.Fatalf("muted track = %+v, want room=%s sid=breakout-mic-1", rooms.mutedTracks[0], roomName)
+	}
+}
+
+func TestDisableParticipantCameraMutesCameraTrackPersistsAndBroadcasts(t *testing.T) {
+	ctx := context.Background()
+	svc, calls, rooms, pub, workspaceID, callID, hostID, participantID := shareTestHarness(t, entity.CallStatusActive)
+	rooms.participantsByCall = map[uuid.UUID][]*livekitpb.ParticipantInfo{
+		callID: {
+			{Identity: participantID.String(), Tracks: []*livekitpb.TrackInfo{{Sid: "cam-1", Source: livekitpb.TrackSource_CAMERA}}},
+		},
+	}
+
+	if err := svc.DisableParticipantCamera(ctx, workspaceID, callID, hostID, participantID); err != nil {
+		t.Fatalf("DisableParticipantCamera error: %v", err)
+	}
+	if len(rooms.mutedTracks) != 1 || rooms.mutedTracks[0].trackSID != "cam-1" {
+		t.Fatalf("muted tracks = %+v, want cam-1", rooms.mutedTracks)
+	}
+	if p := calls.participants[[2]uuid.UUID{callID, participantID}]; p == nil || !p.VideoMuted {
+		t.Fatalf("video_muted not persisted: %+v", p)
+	}
+	if got := countShareEvents(t, pub.captures, event.TypeCallParticipantMuted); got != 1 {
+		t.Fatalf("participant.muted events = %d, want 1", got)
+	}
+}
+
+func TestAskParticipantToUnmuteBroadcastsRequestOnly(t *testing.T) {
+	ctx := context.Background()
+	svc, calls, rooms, pub, workspaceID, callID, hostID, participantID := shareTestHarness(t, entity.CallStatusActive)
+	calls.participants[[2]uuid.UUID{callID, participantID}].AudioMuted = true
+
+	if err := svc.AskParticipantToUnmute(ctx, workspaceID, callID, hostID, participantID); err != nil {
+		t.Fatalf("AskParticipantToUnmute error: %v", err)
+	}
+	if len(rooms.mutedTracks) != 0 {
+		t.Fatalf("ask-unmute muted tracks = %+v, want none", rooms.mutedTracks)
+	}
+	if got := countShareEvents(t, pub.captures, event.TypeCallAskUnmute); got != 1 {
+		t.Fatalf("ask-unmute events = %d, want 1", got)
+	}
+	events := decodeShareEvents(t, pub.captures)
+	var payload event.CallAskUnmutePayload
+	for _, ev := range events {
+		if ev.Type != event.TypeCallAskUnmute {
+			continue
+		}
+		if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+			t.Fatalf("unmarshal ask-unmute payload: %v", err)
+		}
+	}
+	if payload.CallID != callID || payload.UserID != participantID || payload.RequestedByUserID != hostID {
+		t.Fatalf("ask-unmute payload = %+v, want call=%s target=%s actor=%s", payload, callID, participantID, hostID)
+	}
+}
+
 func TestSetFeaturedShareHostPersistsAndBroadcasts(t *testing.T) {
 	ctx := context.Background()
 	svc, calls, _, pub, workspaceID, callID, hostID, participantID := shareTestHarness(t, entity.CallStatusActive)
@@ -275,6 +377,71 @@ func TestSetFeaturedShareHostPersistsAndBroadcasts(t *testing.T) {
 	}
 	if got := countShareEvents(t, pub.captures, event.TypeCallFeaturedShareUpdated); got != 1 {
 		t.Fatalf("featured_share.updated events = %d, want 1", got)
+	}
+}
+
+func TestSetPinnedParticipantHostPersistsAndBroadcasts(t *testing.T) {
+	ctx := context.Background()
+	svc, calls, _, pub, workspaceID, callID, hostID, participantID := shareTestHarness(t, entity.CallStatusActive)
+
+	if err := svc.SetPinnedParticipant(ctx, workspaceID, callID, hostID, &participantID); err != nil {
+		t.Fatalf("SetPinnedParticipant error: %v", err)
+	}
+	c := calls.calls[callID]
+	if c.PinnedParticipantUserID == nil || *c.PinnedParticipantUserID != participantID {
+		t.Fatalf("pinned_participant_user_id = %v, want %s", c.PinnedParticipantUserID, participantID)
+	}
+	if got := countShareEvents(t, pub.captures, event.TypeCallPinnedChanged); got != 1 {
+		t.Fatalf("call.pinned.changed events = %d, want 1", got)
+	}
+}
+
+func TestPinnedParticipantClearsWhenTargetLeaves(t *testing.T) {
+	ctx := context.Background()
+	svc, calls, _, pub, workspaceID, callID, _, participantID := shareTestHarness(t, entity.CallStatusActive)
+	calls.calls[callID].PinnedParticipantUserID = &participantID
+
+	if _, err := svc.LeaveCall(ctx, workspaceID, callID, participantID); err != nil {
+		t.Fatalf("LeaveCall error: %v", err)
+	}
+	if calls.calls[callID].PinnedParticipantUserID != nil {
+		t.Fatalf("pinned_participant_user_id = %v, want nil", calls.calls[callID].PinnedParticipantUserID)
+	}
+	if got := countShareEvents(t, pub.captures, event.TypeCallPinnedChanged); got != 1 {
+		t.Fatalf("call.pinned.changed events = %d, want 1", got)
+	}
+}
+
+func TestPinnedParticipantClearsWhenTargetRemoved(t *testing.T) {
+	ctx := context.Background()
+	svc, calls, _, pub, workspaceID, callID, hostID, participantID := shareTestHarness(t, entity.CallStatusActive)
+	calls.calls[callID].PinnedParticipantUserID = &participantID
+
+	if err := svc.RemoveParticipant(ctx, workspaceID, callID, hostID, participantID); err != nil {
+		t.Fatalf("RemoveParticipant error: %v", err)
+	}
+	if calls.calls[callID].PinnedParticipantUserID != nil {
+		t.Fatalf("pinned_participant_user_id = %v, want nil", calls.calls[callID].PinnedParticipantUserID)
+	}
+	if got := countShareEvents(t, pub.captures, event.TypeCallPinnedChanged); got != 1 {
+		t.Fatalf("call.pinned.changed events = %d, want 1", got)
+	}
+}
+
+func TestSetPinnedParticipantRejectsNonHost(t *testing.T) {
+	ctx := context.Background()
+	svc, _, _, _, workspaceID, callID, _, participantID := shareTestHarness(t, entity.CallStatusActive)
+	if err := svc.SetPinnedParticipant(ctx, workspaceID, callID, participantID, &participantID); !hasCode(err, cerrors.CodeForbidden) {
+		t.Fatalf("non-host SetPinnedParticipant error = %v, want FORBIDDEN", err)
+	}
+}
+
+func TestSetPinnedParticipantRejectsNonParticipantTarget(t *testing.T) {
+	ctx := context.Background()
+	svc, _, _, _, workspaceID, callID, hostID, _ := shareTestHarness(t, entity.CallStatusActive)
+	stranger := uuid.New()
+	if err := svc.SetPinnedParticipant(ctx, workspaceID, callID, hostID, &stranger); !hasCode(err, cerrors.CodeInvalidInput) {
+		t.Fatalf("non-participant pinned target error = %v, want INVALID_INPUT", err)
 	}
 }
 

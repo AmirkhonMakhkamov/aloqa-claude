@@ -609,6 +609,9 @@ func (s *Service) handleLiveKitParticipantLeft(ctx context.Context, callID uuid.
 		if disconnected {
 			markParticipantDisconnected(participant, entity.ParticipantLeftReasonLeft)
 			s.publishParticipantEvent(ctx, event.TypeCallParticipantLeft, call, participant)
+			if err := s.clearPinnedParticipantIfMatches(ctx, call, userID, userID); err != nil {
+				return cerrors.Internal("failed to clear pinned participant on livekit leave", err)
+			}
 		}
 	}
 
@@ -712,6 +715,9 @@ func (s *Service) handleLiveKitBreakoutWebhook(ctx context.Context, ev *livekitp
 		if disconnected {
 			markParticipantDisconnected(participant, entity.ParticipantLeftReasonLeft)
 			s.publishParticipantEvent(ctx, event.TypeCallParticipantLeft, call, participant)
+			if err := s.clearPinnedParticipantIfMatches(ctx, call, userID, userID); err != nil {
+				return cerrors.Internal("failed to clear pinned participant on breakout leave", err)
+			}
 		}
 	}
 

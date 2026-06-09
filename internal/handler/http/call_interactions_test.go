@@ -478,6 +478,23 @@ func (r *httpCallRepo) UpdateSettings(_ context.Context, id uuid.UUID, settings 
 	}
 	return cerrors.NotFound("call not found")
 }
+func (r *httpCallRepo) UpdateAccessLevel(_ context.Context, id uuid.UUID, level entity.AccessLevel) error {
+	if c := r.calls[id]; c != nil {
+		c.AccessLevel = level.Resolved()
+		return nil
+	}
+	return cerrors.NotFound("call not found")
+}
+func (r *httpCallRepo) AddInvitedMembers(context.Context, uuid.UUID, []uuid.UUID, uuid.UUID) error {
+	return nil
+}
+func (r *httpCallRepo) IsInvited(context.Context, uuid.UUID, uuid.UUID) (bool, error) { return false, nil }
+func (r *httpCallRepo) ListInvitedMembers(context.Context, uuid.UUID) ([]uuid.UUID, error) {
+	return nil, nil
+}
+func (r *httpCallRepo) SnapshotConnectedIntoInvited(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
 func (r *httpCallRepo) End(context.Context, uuid.UUID) error { return nil }
 func (r *httpCallRepo) EndWithReason(_ context.Context, id uuid.UUID, reason entity.CallEndReason) error {
 	_, err := r.EndWithReasonIfNotEnded(context.Background(), id, reason)
@@ -587,6 +604,13 @@ func (r *httpCallRepo) SetCanScreenShare(_ context.Context, id uuid.UUID, canSha
 func (r *httpCallRepo) SetFeaturedShareUserID(_ context.Context, callID uuid.UUID, userID *uuid.UUID) error {
 	if c := r.calls[callID]; c != nil {
 		c.FeaturedShareUserID = userID
+		return nil
+	}
+	return cerrors.NotFound("call not found")
+}
+func (r *httpCallRepo) SetPinnedParticipantUserID(_ context.Context, callID uuid.UUID, userID *uuid.UUID) error {
+	if c := r.calls[callID]; c != nil {
+		c.PinnedParticipantUserID = userID
 		return nil
 	}
 	return cerrors.NotFound("call not found")

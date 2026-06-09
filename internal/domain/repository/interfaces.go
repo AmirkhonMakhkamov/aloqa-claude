@@ -223,6 +223,14 @@ type CallRepository interface {
 	ListActiveByWorkspace(ctx context.Context, workspaceID uuid.UUID) ([]entity.Call, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status entity.CallStatus) error
 	UpdateSettings(ctx context.Context, id uuid.UUID, settings entity.CallSettings) error
+	// UpdateAccessLevel sets the call's access_level column (ALK-814 / S6).
+	UpdateAccessLevel(ctx context.Context, id uuid.UUID, level entity.AccessLevel) error
+	// AddInvitedMembers / IsInvited / ListInvitedMembers / SnapshotConnectedIntoInvited
+	// back the private-call invite list (call_invited_members). (ALK-814 / S6)
+	AddInvitedMembers(ctx context.Context, callID uuid.UUID, userIDs []uuid.UUID, invitedBy uuid.UUID) error
+	IsInvited(ctx context.Context, callID, userID uuid.UUID) (bool, error)
+	ListInvitedMembers(ctx context.Context, callID uuid.UUID) ([]uuid.UUID, error)
+	SnapshotConnectedIntoInvited(ctx context.Context, callID, invitedBy uuid.UUID) error
 	End(ctx context.Context, id uuid.UUID) error
 
 	AddParticipant(ctx context.Context, p *entity.CallParticipant) error
@@ -248,6 +256,9 @@ type CallRepository interface {
 	// SetFeaturedShareUserID sets (or clears with nil) the host-featured share
 	// pick on a call row. Keyed by callID since it's a calls-row update. (ALK-697)
 	SetFeaturedShareUserID(ctx context.Context, callID uuid.UUID, userID *uuid.UUID) error
+	// SetPinnedParticipantUserID sets (or clears with nil) the host-pinned
+	// participant pick on a call row. Keyed by callID since it's a calls-row update. (ALK-813)
+	SetPinnedParticipantUserID(ctx context.Context, callID uuid.UUID, userID *uuid.UUID) error
 	RemoveParticipant(ctx context.Context, callID, userID uuid.UUID) error
 }
 

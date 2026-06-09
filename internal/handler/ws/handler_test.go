@@ -316,8 +316,8 @@ func (r *fakeCallRepo) UpdateStatus(context.Context, uuid.UUID, entity.CallStatu
 func (r *fakeCallRepo) UpdateSettings(context.Context, uuid.UUID, entity.CallSettings) error {
 	return nil
 }
-func (r *fakeCallRepo) End(context.Context, uuid.UUID) error                             { return nil }
-func (r *fakeCallRepo) AddParticipant(context.Context, *entity.CallParticipant) error    { return nil }
+func (r *fakeCallRepo) End(context.Context, uuid.UUID) error                          { return nil }
+func (r *fakeCallRepo) AddParticipant(context.Context, *entity.CallParticipant) error { return nil }
 func (r *fakeCallRepo) AddParticipantIfCapacity(context.Context, *entity.CallParticipant, int) error {
 	return nil
 }
@@ -341,6 +341,9 @@ func (r *fakeCallRepo) UpdateParticipantMedia(context.Context, uuid.UUID, bool, 
 }
 func (r *fakeCallRepo) SetCanScreenShare(context.Context, uuid.UUID, bool) error { return nil }
 func (r *fakeCallRepo) SetFeaturedShareUserID(context.Context, uuid.UUID, *uuid.UUID) error {
+	return nil
+}
+func (r *fakeCallRepo) SetPinnedParticipantUserID(context.Context, uuid.UUID, *uuid.UUID) error {
 	return nil
 }
 func (r *fakeCallRepo) RemoveParticipant(context.Context, uuid.UUID, uuid.UUID) error { return nil }

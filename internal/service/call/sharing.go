@@ -32,14 +32,35 @@ func permissionForParticipant(role entity.CallRole, settings entity.CallSettings
 	}
 }
 
-// publishShareEvent broadcasts a custom-payload screen-share event to the
+// publishCallControlEvent broadcasts a custom-payload call-control event to the
 // workspace WS subject (mirrors publishParticipantEvent's channelID nil-guard).
-func (s *Service) publishShareEvent(ctx context.Context, evtType event.Type, call *entity.Call, actorID uuid.UUID, payload any) {
+func (s *Service) publishCallControlEvent(ctx context.Context, evtType event.Type, call *entity.Call, actorID uuid.UUID, payload any) {
 	channelID := uuid.Nil
 	if call.ChannelID != nil {
 		channelID = *call.ChannelID
 	}
 	s.doPublish(ctx, evtType, fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID), call.WorkspaceID, channelID, actorID, payload)
+}
+
+func (s *Service) publishShareEvent(ctx context.Context, evtType event.Type, call *entity.Call, actorID uuid.UUID, payload any) {
+	s.publishCallControlEvent(ctx, evtType, call, actorID, payload)
+}
+
+func callPinsParticipant(call *entity.Call, userID uuid.UUID) bool {
+	return call != nil && call.PinnedParticipantUserID != nil && *call.PinnedParticipantUserID == userID
+}
+
+func (s *Service) clearPinnedParticipantIfMatches(ctx context.Context, call *entity.Call, targetUserID, actorID uuid.UUID) error {
+	if !callPinsParticipant(call, targetUserID) {
+		return nil
+	}
+	if err := s.calls.SetPinnedParticipantUserID(ctx, call.ID, nil); err != nil {
+		return err
+	}
+	call.PinnedParticipantUserID = nil
+	s.publishCallControlEvent(ctx, event.TypeCallPinnedChanged, call, actorID,
+		event.PinnedParticipantPayload{CallID: call.ID, PinnedParticipantUserID: nil})
+	return nil
 }
 
 // GrantScreenShare lets a host/co-host grant a participant the right to share.
@@ -106,6 +127,128 @@ func (s *Service) RevokeScreenShare(ctx context.Context, workspaceID, callID, ac
 	}
 	target.CanScreenShare = false
 	s.publishParticipantEvent(ctx, event.TypeCallParticipantUpdated, call, target)
+	return nil
+}
+
+func (s *Service) requireHostMediaControlTarget(ctx context.Context, workspaceID, callID, actorID, targetUserID uuid.UUID) (*entity.Call, *entity.CallParticipant, error) {
+	call, err := s.requireCallAccess(ctx, workspaceID, callID, actorID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if call.Status == entity.CallStatusEnded {
+		return nil, nil, cerrors.Forbidden("call has already ended")
+	}
+	if err := s.requireHostOrCoHost(ctx, callID, actorID); err != nil {
+		return nil, nil, err
+	}
+	if actorID == targetUserID {
+		return nil, nil, cerrors.InvalidInput("use local media controls for yourself")
+	}
+	target, err := s.calls.GetParticipant(ctx, callID, targetUserID)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return nil, nil, cerrors.NotFound("target participant not found")
+		}
+		return nil, nil, cerrors.Internal("failed to get target participant", err)
+	}
+	if target.Status != entity.ParticipantStatusConnected {
+		return nil, nil, cerrors.Forbidden("target participant is not connected")
+	}
+	return call, target, nil
+}
+
+func liveKitRoomNameForParticipant(callID uuid.UUID, participant *entity.CallParticipant) string {
+	if participant != nil && participant.BreakoutRoomID != nil {
+		return breakoutLiveKitRoomName(callID, *participant.BreakoutRoomID)
+	}
+	return callID.String()
+}
+
+func (s *Service) muteLiveKitParticipantTracks(ctx context.Context, callID uuid.UUID, target *entity.CallParticipant, source livekitpb.TrackSource) error {
+	if s.livekitRooms == nil {
+		return nil
+	}
+	roomName := liveKitRoomNameForParticipant(callID, target)
+	lkParticipants, err := s.livekitRooms.ListParticipantsByRoom(ctx, roomName)
+	if err != nil {
+		return cerrors.Internal("failed to list livekit participants for media control", err)
+	}
+	identity := target.UserID.String()
+	for _, p := range lkParticipants {
+		if p.GetIdentity() != identity {
+			continue
+		}
+		for _, track := range p.GetTracks() {
+			if track.GetMuted() || track.GetSource() != source {
+				continue
+			}
+			if err := s.livekitRooms.MutePublishedTrack(ctx, roomName, identity, track.GetSid()); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return nil
+}
+
+func boolPayloadPtr(value bool) *bool {
+	return &value
+}
+
+// MuteParticipant lets a host/co-host force-mute a connected participant's mic.
+func (s *Service) MuteParticipant(ctx context.Context, workspaceID, callID, actorID, targetUserID uuid.UUID) error {
+	call, target, err := s.requireHostMediaControlTarget(ctx, workspaceID, callID, actorID, targetUserID)
+	if err != nil {
+		return err
+	}
+	if target.AudioMuted {
+		return nil
+	}
+	if err := s.muteLiveKitParticipantTracks(ctx, callID, target, livekitpb.TrackSource_MICROPHONE); err != nil {
+		return err
+	}
+	if err := s.calls.UpdateParticipantMedia(ctx, target.ID, true, target.VideoMuted, target.ScreenSharing); err != nil {
+		return err
+	}
+	target.AudioMuted = true
+	s.publishParticipantEvent(ctx, event.TypeCallParticipantUpdated, call, target)
+	s.publishCallControlEvent(ctx, event.TypeCallParticipantMuted, call, actorID,
+		event.CallParticipantMutedPayload{CallID: callID, UserID: targetUserID, AudioMuted: boolPayloadPtr(true)})
+	return nil
+}
+
+// DisableParticipantCamera lets a host/co-host force-disable a connected
+// participant's camera.
+func (s *Service) DisableParticipantCamera(ctx context.Context, workspaceID, callID, actorID, targetUserID uuid.UUID) error {
+	call, target, err := s.requireHostMediaControlTarget(ctx, workspaceID, callID, actorID, targetUserID)
+	if err != nil {
+		return err
+	}
+	if target.VideoMuted {
+		return nil
+	}
+	if err := s.muteLiveKitParticipantTracks(ctx, callID, target, livekitpb.TrackSource_CAMERA); err != nil {
+		return err
+	}
+	if err := s.calls.UpdateParticipantMedia(ctx, target.ID, target.AudioMuted, true, target.ScreenSharing); err != nil {
+		return err
+	}
+	target.VideoMuted = true
+	s.publishParticipantEvent(ctx, event.TypeCallParticipantUpdated, call, target)
+	s.publishCallControlEvent(ctx, event.TypeCallParticipantMuted, call, actorID,
+		event.CallParticipantMutedPayload{CallID: callID, UserID: targetUserID, VideoMuted: boolPayloadPtr(true)})
+	return nil
+}
+
+// AskParticipantToUnmute asks a connected participant to unmute without forcing
+// media state.
+func (s *Service) AskParticipantToUnmute(ctx context.Context, workspaceID, callID, actorID, targetUserID uuid.UUID) error {
+	call, _, err := s.requireHostMediaControlTarget(ctx, workspaceID, callID, actorID, targetUserID)
+	if err != nil {
+		return err
+	}
+	s.publishCallControlEvent(ctx, event.TypeCallAskUnmute, call, actorID,
+		event.CallAskUnmutePayload{CallID: callID, UserID: targetUserID, RequestedByUserID: actorID})
 	return nil
 }
 
@@ -184,5 +327,36 @@ func (s *Service) SetFeaturedShare(ctx context.Context, workspaceID, callID, act
 	}
 	s.publishShareEvent(ctx, event.TypeCallFeaturedShareUpdated, call, actorID,
 		event.FeaturedSharePayload{CallID: callID, FeaturedShareUserID: target})
+	return nil
+}
+
+// SetPinnedParticipant lets a host/co-host pin one connected participant for
+// everyone (nil clears the global pin).
+func (s *Service) SetPinnedParticipant(ctx context.Context, workspaceID, callID, actorID uuid.UUID, target *uuid.UUID) error {
+	call, err := s.requireCallAccess(ctx, workspaceID, callID, actorID)
+	if err != nil {
+		return err
+	}
+	if call.Status == entity.CallStatusEnded {
+		return cerrors.Forbidden("call has already ended")
+	}
+	if err := s.requireHostOrCoHost(ctx, callID, actorID); err != nil {
+		return err
+	}
+	if target != nil {
+		p, err := s.calls.GetParticipant(ctx, callID, *target)
+		if err != nil {
+			return cerrors.InvalidInput("pinned participant is not in this call")
+		}
+		if p.Status != entity.ParticipantStatusConnected {
+			return cerrors.InvalidInput("pinned participant is not connected")
+		}
+	}
+	if err := s.calls.SetPinnedParticipantUserID(ctx, callID, target); err != nil {
+		return err
+	}
+	call.PinnedParticipantUserID = target
+	s.publishCallControlEvent(ctx, event.TypeCallPinnedChanged, call, actorID,
+		event.PinnedParticipantPayload{CallID: callID, PinnedParticipantUserID: target})
 	return nil
 }

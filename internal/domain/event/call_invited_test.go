@@ -15,3 +15,15 @@ func TestCallInvitedIsEphemeral(t *testing.T) {
 		t.Fatal("call.invited must not be replayable (durable replay = zombie ring)")
 	}
 }
+
+func TestCallControlEventsAreEphemeral(t *testing.T) {
+	for _, typ := range []Type{TypeCallPinnedChanged, TypeCallParticipantMuted, TypeCallAskUnmute} {
+		def := DefinitionForType(typ)
+		if def.DeliverySemantic != DeliveryEphemeral {
+			t.Fatalf("%s delivery semantic = %q, want %q", typ, def.DeliverySemantic, DeliveryEphemeral)
+		}
+		if def.Replayable {
+			t.Fatalf("%s must not be replayable", typ)
+		}
+	}
+}

@@ -591,6 +591,13 @@ func (r *httpCallRepo) SetFeaturedShareUserID(_ context.Context, callID uuid.UUI
 	}
 	return cerrors.NotFound("call not found")
 }
+func (r *httpCallRepo) SetPinnedParticipantUserID(_ context.Context, callID uuid.UUID, userID *uuid.UUID) error {
+	if c := r.calls[callID]; c != nil {
+		c.PinnedParticipantUserID = userID
+		return nil
+	}
+	return cerrors.NotFound("call not found")
+}
 func (r *httpCallRepo) RemoveParticipant(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 
 type httpBreakoutRepo struct{}

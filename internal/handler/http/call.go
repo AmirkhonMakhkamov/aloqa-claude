@@ -947,6 +947,83 @@ func (h *CallHandler) RevokeScreenShare(w http.ResponseWriter, r *http.Request) 
 	writeNoContent(w)
 }
 
+// MuteParticipant lets a host/co-host force-mute a connected participant's mic.
+// POST /calls/{callID}/participants/{userID}/mute
+func (h *CallHandler) MuteParticipant(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	targetID, err := id.Parse(chi.URLParam(r, "userID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	if err := h.svc.MuteParticipant(r.Context(), workspaceID, callID, userID, targetID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
+// AskParticipantToUnmute asks a connected participant to unmute without
+// forcing media state.
+// POST /calls/{callID}/participants/{userID}/ask-unmute
+func (h *CallHandler) AskParticipantToUnmute(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	targetID, err := id.Parse(chi.URLParam(r, "userID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	if err := h.svc.AskParticipantToUnmute(r.Context(), workspaceID, callID, userID, targetID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
+// DisableParticipantCamera lets a host/co-host force-disable a connected
+// participant's camera.
+// POST /calls/{callID}/participants/{userID}/disable-camera
+func (h *CallHandler) DisableParticipantCamera(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	targetID, err := id.Parse(chi.URLParam(r, "userID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	if err := h.svc.DisableParticipantCamera(r.Context(), workspaceID, callID, userID, targetID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
 type setFeaturedShareRequest struct {
 	UserID *string `json:"user_id"`
 }
@@ -981,6 +1058,43 @@ func (h *CallHandler) SetFeaturedShare(w http.ResponseWriter, r *http.Request) {
 	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
 
 	if err := h.svc.SetFeaturedShare(r.Context(), workspaceID, callID, userID, target); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
+// SetPinnedParticipant lets a host/co-host pin one participant for everyone
+// (a null user_id clears the global pin).
+// PUT /calls/{callID}/pinned-participant
+func (h *CallHandler) SetPinnedParticipant(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	var req setFeaturedShareRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	var target *uuid.UUID
+	if req.UserID != nil {
+		parsed, perr := id.Parse(*req.UserID)
+		if perr != nil {
+			writeErr(w, perr)
+			return
+		}
+		target = &parsed
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+
+	if err := h.svc.SetPinnedParticipant(r.Context(), workspaceID, callID, userID, target); err != nil {
 		writeErr(w, err)
 		return
 	}

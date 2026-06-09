@@ -1017,6 +1017,9 @@ func (r *fakeCallRepo) SetCanScreenShare(context.Context, uuid.UUID, bool) error
 func (r *fakeCallRepo) SetFeaturedShareUserID(context.Context, uuid.UUID, *uuid.UUID) error {
 	return nil
 }
+func (r *fakeCallRepo) SetPinnedParticipantUserID(context.Context, uuid.UUID, *uuid.UUID) error {
+	return nil
+}
 
 func (r *fakeCallRepo) RemoveParticipant(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 

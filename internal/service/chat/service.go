@@ -659,7 +659,45 @@ func (s *Service) ListChannels(ctx context.Context, workspaceID, userID uuid.UUI
 	if err := s.hydrateDMMembers(ctx, ptrs...); err != nil {
 		return nil, err
 	}
+	s.stampLastActivity(ctx, channels)
 	return channels, nil
+}
+
+// lastActivityLister is implemented by the messages repository to fetch the
+// most recent message timestamp per channel. Declared here (and consumed via a
+// type assertion) so the sidebar last-activity ordering (ALK-837) adds no
+// method to the broad MessageRepository interface.
+type lastActivityLister interface {
+	LastActivityByChannels(ctx context.Context, channelIDs []uuid.UUID) (map[uuid.UUID]time.Time, error)
+}
+
+// stampLastActivity fills each channel's LastActivityAt with the created_at of
+// its most recent message so the client can order the sidebar by last activity
+// (ALK-837). Best-effort: a lookup failure leaves the timestamps unset and the
+// list still renders.
+func (s *Service) stampLastActivity(ctx context.Context, channels []entity.Channel) {
+	lister, ok := s.messages.(lastActivityLister)
+	if !ok || len(channels) == 0 {
+		return
+	}
+
+	ids := make([]uuid.UUID, len(channels))
+	for i := range channels {
+		ids[i] = channels[i].ID
+	}
+
+	activity, err := lister.LastActivityByChannels(ctx, ids)
+	if err != nil {
+		slog.WarnContext(ctx, "failed to load channel last activity", "error", err)
+		return
+	}
+
+	for i := range channels {
+		if at, found := activity[channels[i].ID]; found {
+			stamped := at
+			channels[i].LastActivityAt = &stamped
+		}
+	}
 }
 
 // ListArchivedChannels returns the archived channels the user is a member of

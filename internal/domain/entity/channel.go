@@ -40,6 +40,11 @@ type Channel struct {
 	Archived    bool        `json:"archived"`
 	CreatedAt   time.Time   `json:"created_at"`
 	UpdatedAt   time.Time   `json:"updated_at"`
+	// LastActivityAt is the created_at of the most recent non-deleted message in
+	// the channel, used by the client to order the sidebar by last activity
+	// (ALK-837). Populated only by the per-user channel list (ListByUser); other
+	// responses leave it nil and omitempty keeps their shape unchanged.
+	LastActivityAt *time.Time `json:"last_activity_at,omitempty"`
 	// Members is populated only for DM and group DM channels so the client can
 	// resolve the counterpart user(s) without an extra round-trip per row in
 	// the sidebar. Kept omitempty so non-DM channels keep their existing shape.

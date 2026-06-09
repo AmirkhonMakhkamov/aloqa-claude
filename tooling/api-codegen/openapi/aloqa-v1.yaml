@@ -24,6 +24,8 @@ servers:
 x-ws-payloads:
   call.invited:
     $ref: '#/components/schemas/CallInvitedPayload'
+  call.settings.changed:
+    $ref: '#/components/schemas/CallSettingsChangedPayload'
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -2035,6 +2037,16 @@ components:
       description: Who may open breakout rooms.
       enum: [host, everyone]
 
+    CallAccessLevel:
+      type: string
+      description: Channel-less call access policy.
+      enum: [public, private]
+
+    WhoCanAddGuestsPolicy:
+      type: string
+      description: Who may create guest links for a call.
+      enum: [host, everyone]
+
     EventCallSettings:
       type: object
       description: >-
@@ -2088,6 +2100,7 @@ components:
           entry_mode,
           members_can_unmute_mic,
           members_can_enable_camera,
+          who_can_add_guests,
         ]
       properties:
         waiting_room:
@@ -2136,6 +2149,8 @@ components:
           description: >-
             Meeting-level member permission (ALK-812): whether non host/co-host
             members may enable their camera. Defaults to true (permissive).
+        who_can_add_guests:
+          $ref: '#/components/schemas/WhoCanAddGuestsPolicy'
 
     StartCallSettings:
       type: object
@@ -2187,6 +2202,8 @@ components:
           description: >-
             Meeting-level member permission (ALK-812): whether non host/co-host
             members may enable their camera. Defaults to true (permissive).
+        who_can_add_guests:
+          $ref: '#/components/schemas/WhoCanAddGuestsPolicy'
         password:
           type: string
           maxLength: 72
@@ -2214,11 +2231,27 @@ components:
           minimum: 1
           maximum: 8
           description: Maximum simultaneous active breakout rooms.
+        access_level:
+          $ref: '#/components/schemas/CallAccessLevel'
+        screen_sharing:
+          type: boolean
+          description: Screen-sharing is permitted.
+        chat:
+          type: boolean
+          description: In-call chat is enabled.
+        members_can_unmute_mic:
+          type: boolean
+          description: Whether members may unmute their microphone.
+        members_can_enable_camera:
+          type: boolean
+          description: Whether members may enable their camera.
+        who_can_add_guests:
+          $ref: '#/components/schemas/WhoCanAddGuestsPolicy'
 
     Call:
       type: object
       description: A real-time call. Mirrors aloqa-claude entity.Call.
-      required: [id, workspace_id, type, status, created_by, settings, created_at]
+      required: [id, workspace_id, type, status, created_by, access_level, settings, created_at]
       properties:
         id:
           allOf:
@@ -2249,6 +2282,8 @@ components:
           allOf:
             - $ref: '#/components/schemas/UUID'
           description: User who created the call.
+        access_level:
+          $ref: '#/components/schemas/CallAccessLevel'
         settings:
           allOf:
             - $ref: '#/components/schemas/CallSettings'
@@ -2381,6 +2416,15 @@ components:
             - $ref: '#/components/schemas/UUID'
           nullable: true
 
+    CallSettingsChangedPayload:
+      type: object
+      description: WebSocket payload for `call.settings.changed`.
+      required: [call_id, access_level, settings]
+      properties:
+        call_id: { $ref: '#/components/schemas/UUID' }
+        access_level: { $ref: '#/components/schemas/CallAccessLevel' }
+        settings: { $ref: '#/components/schemas/CallSettings' }
+
     StartCallRequest:
       type: object
       description: Body for POST /workspaces/{workspaceID}/calls.
@@ -2398,6 +2442,12 @@ components:
         title:
           type: string
           description: Optional title for the call.
+        access_level:
+          $ref: '#/components/schemas/CallAccessLevel'
+        invited_member_ids:
+          type: array
+          items: { $ref: '#/components/schemas/UUID' }
+          description: Workspace members invited to a private channel-less call.
         settings:
           allOf:
             - $ref: '#/components/schemas/StartCallSettings'

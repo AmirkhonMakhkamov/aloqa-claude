@@ -386,6 +386,81 @@ func TestUpdateCallSettingsEntryModePasswordWithHashAccepted(t *testing.T) {
 	}
 }
 
+func TestUpdateCallSettingsAccessPublicToPrivateSnapshotsConnectedMembers(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	memberID := uuid.New()
+	callEntity := breakoutCall(callID, workspaceID, hostID)
+	callEntity.AccessLevel = entity.AccessLevelPublic
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: callEntity},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}:   connectedParticipant(callID, hostID, entity.CallRoleHost),
+			{callID, memberID}: connectedParticipant(callID, memberID, entity.CallRoleParticipant),
+		},
+	}
+	pub := &capturingPublisher{}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+	level := entity.AccessLevelPrivate
+
+	updated, err := svc.UpdateCallSettings(ctx, callID, hostID, CallSettingsPatch{AccessLevel: &level})
+	if err != nil {
+		t.Fatalf("UpdateCallSettings returned error: %v", err)
+	}
+	if updated.AccessLevel != entity.AccessLevelPrivate || calls.calls[callID].AccessLevel != entity.AccessLevelPrivate {
+		t.Fatalf("access_level not persisted: updated=%q stored=%q", updated.AccessLevel, calls.calls[callID].AccessLevel)
+	}
+	if !calls.invited[callID][hostID] || !calls.invited[callID][memberID] {
+		t.Fatalf("connected members were not snapshotted into invite list: %+v", calls.invited[callID])
+	}
+	if len(pub.captures) != 2 {
+		t.Fatalf("published settings events = %d, want 2 user-scoped events", len(pub.captures))
+	}
+	for _, capture := range pub.captures {
+		if capture.subject == workspaceSubject(workspaceID) {
+			t.Fatalf("settings event leaked to workspace subject")
+		}
+		if capture.subject != workspaceUserEventsSubject(workspaceID, hostID) &&
+			capture.subject != workspaceUserEventsSubject(workspaceID, memberID) {
+			t.Fatalf("settings event subject = %q, want host/member user event subject", capture.subject)
+		}
+	}
+	var env struct {
+		Payload event.CallSettingsChangedPayload `json:"payload"`
+	}
+	if err := json.Unmarshal(pub.body, &env); err != nil {
+		t.Fatalf("unmarshal settings event: %v", err)
+	}
+	if env.Payload.AccessLevel != entity.AccessLevelPrivate {
+		t.Fatalf("event access_level = %q, want private", env.Payload.AccessLevel)
+	}
+}
+
+func TestUpdateCallSettingsRejectsPrivateAccessForChannelAttachedCall(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	channelID := uuid.New()
+	hostID := uuid.New()
+	callEntity := breakoutCall(callID, workspaceID, hostID)
+	callEntity.ChannelID = &channelID
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{callID: callEntity},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: connectedParticipant(callID, hostID, entity.CallRoleHost),
+		},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+	level := entity.AccessLevelPrivate
+
+	_, err := svc.UpdateCallSettings(ctx, callID, hostID, CallSettingsPatch{AccessLevel: &level})
+	if !hasCode(err, cerrors.CodeInvalidInput) {
+		t.Fatalf("UpdateCallSettings private channel-attached error = %v, want INVALID_INPUT", err)
+	}
+}
+
 func TestUpdateCallSettingsInvalidEntryModeRejected(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()

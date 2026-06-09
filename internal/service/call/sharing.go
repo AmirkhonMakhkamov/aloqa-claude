@@ -2,7 +2,6 @@ package call
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/google/uuid"
 	livekitpb "github.com/livekit/protocol/livekit"
@@ -32,14 +31,14 @@ func permissionForParticipant(role entity.CallRole, settings entity.CallSettings
 	}
 }
 
-// publishShareEvent broadcasts a custom-payload screen-share event to the
-// workspace WS subject (mirrors publishParticipantEvent's channelID nil-guard).
+// publishShareEvent broadcasts a custom-payload screen-share event through the
+// call-scoped fanout, preserving private channel-less call visibility.
 func (s *Service) publishShareEvent(ctx context.Context, evtType event.Type, call *entity.Call, actorID uuid.UUID, payload any) {
 	channelID := uuid.Nil
 	if call.ChannelID != nil {
 		channelID = *call.ChannelID
 	}
-	s.doPublish(ctx, evtType, fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID), call.WorkspaceID, channelID, actorID, payload)
+	s.publishCallScoped(ctx, evtType, call, channelID, actorID, payload)
 }
 
 // GrantScreenShare lets a host/co-host grant a participant the right to share.

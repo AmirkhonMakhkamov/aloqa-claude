@@ -1,4 +1,4 @@
--- 057: invited-members list for private calls (ALK-814 / S6).
+-- 059: invited-members list for private calls (ALK-814 / S6).
 --
 -- A private channel-less call is host-curated: only the creator, host/co-host,
 -- currently-connected participants, guests holding a grant for this call, and

@@ -702,14 +702,14 @@ func (s *Service) wrapCallError(ctx context.Context, err error, callID uuid.UUID
 	return cerrors.Internal("failed to get call", err)
 }
 
-// publishBreakoutEvent publishes a breakout room event to the workspace's WS subject.
+// publishBreakoutEvent publishes a breakout room event through the call-scoped
+// fanout, preserving private channel-less call visibility.
 func (s *Service) publishBreakoutEvent(ctx context.Context, evtType event.Type, call *entity.Call, payload any) {
 	channelID := uuid.Nil
 	if call.ChannelID != nil {
 		channelID = *call.ChannelID
 	}
-	subject := fmt.Sprintf("aloqa.ws.%s", call.WorkspaceID)
-	s.doPublish(ctx, evtType, subject, call.WorkspaceID, channelID, call.CreatedBy, payload)
+	s.publishCallScoped(ctx, evtType, call, channelID, call.CreatedBy, payload)
 }
 
 // breakoutRoomNameSeparator delimits the call and breakout-room UUIDs in a

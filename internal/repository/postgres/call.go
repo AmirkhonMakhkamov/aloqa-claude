@@ -224,6 +224,7 @@ func (r *CallRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Call, err
 	call.Settings.EntryMode = call.Settings.ResolvedEntryMode()
 	call.Settings.BreakoutCreation = call.Settings.ResolvedBreakoutCreation()
 	call.Settings.MaxBreakoutRooms = call.Settings.ResolvedMaxBreakoutRooms()
+	call.Settings.WhoCanAddGuests = call.Settings.ResolvedWhoCanAddGuests()
 
 	return call, nil
 }
@@ -272,6 +273,7 @@ func (r *CallRepo) ListActiveByWorkspace(ctx context.Context, workspaceID uuid.U
 		call.Settings.EntryMode = call.Settings.ResolvedEntryMode()
 		call.Settings.BreakoutCreation = call.Settings.ResolvedBreakoutCreation()
 		call.Settings.MaxBreakoutRooms = call.Settings.ResolvedMaxBreakoutRooms()
+		call.Settings.WhoCanAddGuests = call.Settings.ResolvedWhoCanAddGuests()
 
 		calls = append(calls, call)
 	}
@@ -338,6 +340,7 @@ func (r *CallRepo) ListStaleOpen(ctx context.Context, before time.Time, limit in
 		call.Settings.EntryMode = call.Settings.ResolvedEntryMode()
 		call.Settings.BreakoutCreation = call.Settings.ResolvedBreakoutCreation()
 		call.Settings.MaxBreakoutRooms = call.Settings.ResolvedMaxBreakoutRooms()
+		call.Settings.WhoCanAddGuests = call.Settings.ResolvedWhoCanAddGuests()
 
 		calls = append(calls, call)
 	}
@@ -444,6 +447,7 @@ func (r *CallRepo) ListActiveSummariesByWorkspace(
 			c.id, c.type, c.title, c.started_at, c.created_by,
 			c.channel_id, ch.name AS channel_name,
 			COALESCE(u.display_name, '') AS host_display_name,
+			COALESCE(c.access_level, 'public') AS access_level,
 			COALESCE((c.settings->>'recording')::bool, false) AS recording,
 			COALESCE(NOT (c.settings->>'waiting_room')::bool, true) AS is_open,
 			COALESCE(pc.participant_count, 0) AS participant_count,
@@ -481,6 +485,7 @@ func (r *CallRepo) ListActiveSummariesByWorkspace(
 			&s.ChannelID,
 			&s.ChannelName,
 			&s.HostDisplayName,
+			&s.AccessLevel,
 			&s.Recording,
 			&s.IsOpen,
 			&s.ParticipantCount,
@@ -565,7 +570,7 @@ func (r *CallRepo) ListRecentByWorkspace(ctx context.Context, workspaceID uuid.U
 	}
 
 	query := `
-		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, created_at
+		SELECT id, workspace_id, channel_id, type, status, title, created_by, scheduled_call_id, settings, started_at, ended_at, COALESCE(end_reason, ''), featured_share_user_id, created_at, COALESCE(access_level, 'public')
 		FROM calls
 		WHERE workspace_id = $1`
 	args := []any{workspaceID}
@@ -604,6 +609,7 @@ func (r *CallRepo) ListRecentByWorkspace(ctx context.Context, workspaceID uuid.U
 			&call.EndReason,
 			&call.FeaturedShareUserID,
 			&call.CreatedAt,
+			&call.AccessLevel,
 		); err != nil {
 			return nil, fmt.Errorf("postgres: list recent calls scan: %w", err)
 		}
@@ -613,6 +619,7 @@ func (r *CallRepo) ListRecentByWorkspace(ctx context.Context, workspaceID uuid.U
 		call.Settings.EntryMode = call.Settings.ResolvedEntryMode()
 		call.Settings.BreakoutCreation = call.Settings.ResolvedBreakoutCreation()
 		call.Settings.MaxBreakoutRooms = call.Settings.ResolvedMaxBreakoutRooms()
+		call.Settings.WhoCanAddGuests = call.Settings.ResolvedWhoCanAddGuests()
 		calls = append(calls, call)
 	}
 	if err := rows.Err(); err != nil {

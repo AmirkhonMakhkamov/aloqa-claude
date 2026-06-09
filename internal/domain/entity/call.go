@@ -133,7 +133,7 @@ func (a AccessLevel) Valid() bool {
 }
 
 // Resolved returns the concrete access level, defaulting an empty/invalid value
-// to public so a legacy call (pre-migration 056) stays open.
+// to public so a legacy call (pre-migration 058) stays open.
 func (a AccessLevel) Resolved() AccessLevel {
 	if a.Valid() {
 		return a
@@ -289,6 +289,7 @@ type ActiveCallSummary struct {
 	ChannelName      *string          `json:"channel_name"`
 	HostUserID       uuid.UUID        `json:"host_user_id"`
 	HostDisplayName  string           `json:"host_display_name"`
+	AccessLevel      AccessLevel      `json:"access_level"`
 	Recording        bool             `json:"recording"`
 	IsOpen           bool             `json:"is_open"`
 	ParticipantCount int              `json:"participant_count"`
@@ -314,16 +315,16 @@ type ActiveCallObservation struct {
 }
 
 type Call struct {
-	ID              uuid.UUID    `json:"id"`
-	WorkspaceID     uuid.UUID    `json:"workspace_id"`
-	ChannelID       *uuid.UUID   `json:"channel_id,omitempty"`
-	Type            CallType     `json:"type"`
-	Status          CallStatus   `json:"status"`
-	Title           string       `json:"title,omitempty"`
-	CreatedBy       uuid.UUID    `json:"created_by"`
-	ScheduledCallID *uuid.UUID   `json:"scheduled_call_id,omitempty"`
+	ID              uuid.UUID  `json:"id"`
+	WorkspaceID     uuid.UUID  `json:"workspace_id"`
+	ChannelID       *uuid.UUID `json:"channel_id,omitempty"`
+	Type            CallType   `json:"type"`
+	Status          CallStatus `json:"status"`
+	Title           string     `json:"title,omitempty"`
+	CreatedBy       uuid.UUID  `json:"created_by"`
+	ScheduledCallID *uuid.UUID `json:"scheduled_call_id,omitempty"`
 	// AccessLevel (ALK-814 / S6) is stored in a dedicated calls column (migration
-	// 056), default 'public'. Inert for channel-attached and one_to_one calls.
+	// 058), default 'public'. Inert for channel-attached and one_to_one calls.
 	AccessLevel AccessLevel  `json:"access_level"`
 	Settings    CallSettings `json:"settings"`
 	// JoinPasswordHash is the bcrypt hash of the password-mode join password. It

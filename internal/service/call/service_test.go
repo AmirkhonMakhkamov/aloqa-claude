@@ -3,6 +3,7 @@ package call
 import (
 	"context"
 	"errors"
+	"sort"
 	"testing"
 	"time"
 
@@ -90,6 +91,303 @@ func TestViewerCannotPublishMedia(t *testing.T) {
 func boolPtr(b bool) *bool { return &b }
 
 func intPtr(i int) *int { return &i }
+
+func TestStartCallWithAccessCreatesPrivateCallWithInvitedMembers(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	hostID := uuid.New()
+	inviteeID := uuid.New()
+	calls := &fakeCallRepo{}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, hostID}:    {WorkspaceID: workspaceID, UserID: hostID, Role: entity.WorkspaceRoleMember},
+		{workspaceID, inviteeID}: {WorkspaceID: workspaceID, UserID: inviteeID, Role: entity.WorkspaceRoleMember},
+	}}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	callEntity, err := svc.StartCallWithAccess(ctx, workspaceID, hostID, entity.CallTypeMeeting, "Private", nil, entity.CallSettings{}, "", StartCallAccessOptions{
+		AccessLevel:      entity.AccessLevelPrivate,
+		InvitedMemberIDs: []uuid.UUID{inviteeID, inviteeID},
+	})
+	if err != nil {
+		t.Fatalf("StartCallWithAccess returned error: %v", err)
+	}
+	if callEntity.AccessLevel != entity.AccessLevelPrivate {
+		t.Fatalf("access_level = %q, want private", callEntity.AccessLevel)
+	}
+	if !calls.invited[callEntity.ID][inviteeID] {
+		t.Fatalf("invitee was not inserted into private-call invite list")
+	}
+}
+
+func TestStartCallWithAccessRejectsInvalidPrivateShapes(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	hostID := uuid.New()
+	channelID := uuid.New()
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, hostID}: {WorkspaceID: workspaceID, UserID: hostID, Role: entity.WorkspaceRoleMember},
+	}}
+	svc := NewService(&fakeCallRepo{}, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	if _, err := svc.StartCallWithAccess(ctx, workspaceID, hostID, entity.CallTypeMeeting, "", &channelID, entity.CallSettings{}, "", StartCallAccessOptions{AccessLevel: entity.AccessLevelPrivate}); !hasCode(err, cerrors.CodeInvalidInput) {
+		t.Fatalf("private channel-attached StartCall error = %v, want INVALID_INPUT", err)
+	}
+	if _, err := svc.StartCallWithAccess(ctx, workspaceID, hostID, entity.CallTypeOneToOne, "", nil, entity.CallSettings{}, "", StartCallAccessOptions{AccessLevel: entity.AccessLevelPrivate}); !hasCode(err, cerrors.CodeInvalidInput) {
+		t.Fatalf("private one_to_one StartCall error = %v, want INVALID_INPUT", err)
+	}
+}
+
+func TestPrivateChannelLessJoinRequiresInvite(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	inviteeID := uuid.New()
+	strangerID := uuid.New()
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, hostID}:     {WorkspaceID: workspaceID, UserID: hostID, Role: entity.WorkspaceRoleMember},
+		{workspaceID, inviteeID}:  {WorkspaceID: workspaceID, UserID: inviteeID, Role: entity.WorkspaceRoleMember},
+		{workspaceID, strangerID}: {WorkspaceID: workspaceID, UserID: strangerID, Role: entity.WorkspaceRoleMember},
+	}}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive, CreatedBy: hostID, AccessLevel: entity.AccessLevelPrivate},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}: {ID: uuid.New(), CallID: callID, UserID: hostID, Role: entity.CallRoleHost, Status: entity.ParticipantStatusConnected},
+		},
+		invited: map[uuid.UUID]map[uuid.UUID]bool{callID: {inviteeID: true}},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	if _, err := svc.JoinCall(ctx, workspaceID, callID, strangerID, ""); !hasCode(err, cerrors.CodeForbidden) {
+		t.Fatalf("uninvited JoinCall error = %v, want FORBIDDEN", err)
+	}
+	participant, err := svc.JoinCall(ctx, workspaceID, callID, inviteeID, "")
+	if err != nil {
+		t.Fatalf("invited JoinCall returned error: %v", err)
+	}
+	if participant.UserID != inviteeID || participant.Status != entity.ParticipantStatusConnected {
+		t.Fatalf("participant = %+v, want invited connected participant", participant)
+	}
+}
+
+func TestPrivateChannelLessRejectsGuestGrantForOtherCall(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	otherCallID := uuid.New()
+	hostID := uuid.New()
+	guestID := uuid.New()
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive, CreatedBy: hostID, AccessLevel: entity.AccessLevelPrivate},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{},
+	}
+	guests := guestaccess.NewChecker(&fakeGuestAccessRepo{grants: []entity.GuestAccessGrant{{
+		WorkspaceID: workspaceID,
+		UserID:      guestID,
+		CallID:      &otherCallID,
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}}})
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, noopPublisher{}, nil, mediaTestConfig(), guests, nil)
+
+	if _, err := svc.JoinCall(ctx, workspaceID, callID, guestID, ""); !hasCode(err, cerrors.CodeForbidden) {
+		t.Fatalf("guest grant for another call JoinCall error = %v, want FORBIDDEN", err)
+	}
+}
+
+func TestListActiveCallsHidesUnauthorizedPrivateChannelLessCalls(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	publicCallID := uuid.New()
+	privateCallID := uuid.New()
+	userID := uuid.New()
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			publicCallID:  {ID: publicCallID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive, AccessLevel: entity.AccessLevelPublic},
+			privateCallID: {ID: privateCallID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: entity.CallStatusActive, AccessLevel: entity.AccessLevelPrivate},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	active, err := svc.ListActiveCalls(ctx, workspaceID, userID)
+	if err != nil {
+		t.Fatalf("ListActiveCalls returned error: %v", err)
+	}
+	if len(active) != 1 || active[0].ID != publicCallID {
+		t.Fatalf("active calls = %+v, want only public call", active)
+	}
+
+	calls.invited = map[uuid.UUID]map[uuid.UUID]bool{privateCallID: {userID: true}}
+	active, err = svc.ListActiveCalls(ctx, workspaceID, userID)
+	if err != nil {
+		t.Fatalf("ListActiveCalls invited returned error: %v", err)
+	}
+	if len(active) != 2 {
+		t.Fatalf("active calls count = %d, want 2 after invite", len(active))
+	}
+}
+
+func TestListRecentCallsHidesUnauthorizedPrivateChannelLessCalls(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	publicCallID := uuid.New()
+	privateCallID := uuid.New()
+	userID := uuid.New()
+	now := time.Now().UTC()
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			publicCallID: {
+				ID:          publicCallID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeMeeting,
+				Status:      entity.CallStatusEnded,
+				AccessLevel: entity.AccessLevelPublic,
+				CreatedAt:   now.Add(-time.Minute),
+			},
+			privateCallID: {
+				ID:          privateCallID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeMeeting,
+				Status:      entity.CallStatusEnded,
+				AccessLevel: entity.AccessLevelPrivate,
+				CreatedAt:   now,
+			},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	recent, err := svc.ListRecentCalls(ctx, workspaceID, userID, 20, "")
+	if err != nil {
+		t.Fatalf("ListRecentCalls returned error: %v", err)
+	}
+	if len(recent.Calls) != 1 || recent.Calls[0].ID != publicCallID {
+		t.Fatalf("recent calls = %+v, want only public call", recent.Calls)
+	}
+
+	calls.invited = map[uuid.UUID]map[uuid.UUID]bool{privateCallID: {userID: true}}
+	recent, err = svc.ListRecentCalls(ctx, workspaceID, userID, 20, "")
+	if err != nil {
+		t.Fatalf("ListRecentCalls invited returned error: %v", err)
+	}
+	if len(recent.Calls) != 2 {
+		t.Fatalf("recent calls count = %d, want 2 after invite", len(recent.Calls))
+	}
+}
+
+func TestPrivateCallEventPublishesOnlyUserScopedSubjects(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	callID := uuid.New()
+	hostID := uuid.New()
+	memberID := uuid.New()
+	inviteeID := uuid.New()
+	pub := &capturingPublisher{}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			callID: {
+				ID:          callID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeMeeting,
+				Status:      entity.CallStatusActive,
+				CreatedBy:   hostID,
+				AccessLevel: entity.AccessLevelPrivate,
+			},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{callID, hostID}:   connectedParticipant(callID, hostID, entity.CallRoleHost),
+			{callID, memberID}: connectedParticipant(callID, memberID, entity.CallRoleParticipant),
+		},
+		invited: map[uuid.UUID]map[uuid.UUID]bool{callID: {inviteeID: true}},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, pub, nil, mediaTestConfig(), nil, nil)
+
+	svc.publishCallEvent(ctx, event.TypeCallStarted, calls.calls[callID], hostID)
+
+	subjects := make([]string, 0, len(pub.captures))
+	for _, capture := range pub.captures {
+		if capture.subject == workspaceSubject(workspaceID) {
+			t.Fatalf("private call event leaked to workspace subject")
+		}
+		subjects = append(subjects, capture.subject)
+	}
+	sort.Strings(subjects)
+	want := []string{
+		workspaceUserEventsSubject(workspaceID, hostID),
+		workspaceUserEventsSubject(workspaceID, inviteeID),
+		workspaceUserEventsSubject(workspaceID, memberID),
+	}
+	sort.Strings(want)
+	if len(subjects) != len(want) {
+		t.Fatalf("subjects = %+v, want %+v", subjects, want)
+	}
+	for i := range want {
+		if subjects[i] != want[i] {
+			t.Fatalf("subjects = %+v, want %+v", subjects, want)
+		}
+	}
+}
+
+func TestAuthorizeGuestLinkHonorsWhoCanAddGuestsPolicy(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	publicCallID := uuid.New()
+	privateCallID := uuid.New()
+	memberID := uuid.New()
+	hostID := uuid.New()
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, memberID}: {WorkspaceID: workspaceID, UserID: memberID, Role: entity.WorkspaceRoleMember},
+		{workspaceID, hostID}:   {WorkspaceID: workspaceID, UserID: hostID, Role: entity.WorkspaceRoleMember},
+	}}
+	calls := &fakeCallRepo{
+		calls: map[uuid.UUID]*entity.Call{
+			publicCallID: {
+				ID:          publicCallID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeMeeting,
+				Status:      entity.CallStatusActive,
+				CreatedBy:   hostID,
+				AccessLevel: entity.AccessLevelPublic,
+				Settings:    entity.CallSettings{WhoCanAddGuests: entity.WhoCanAddGuestsEveryone},
+			},
+			privateCallID: {
+				ID:          privateCallID,
+				WorkspaceID: workspaceID,
+				Type:        entity.CallTypeMeeting,
+				Status:      entity.CallStatusActive,
+				CreatedBy:   hostID,
+				AccessLevel: entity.AccessLevelPrivate,
+				Settings:    entity.CallSettings{WhoCanAddGuests: entity.WhoCanAddGuestsEveryone},
+			},
+		},
+		participants: map[[2]uuid.UUID]*entity.CallParticipant{
+			{publicCallID, memberID}:  {ID: uuid.New(), CallID: publicCallID, UserID: memberID, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected},
+			{privateCallID, memberID}: {ID: uuid.New(), CallID: privateCallID, UserID: memberID, Role: entity.CallRoleParticipant, Status: entity.ParticipantStatusConnected},
+			{privateCallID, hostID}:   {ID: uuid.New(), CallID: privateCallID, UserID: hostID, Role: entity.CallRoleHost, Status: entity.ParticipantStatusConnected},
+		},
+	}
+	svc := NewService(calls, &fakeBreakoutRepo{}, &fakeChannelRepo{}, workspaces, noopPublisher{}, nil, mediaTestConfig(), nil, nil)
+
+	if _, err := svc.AuthorizeGuestLink(ctx, workspaceID, publicCallID, memberID); err != nil {
+		t.Fatalf("public/everyone member AuthorizeGuestLink returned error: %v", err)
+	}
+	if _, err := svc.AuthorizeGuestLink(ctx, workspaceID, privateCallID, memberID); !hasCode(err, cerrors.CodeForbidden) {
+		t.Fatalf("private/everyone member AuthorizeGuestLink error = %v, want FORBIDDEN", err)
+	}
+	if _, err := svc.AuthorizeGuestLink(ctx, workspaceID, privateCallID, hostID); err != nil {
+		t.Fatalf("private host AuthorizeGuestLink returned error: %v", err)
+	}
+}
 
 func TestForwardSignalRequiresBothParticipants(t *testing.T) {
 	ctx := context.Background()
@@ -2673,6 +2971,25 @@ func (r *fakeCallRepo) ListActiveByWorkspace(_ context.Context, workspaceID uuid
 		if call.Status != entity.CallStatusEnded && call.WorkspaceID == workspaceID {
 			calls = append(calls, *call)
 		}
+	}
+	return calls, nil
+}
+func (r *fakeCallRepo) ListRecentByWorkspace(_ context.Context, workspaceID uuid.UUID, limit int, before *time.Time) ([]entity.Call, error) {
+	var calls []entity.Call
+	for _, call := range r.calls {
+		if call.WorkspaceID != workspaceID {
+			continue
+		}
+		if before != nil && !call.CreatedAt.Before(*before) {
+			continue
+		}
+		calls = append(calls, *call)
+	}
+	sort.Slice(calls, func(i, j int) bool {
+		return calls[i].CreatedAt.After(calls[j].CreatedAt)
+	})
+	if limit > 0 && len(calls) > limit {
+		return calls[:limit], nil
 	}
 	return calls, nil
 }

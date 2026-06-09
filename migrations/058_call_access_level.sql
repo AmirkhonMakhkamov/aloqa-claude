@@ -1,4 +1,4 @@
--- 056: meeting access level for channel-less calls (ALK-814 / S6).
+-- 058: meeting access level for channel-less calls (ALK-814 / S6).
 --
 -- access_level ('public' | 'private') lives in a dedicated calls column (not the
 -- settings JSONB) so it can be filtered query-side and is explicit. Existing

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -1043,6 +1044,62 @@ func (s *Service) ListChannelMembers(ctx context.Context, channelID, userID uuid
 	}
 
 	return members, nil
+}
+
+const (
+	defaultMentionLimit = 8
+	maxMentionLimit     = 50
+)
+
+// mentionableMemberSearcher is implemented by the channels repository to search
+// channel members for @mention autocomplete. Consumed via a type assertion so
+// the broad ChannelRepository interface (and its many mocks) stays untouched
+// (ALK-838).
+type mentionableMemberSearcher interface {
+	SearchMentionableMembers(
+		ctx context.Context,
+		channelID uuid.UUID,
+		query string,
+		limit int,
+	) ([]entity.MentionSuggestion, error)
+}
+
+// SearchChannelMentions returns channel members matching the query for @mention
+// autocomplete (ALK-838). Direct messages have no mention popup, so it returns
+// an empty list for dm/group_dm channels. Requires view access to the channel.
+func (s *Service) SearchChannelMentions(
+	ctx context.Context,
+	channelID, userID uuid.UUID,
+	query string,
+	limit int,
+) ([]entity.MentionSuggestion, error) {
+	decision, err := s.authorizeChannel(ctx, channelID, userID, accesspolicy.CapabilityView)
+	if err != nil {
+		return nil, err
+	}
+
+	if decision.Channel.Type == entity.ChannelTypeDM || decision.Channel.Type == entity.ChannelTypeGroupDM {
+		return []entity.MentionSuggestion{}, nil
+	}
+
+	if limit <= 0 {
+		limit = defaultMentionLimit
+	} else if limit > maxMentionLimit {
+		limit = maxMentionLimit
+	}
+
+	searcher, ok := s.channels.(mentionableMemberSearcher)
+	if !ok {
+		return []entity.MentionSuggestion{}, nil
+	}
+
+	results, err := searcher.SearchMentionableMembers(ctx, channelID, strings.TrimSpace(query), limit)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to search channel mentions", "channel_id", channelID, "error", err)
+		return nil, cerrors.Internal("failed to search channel mentions", err)
+	}
+
+	return results, nil
 }
 
 // AddChannelMembers adds workspace members to a channel when the actor can manage membership.

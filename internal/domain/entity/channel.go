@@ -51,6 +51,17 @@ type Channel struct {
 	Members []uuid.UUID `json:"members,omitempty"`
 }
 
+// MentionSuggestion is a channel member surfaced as an @mention autocomplete
+// candidate (ALK-838). Username is the local part of the member's email — the
+// handle the composer inserts as `@username`.
+type MentionSuggestion struct {
+	ID          uuid.UUID `json:"id"`
+	Username    string    `json:"username"`
+	DisplayName string    `json:"display_name"`
+	AvatarURL   string    `json:"avatar_url,omitempty"`
+	Position    *string   `json:"position"`
+}
+
 // ArchivedChannelInfo carries the per-row data the Archived Channels list
 // view needs (ALK-617): the underlying channel plus the timestamps and
 // member count required to render a meaningful row without per-row

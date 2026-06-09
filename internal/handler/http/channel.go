@@ -2,6 +2,7 @@ package http
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -132,6 +133,31 @@ func (h *ChannelHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeOK(w, members)
+}
+
+func (h *ChannelHandler) ListMentions(w http.ResponseWriter, r *http.Request) {
+	channelID, err := id.Parse(chi.URLParam(r, "channelID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	query := r.URL.Query().Get("query")
+	limit := 0
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if parsed, convErr := strconv.Atoi(raw); convErr == nil {
+			limit = parsed
+		}
+	}
+
+	suggestions, err := h.svc.SearchChannelMentions(r.Context(), channelID, userID, query, limit)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, suggestions)
 }
 
 func (h *ChannelHandler) AddMembers(w http.ResponseWriter, r *http.Request) {

@@ -14,6 +14,31 @@ import (
 	"aloqa/internal/security/guestaccess"
 )
 
+func TestIndexChannelSkipsBlankNames(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	indexer := &capturingIndexer{}
+	svc := NewService(indexer, nil, nil, nil, nil)
+
+	if err := svc.IndexChannel(ctx, workspaceID, channelID, "   ", "topic", time.Now(), time.Now()); err != nil {
+		t.Fatalf("IndexChannel blank name returned error: %v", err)
+	}
+	if indexer.upsertCount != 0 {
+		t.Fatalf("upsert count = %d, want 0 for blank channel name", indexer.upsertCount)
+	}
+
+	if err := svc.IndexChannel(ctx, workspaceID, channelID, " general ", " topic ", time.Now(), time.Now()); err != nil {
+		t.Fatalf("IndexChannel named channel returned error: %v", err)
+	}
+	if indexer.upsertCount != 1 {
+		t.Fatalf("upsert count = %d, want 1", indexer.upsertCount)
+	}
+	if indexer.doc.Title != "general" || indexer.doc.Content != "general topic" {
+		t.Fatalf("indexed doc title/content = %q/%q, want trimmed values", indexer.doc.Title, indexer.doc.Content)
+	}
+}
+
 func TestSearchRequiresUserWorkspaceAndChannelAccess(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -191,6 +216,21 @@ func (s *capturingSearcher) Search(_ context.Context, params Params) (*SearchRes
 		return s.results, nil
 	}
 	return &SearchResults{}, nil
+}
+
+type capturingIndexer struct {
+	upsertCount int
+	doc         Document
+}
+
+func (i *capturingIndexer) EnqueueUpsert(_ context.Context, doc Document) error {
+	i.upsertCount++
+	i.doc = doc
+	return nil
+}
+
+func (i *capturingIndexer) EnqueueDelete(context.Context, uuid.UUID, ResourceType, uuid.UUID) error {
+	return nil
 }
 
 type fakeWorkspaceRepo struct {

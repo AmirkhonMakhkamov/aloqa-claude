@@ -45,9 +45,10 @@ type Channel struct {
 	// (ALK-837). Populated only by the per-user channel list (ListByUser); other
 	// responses leave it nil and omitempty keeps their shape unchanged.
 	LastActivityAt *time.Time `json:"last_activity_at,omitempty"`
-	// Members is populated only for DM and group DM channels so the client can
-	// resolve the counterpart user(s) without an extra round-trip per row in
-	// the sidebar. Kept omitempty so non-DM channels keep their existing shape.
+	// Members is populated for DM/group DM list rows and selected realtime
+	// channel payloads so clients can decide whether the current user is part
+	// of a channel without an extra round-trip. Kept omitempty so ordinary
+	// non-DM channel responses keep their existing shape.
 	Members []uuid.UUID `json:"members,omitempty"`
 }
 

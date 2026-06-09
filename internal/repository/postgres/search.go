@@ -354,6 +354,8 @@ func (r *SearchRepo) Search(ctx context.Context, params search.Params) (*search.
 							si.resource_type = 'channel'
 							AND ch.id IS NOT NULL
 							AND NOT ch.archived
+							AND ch.type IN ('public', 'private')
+							AND NULLIF(BTRIM(ch.name), '') IS NOT NULL
 							AND ch.id = ANY($7::uuid[])
 						)
 						OR (
@@ -946,9 +948,12 @@ func (r *SearchRepo) retryDelay(attempt int) time.Duration {
 
 func (r *SearchRepo) reindexChannels(ctx context.Context, workspaceID uuid.UUID) error {
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, name, topic, created_at, updated_at
+		SELECT id, name, COALESCE(topic, ''), created_at, updated_at
 		FROM channels
-		WHERE workspace_id = $1 AND archived = false`,
+		WHERE workspace_id = $1
+			AND archived = false
+			AND type IN ('public', 'private')
+			AND NULLIF(BTRIM(name), '') IS NOT NULL`,
 		workspaceID,
 	)
 	if err != nil {

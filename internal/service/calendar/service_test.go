@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -71,7 +72,8 @@ func TestStartCallFromEventRollsBackWhenLinkFails(t *testing.T) {
 		Title:       "Planning",
 	})
 	txManager.linkErr = errors.New("link failed")
-	svc := NewService(txManager.calendars.fakeCalendarRepo, fakeMembers{members: map[[2]uuid.UUID]bool{{workspaceID, organizerID}: true}}, nil, noopPublisher{})
+	calls := &fakeCallService{calls: map[uuid.UUID]*entity.Call{}}
+	svc := NewService(txManager.calendars.fakeCalendarRepo, fakeMembers{members: map[[2]uuid.UUID]bool{{workspaceID, organizerID}: true}}, calls, noopPublisher{})
 	svc.SetTransactionManager(txManager)
 
 	if _, err := svc.StartCallFromEvent(ctx, workspaceID, eventID, organizerID); err == nil {
@@ -168,7 +170,8 @@ func TestStartCallFromEventConcurrentRequestsReturnOneActiveCall(t *testing.T) {
 		OrganizerID: organizerID,
 		Title:       "Planning",
 	})
-	svc := NewService(txManager.calendars.fakeCalendarRepo, fakeMembers{members: map[[2]uuid.UUID]bool{{workspaceID, organizerID}: true}}, nil, noopPublisher{})
+	calls := &fakeCallService{calls: map[uuid.UUID]*entity.Call{}}
+	svc := NewService(txManager.calendars.fakeCalendarRepo, fakeMembers{members: map[[2]uuid.UUID]bool{{workspaceID, organizerID}: true}}, calls, noopPublisher{})
 	svc.SetTransactionManager(txManager)
 
 	const workers = 8
@@ -205,6 +208,582 @@ func TestStartCallFromEventConcurrentRequestsReturnOneActiveCall(t *testing.T) {
 	if call == nil || call.ScheduledCallID == nil || *call.ScheduledCallID != eventID {
 		t.Fatalf("scheduled_call_id was not linked to event")
 	}
+}
+
+// --- ALK-819 / S11: per-event call-settings preconfig ----------------------
+
+func TestMeetingDefaultCallSettingsTuple(t *testing.T) {
+	got := meetingDefaultCallSettings()
+	want := entity.CallSettings{
+		WaitingRoom:      false,
+		MuteOnJoin:       false,
+		Recording:        false,
+		ScreenSharing:    true,
+		Chat:             true,
+		BreakoutRooms:    true,
+		BreakoutCreation: entity.BreakoutCreationHost,
+		MaxBreakoutRooms: 8,
+		MaxParticipants:  500,
+		E2EE:             false,
+		Watermark:        false,
+		EntryMode:        entity.EntryModeOpen,
+	}
+	if got != want {
+		t.Fatalf("meetingDefaultCallSettings() = %+v, want %+v", got, want)
+	}
+}
+
+func eventSettings(mutate func(*entity.EventCallSettings)) *entity.EventCallSettings {
+	s := &entity.EventCallSettings{}
+	mutate(s)
+	return s
+}
+
+func boolPtr(v bool) *bool { return &v }
+func intPtr(v int) *int    { return &v }
+
+// baseWithEventOverlay overlays the event preconfig onto the canonical meeting
+// defaults WITHOUT finalising (entry_mode/waiting_room/breakout resolution and
+// the server invariants are applied later by FinalizeNewCallSettings on both
+// start-call paths). These cases assert the overlay step only.
+func TestBaseWithEventOverlay(t *testing.T) {
+	manualAdmit := entity.EntryModeManualAdmit
+	everyone := entity.BreakoutCreationEveryone
+
+	tests := []struct {
+		name string
+		in   *entity.EventCallSettings
+		want entity.CallSettings
+	}{
+		{
+			name: "nil preconfig yields canonical defaults",
+			in:   nil,
+			want: meetingDefaultCallSettings(),
+		},
+		{
+			name: "entry_mode overlaid (waiting_room still derived later by the finalizer)",
+			in:   eventSettings(func(s *entity.EventCallSettings) { s.EntryMode = &manualAdmit }),
+			want: func() entity.CallSettings {
+				w := meetingDefaultCallSettings()
+				w.EntryMode = entity.EntryModeManualAdmit
+				return w
+			}(),
+		},
+		{
+			name: "partial overlay keeps untouched defaults",
+			in: eventSettings(func(s *entity.EventCallSettings) {
+				s.MuteOnJoin = boolPtr(true)
+				s.BreakoutCreation = &everyone
+				s.MaxBreakoutRooms = intPtr(3)
+			}),
+			want: func() entity.CallSettings {
+				w := meetingDefaultCallSettings()
+				w.MuteOnJoin = true
+				w.BreakoutCreation = entity.BreakoutCreationEveryone
+				w.MaxBreakoutRooms = 3
+				return w
+			}(),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := baseWithEventOverlay(tc.in)
+			if got != tc.want {
+				t.Fatalf("baseWithEventOverlay() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCreateEventPersistsSettingsForMeet(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	organizerID := uuid.New()
+	repo := &fakeCalendarRepo{}
+	svc := NewService(repo, fakeMembers{}, nil, noopPublisher{})
+
+	manualAdmit := entity.EntryModeManualAdmit
+	created, err := svc.CreateEvent(ctx, workspaceID, organizerID, CreateEventInput{
+		CalendarID:      uuid.New(),
+		Title:           "Planning",
+		Location:        entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+		ScheduledAt:     time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC),
+		DurationMinutes: 30,
+		Settings: &entity.EventCallSettings{
+			EntryMode:        &manualAdmit,
+			MuteOnJoin:       boolPtr(true),
+			MaxBreakoutRooms: intPtr(4),
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateEvent error = %v", err)
+	}
+	if created.Settings == nil {
+		t.Fatalf("created.Settings = nil, want preconfig echoed")
+	}
+	if created.Settings.EntryMode == nil || *created.Settings.EntryMode != entity.EntryModeManualAdmit {
+		t.Fatalf("created.Settings.EntryMode = %v, want manual_admit", created.Settings.EntryMode)
+	}
+	if created.Settings.MuteOnJoin == nil || !*created.Settings.MuteOnJoin {
+		t.Fatalf("created.Settings.MuteOnJoin = %v, want true", created.Settings.MuteOnJoin)
+	}
+	if created.Settings.MaxBreakoutRooms == nil || *created.Settings.MaxBreakoutRooms != 4 {
+		t.Fatalf("created.Settings.MaxBreakoutRooms = %v, want 4", created.Settings.MaxBreakoutRooms)
+	}
+	// Round-trip from the repo store.
+	stored, err := repo.GetEvent(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetEvent error = %v", err)
+	}
+	if stored.Settings == nil || stored.Settings.EntryMode == nil || *stored.Settings.EntryMode != entity.EntryModeManualAdmit {
+		t.Fatalf("stored.Settings did not round-trip: %+v", stored.Settings)
+	}
+}
+
+func TestCreateEventDropsSettingsForNonMeet(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	organizerID := uuid.New()
+	repo := &fakeCalendarRepo{}
+	svc := NewService(repo, fakeMembers{}, nil, noopPublisher{})
+
+	link := "https://example.com/meet"
+	created, err := svc.CreateEvent(ctx, workspaceID, organizerID, CreateEventInput{
+		CalendarID:      uuid.New(),
+		Title:           "Sync",
+		Location:        entity.EventLocation{Type: entity.EventLocationExternalLink, Value: &link},
+		ScheduledAt:     time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC),
+		DurationMinutes: 30,
+		Settings:        &entity.EventCallSettings{MuteOnJoin: boolPtr(true)},
+	})
+	if err != nil {
+		t.Fatalf("CreateEvent error = %v", err)
+	}
+	if created.Settings != nil {
+		t.Fatalf("created.Settings = %+v, want nil for non-meet location", created.Settings)
+	}
+}
+
+func TestUpdateEventSettingsTriState(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	organizerID := uuid.New()
+
+	newSvc := func() (*Service, *fakeCalendarRepo, uuid.UUID) {
+		repo := &fakeCalendarRepo{}
+		svc := NewService(repo, fakeMembers{}, nil, noopPublisher{})
+		created, err := svc.CreateEvent(ctx, workspaceID, organizerID, CreateEventInput{
+			CalendarID:      uuid.New(),
+			Title:           "Planning",
+			Location:        entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			ScheduledAt:     time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC),
+			DurationMinutes: 30,
+			Settings:        &entity.EventCallSettings{MuteOnJoin: boolPtr(true)},
+		})
+		if err != nil {
+			t.Fatalf("CreateEvent error = %v", err)
+		}
+		return svc, repo, created.ID
+	}
+
+	t.Run("absent leaves settings unchanged", func(t *testing.T) {
+		svc, _, eventID := newSvc()
+		title := "Planning v2"
+		updated, err := svc.UpdateEvent(ctx, workspaceID, eventID, organizerID, UpdateEventInput{Title: &title})
+		if err != nil {
+			t.Fatalf("UpdateEvent error = %v", err)
+		}
+		if updated.Settings == nil || updated.Settings.MuteOnJoin == nil || !*updated.Settings.MuteOnJoin {
+			t.Fatalf("settings cleared on absent key: %+v", updated.Settings)
+		}
+	})
+
+	t.Run("null clears settings", func(t *testing.T) {
+		svc, _, eventID := newSvc()
+		updated, err := svc.UpdateEvent(ctx, workspaceID, eventID, organizerID, UpdateEventInput{SettingsSet: true, Settings: nil})
+		if err != nil {
+			t.Fatalf("UpdateEvent error = %v", err)
+		}
+		if updated.Settings != nil {
+			t.Fatalf("settings not cleared on explicit null: %+v", updated.Settings)
+		}
+	})
+
+	t.Run("object replaces settings", func(t *testing.T) {
+		svc, _, eventID := newSvc()
+		updated, err := svc.UpdateEvent(ctx, workspaceID, eventID, organizerID, UpdateEventInput{
+			SettingsSet: true,
+			Settings:    &entity.EventCallSettings{MaxBreakoutRooms: intPtr(2)},
+		})
+		if err != nil {
+			t.Fatalf("UpdateEvent error = %v", err)
+		}
+		if updated.Settings == nil || updated.Settings.MaxBreakoutRooms == nil || *updated.Settings.MaxBreakoutRooms != 2 {
+			t.Fatalf("settings not replaced: %+v", updated.Settings)
+		}
+		// MuteOnJoin from the original create is overwritten by the replacement.
+		if updated.Settings.MuteOnJoin != nil {
+			t.Fatalf("replacement kept stale field MuteOnJoin: %+v", updated.Settings)
+		}
+	})
+
+	t.Run("relocating away from meet clears settings", func(t *testing.T) {
+		svc, _, eventID := newSvc()
+		link := "https://example.com/meet"
+		updated, err := svc.UpdateEvent(ctx, workspaceID, eventID, organizerID, UpdateEventInput{
+			Location: &entity.EventLocation{Type: entity.EventLocationExternalLink, Value: &link},
+		})
+		if err != nil {
+			t.Fatalf("UpdateEvent error = %v", err)
+		}
+		if updated.Settings != nil {
+			t.Fatalf("settings not cleared on relocation to non-meet: %+v", updated.Settings)
+		}
+	})
+}
+
+func TestStartCallFromEventAppliesSettingsNonTxPath(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	organizerID := uuid.New()
+	eventID := uuid.New()
+	manualAdmit := entity.EntryModeManualAdmit
+	everyone := entity.BreakoutCreationEveryone
+	repo := &fakeCalendarRepo{
+		events: map[uuid.UUID]*entity.CalendarEvent{
+			eventID: {
+				ID:          eventID,
+				WorkspaceID: workspaceID,
+				OrganizerID: organizerID,
+				Title:       "Planning",
+				Location:    entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+				Settings: &entity.EventCallSettings{
+					EntryMode:        &manualAdmit,
+					BreakoutCreation: &everyone,
+					MaxBreakoutRooms: intPtr(5),
+				},
+			},
+		},
+	}
+	calls := &fakeCallService{calls: map[uuid.UUID]*entity.Call{}}
+	svc := NewService(repo, fakeMembers{}, calls, noopPublisher{})
+
+	call, err := svc.StartCallFromEvent(ctx, workspaceID, eventID, organizerID)
+	if err != nil {
+		t.Fatalf("StartCallFromEvent error = %v", err)
+	}
+	if call.Settings.EntryMode != entity.EntryModeManualAdmit {
+		t.Fatalf("EntryMode = %s, want manual_admit", call.Settings.EntryMode)
+	}
+	if !call.Settings.WaitingRoom {
+		t.Fatalf("WaitingRoom = false, want true for manual_admit")
+	}
+	if call.Settings.BreakoutCreation != entity.BreakoutCreationEveryone {
+		t.Fatalf("BreakoutCreation = %s, want everyone", call.Settings.BreakoutCreation)
+	}
+	if call.Settings.MaxBreakoutRooms != 5 {
+		t.Fatalf("MaxBreakoutRooms = %d, want 5", call.Settings.MaxBreakoutRooms)
+	}
+}
+
+func TestStartCallFromEventNilSettingsUsesDefaultsNonTxPath(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	organizerID := uuid.New()
+	eventID := uuid.New()
+	repo := &fakeCalendarRepo{
+		events: map[uuid.UUID]*entity.CalendarEvent{
+			eventID: {
+				ID:          eventID,
+				WorkspaceID: workspaceID,
+				OrganizerID: organizerID,
+				Title:       "Planning",
+				Location:    entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			},
+		},
+	}
+	calls := &fakeCallService{calls: map[uuid.UUID]*entity.Call{}}
+	svc := NewService(repo, fakeMembers{}, calls, noopPublisher{})
+
+	call, err := svc.StartCallFromEvent(ctx, workspaceID, eventID, organizerID)
+	if err != nil {
+		t.Fatalf("StartCallFromEvent error = %v", err)
+	}
+	// With no preconfig the call carries the FINALISED canonical defaults: the
+	// meeting defaults run through FinalizeNewCallSettings (member-permission
+	// pointers defaulted to true, entry_mode/breakout resolved). Compare against
+	// the finalised tuple, not the raw defaults.
+	want := calls.finalize(entity.CallTypeMeeting, meetingDefaultCallSettings())
+	if !callSettingsEqual(call.Settings, want) {
+		t.Fatalf("call.Settings = %+v, want finalised canonical defaults %+v", call.Settings, want)
+	}
+}
+
+func TestStartCallFromEventAppliesSettingsTxPath(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	organizerID := uuid.New()
+	eventID := uuid.New()
+	manualAdmit := entity.EntryModeManualAdmit
+	txManager := newCalendarCallTxManager(&entity.CalendarEvent{
+		ID:          eventID,
+		WorkspaceID: workspaceID,
+		OrganizerID: organizerID,
+		Title:       "Planning",
+		Location:    entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+		Settings: &entity.EventCallSettings{
+			EntryMode: &manualAdmit,
+		},
+	})
+	calls := &fakeCallService{calls: map[uuid.UUID]*entity.Call{}}
+	svc := NewService(txManager.calendars.fakeCalendarRepo, fakeMembers{}, calls, noopPublisher{})
+	svc.SetTransactionManager(txManager)
+
+	call, err := svc.StartCallFromEvent(ctx, workspaceID, eventID, organizerID)
+	if err != nil {
+		t.Fatalf("StartCallFromEvent error = %v", err)
+	}
+	stored := txManager.calls.calls[call.ID]
+	if stored == nil {
+		t.Fatalf("call %s not persisted in tx path", call.ID)
+	}
+	if stored.Settings.EntryMode != entity.EntryModeManualAdmit {
+		t.Fatalf("tx EntryMode = %s, want manual_admit", stored.Settings.EntryMode)
+	}
+	if !stored.Settings.WaitingRoom {
+		t.Fatalf("tx WaitingRoom = false, want true (finalize REQUIRED on tx path)")
+	}
+	// breakout enable is a server invariant: meetings always start with it on.
+	if !stored.Settings.BreakoutRooms {
+		t.Fatalf("tx BreakoutRooms = false, want true (server invariant for meetings)")
+	}
+	// Breakout fields still resolved even when overlay didn't touch them.
+	if stored.Settings.BreakoutCreation != entity.BreakoutCreationHost {
+		t.Fatalf("tx BreakoutCreation = %s, want host (resolved default)", stored.Settings.BreakoutCreation)
+	}
+	if stored.Settings.MaxBreakoutRooms != 8 {
+		t.Fatalf("tx MaxBreakoutRooms = %d, want 8 (resolved default)", stored.Settings.MaxBreakoutRooms)
+	}
+	// Chat / member-permission invariants applied identically by the finalizer.
+	if !stored.Settings.Chat {
+		t.Fatalf("tx Chat = false, want true (server invariant)")
+	}
+	if !stored.Settings.ResolvedMembersCanUnmuteMic() || !stored.Settings.ResolvedMembersCanEnableCamera() {
+		t.Fatalf("tx member-permission defaults not applied: %+v", stored.Settings)
+	}
+}
+
+// TestStartCallFromEventTxAndNonTxPathsProduceIdenticalSettings is the core
+// regression for the ALK-819 review finding that the two StartCallFromEvent paths
+// could persist different settings. Both paths now route through the SAME
+// finalizer (CallService.FinalizeNewCallSettings over meetingDefaultCallSettings
+// + the event overlay), so for one event preconfig the call.Settings must be
+// byte-identical regardless of whether the tx manager is configured.
+func TestStartCallFromEventTxAndNonTxPathsProduceIdenticalSettings(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	organizerID := uuid.New()
+	manualAdmit := entity.EntryModeManualAdmit
+	everyone := entity.BreakoutCreationEveryone
+
+	newEvent := func(eventID uuid.UUID) *entity.CalendarEvent {
+		return &entity.CalendarEvent{
+			ID:          eventID,
+			WorkspaceID: workspaceID,
+			OrganizerID: organizerID,
+			Title:       "Planning",
+			Location:    entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			Settings: &entity.EventCallSettings{
+				EntryMode:        &manualAdmit,
+				MuteOnJoin:       boolPtr(true),
+				BreakoutCreation: &everyone,
+				MaxBreakoutRooms: intPtr(4),
+			},
+		}
+	}
+
+	// Non-tx path.
+	nonTxEventID := uuid.New()
+	nonTxRepo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{nonTxEventID: newEvent(nonTxEventID)}}
+	nonTxCalls := &fakeCallService{calls: map[uuid.UUID]*entity.Call{}}
+	nonTxSvc := NewService(nonTxRepo, fakeMembers{}, nonTxCalls, noopPublisher{})
+	nonTxCall, err := nonTxSvc.StartCallFromEvent(ctx, workspaceID, nonTxEventID, organizerID)
+	if err != nil {
+		t.Fatalf("non-tx StartCallFromEvent error = %v", err)
+	}
+
+	// Tx path.
+	txEventID := uuid.New()
+	txManager := newCalendarCallTxManager(newEvent(txEventID))
+	txCalls := &fakeCallService{calls: map[uuid.UUID]*entity.Call{}}
+	txSvc := NewService(txManager.calendars.fakeCalendarRepo, fakeMembers{}, txCalls, noopPublisher{})
+	txSvc.SetTransactionManager(txManager)
+	txCall, err := txSvc.StartCallFromEvent(ctx, workspaceID, txEventID, organizerID)
+	if err != nil {
+		t.Fatalf("tx StartCallFromEvent error = %v", err)
+	}
+	txStored := txManager.calls.calls[txCall.ID]
+	if txStored == nil {
+		t.Fatalf("tx call %s not persisted", txCall.ID)
+	}
+
+	if !callSettingsEqual(nonTxCall.Settings, txStored.Settings) {
+		t.Fatalf("settings diverge between paths:\n non-tx = %+v\n     tx = %+v", nonTxCall.Settings, txStored.Settings)
+	}
+}
+
+// TestStartCallFromEvent_PasswordEntryMode_RejectedOnBothPaths guards the
+// blocking ALK-819 review finding: the HTTP layer rejects entry_mode=password for
+// scheduled events, but a corrupted/legacy event settings row could still carry
+// it. A scheduled meeting has no join password available at start, so BOTH the tx
+// and non-tx StartCallFromEvent paths must refuse such a row (same InvalidInput
+// class) and create NO call, rather than the tx path persisting an unusable
+// password-mode call with no JoinPasswordHash.
+func TestStartCallFromEvent_PasswordEntryMode_RejectedOnBothPaths(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	organizerID := uuid.New()
+	password := entity.EntryModePassword
+
+	// newEvent builds an event whose STORED settings carry entry_mode=password,
+	// bypassing the HTTP boundary validation by setting the entity field directly.
+	newEvent := func(eventID uuid.UUID) *entity.CalendarEvent {
+		return &entity.CalendarEvent{
+			ID:          eventID,
+			WorkspaceID: workspaceID,
+			OrganizerID: organizerID,
+			Title:       "Planning",
+			Location:    entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			Settings:    &entity.EventCallSettings{EntryMode: &password},
+		}
+	}
+
+	t.Run("non-tx path", func(t *testing.T) {
+		eventID := uuid.New()
+		repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{eventID: newEvent(eventID)}}
+		calls := &fakeCallService{calls: map[uuid.UUID]*entity.Call{}}
+		svc := NewService(repo, fakeMembers{}, calls, noopPublisher{})
+
+		call, err := svc.StartCallFromEvent(ctx, workspaceID, eventID, organizerID)
+		if err == nil {
+			t.Fatalf("StartCallFromEvent error = nil, want rejection for password entry mode")
+		}
+		if !hasCode(err, cerrors.CodeInvalidInput) {
+			t.Fatalf("error code = %v, want INVALID_INPUT", err)
+		}
+		if call != nil {
+			t.Fatalf("call = %+v, want nil", call)
+		}
+		if len(calls.calls) != 0 {
+			t.Fatalf("calls created = %d, want 0", len(calls.calls))
+		}
+		if calls.starts != 0 {
+			t.Fatalf("StartCall invocations = %d, want 0 (rejected before StartCall)", calls.starts)
+		}
+	})
+
+	t.Run("tx path", func(t *testing.T) {
+		eventID := uuid.New()
+		txManager := newCalendarCallTxManager(newEvent(eventID))
+		calls := &fakeCallService{calls: map[uuid.UUID]*entity.Call{}}
+		svc := NewService(txManager.calendars.fakeCalendarRepo, fakeMembers{}, calls, noopPublisher{})
+		svc.SetTransactionManager(txManager)
+
+		call, err := svc.StartCallFromEvent(ctx, workspaceID, eventID, organizerID)
+		if err == nil {
+			t.Fatalf("StartCallFromEvent error = nil, want rejection for password entry mode")
+		}
+		if !hasCode(err, cerrors.CodeInvalidInput) {
+			t.Fatalf("error code = %v, want INVALID_INPUT", err)
+		}
+		if call != nil {
+			t.Fatalf("call = %+v, want nil", call)
+		}
+		if len(txManager.calls.calls) != 0 {
+			t.Fatalf("calls persisted in tx = %d, want 0", len(txManager.calls.calls))
+		}
+		if got := txManager.calendars.events[eventID].CallID; got != nil {
+			t.Fatalf("event call_id after rejection = %s, want nil", *got)
+		}
+	})
+}
+
+// TestCloneEventCallSettings_DeepCopy guards the ALK-819 review fix that derived
+// event rows (e.g. a moved recurring occurrence) must own their own settings
+// pointers and never alias the parent's. Mutating any cloned pointer field must
+// not bleed back into the original.
+func TestCloneEventCallSettings_DeepCopy(t *testing.T) {
+	t.Run("nil clones to nil", func(t *testing.T) {
+		if got := cloneEventCallSettings(nil); got != nil {
+			t.Fatalf("cloneEventCallSettings(nil) = %+v, want nil", got)
+		}
+	})
+
+	t.Run("fully-populated deep copy", func(t *testing.T) {
+		entryMode := entity.EntryModeManualAdmit
+		breakoutCreation := entity.BreakoutCreationEveryone
+		src := &entity.EventCallSettings{
+			EntryMode:        &entryMode,
+			MuteOnJoin:       boolPtr(true),
+			BreakoutCreation: &breakoutCreation,
+			MaxBreakoutRooms: intPtr(4),
+		}
+
+		clone := cloneEventCallSettings(src)
+		if clone == nil {
+			t.Fatalf("cloneEventCallSettings returned nil for populated source")
+		}
+		if !reflect.DeepEqual(src, clone) {
+			t.Fatalf("clone not equal by value:\n src = %+v\n clone = %+v", src, clone)
+		}
+
+		// No shared pointers: every pointer field must be a distinct allocation.
+		if src.EntryMode == clone.EntryMode {
+			t.Fatalf("EntryMode pointer aliased")
+		}
+		if src.MuteOnJoin == clone.MuteOnJoin {
+			t.Fatalf("MuteOnJoin pointer aliased")
+		}
+		if src.BreakoutCreation == clone.BreakoutCreation {
+			t.Fatalf("BreakoutCreation pointer aliased")
+		}
+		if src.MaxBreakoutRooms == clone.MaxBreakoutRooms {
+			t.Fatalf("MaxBreakoutRooms pointer aliased")
+		}
+
+		// Mutating each cloned field must not affect the original.
+		*clone.EntryMode = entity.EntryModeOpen
+		*clone.MuteOnJoin = false
+		*clone.BreakoutCreation = entity.BreakoutCreationHost
+		*clone.MaxBreakoutRooms = 1
+		if *src.EntryMode != entity.EntryModeManualAdmit {
+			t.Fatalf("src.EntryMode mutated to %v via clone", *src.EntryMode)
+		}
+		if !*src.MuteOnJoin {
+			t.Fatalf("src.MuteOnJoin mutated to %v via clone", *src.MuteOnJoin)
+		}
+		if *src.BreakoutCreation != entity.BreakoutCreationEveryone {
+			t.Fatalf("src.BreakoutCreation mutated to %v via clone", *src.BreakoutCreation)
+		}
+		if *src.MaxBreakoutRooms != 4 {
+			t.Fatalf("src.MaxBreakoutRooms mutated to %v via clone", *src.MaxBreakoutRooms)
+		}
+	})
+}
+
+// callSettingsEqual compares two CallSettings by value, dereferencing the
+// member-permission pointer fields so a freshly-allocated *true equals another
+// *true (a plain == would compare pointer identity for those fields).
+func callSettingsEqual(a, b entity.CallSettings) bool {
+	if a.ResolvedMembersCanUnmuteMic() != b.ResolvedMembersCanUnmuteMic() {
+		return false
+	}
+	if a.ResolvedMembersCanEnableCamera() != b.ResolvedMembersCanEnableCamera() {
+		return false
+	}
+	a.MembersCanUnmuteMic, a.MembersCanEnableCamera = nil, nil
+	b.MembersCanUnmuteMic, b.MembersCanEnableCamera = nil, nil
+	return a == b
 }
 
 func TestUpsertRsvpPublishesRsvpEvent(t *testing.T) {
@@ -1079,6 +1658,70 @@ func TestMoveEventOccurrence_Recurring_This_OK(t *testing.T) {
 	}
 }
 
+// TestMoveEventOccurrence_Recurring_This_PreservesSettings is the ALK-819 review
+// regression: a moved occurrence of an aloqa_meet recurring meeting must carry
+// the parent's call-settings preconfig (deep-copied) onto the split-off child,
+// not fall back to defaults.
+func TestMoveEventOccurrence_Recurring_This_PreservesSettings(t *testing.T) {
+	ctx := context.Background()
+	wsID, orgID := uuid.New(), uuid.New()
+	eventID := uuid.New()
+	start := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	instance := time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
+	manualAdmit := entity.EntryModeManualAdmit
+	everyone := entity.BreakoutCreationEveryone
+	parentSettings := &entity.EventCallSettings{
+		EntryMode:        &manualAdmit,
+		MuteOnJoin:       boolPtr(true),
+		BreakoutCreation: &everyone,
+		MaxBreakoutRooms: intPtr(3),
+	}
+	repo := &fakeCalendarRepo{events: map[uuid.UUID]*entity.CalendarEvent{
+		eventID: {
+			ID: eventID, WorkspaceID: wsID, OrganizerID: orgID,
+			Title: "Daily", Location: entity.EventLocation{Type: entity.EventLocationAloqaMeet},
+			ScheduledAt: start, DurationMinutes: 30,
+			Recurrence: &entity.RecurrenceRule{RRule: "FREQ=DAILY;COUNT=5"},
+			Settings:   parentSettings,
+		},
+	}}
+	txMgr := newCalendarReminderTxManager(repo)
+	svc := NewService(repo, fakeMembers{members: map[[2]uuid.UUID]bool{{wsID, orgID}: true}}, nil, noopPublisher{})
+	svc.SetTransactionManager(txMgr)
+
+	newAt := time.Date(2026, 5, 10, 14, 0, 0, 0, time.UTC)
+	res, err := svc.MoveEventOccurrence(ctx, wsID, eventID, orgID, MoveOccurrenceInput{
+		InstanceAt: instance, Scope: MoveScopeThis, NewScheduledAt: newAt,
+	})
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if res.Created == nil || res.Created.Settings == nil {
+		t.Fatalf("child settings = %+v, want preserved preconfig", res.Created)
+	}
+	child := res.Created.Settings
+	if child.EntryMode == nil || *child.EntryMode != entity.EntryModeManualAdmit {
+		t.Fatalf("child EntryMode = %v, want manual_admit", child.EntryMode)
+	}
+	if child.MuteOnJoin == nil || !*child.MuteOnJoin {
+		t.Fatalf("child MuteOnJoin = %v, want true", child.MuteOnJoin)
+	}
+	if child.BreakoutCreation == nil || *child.BreakoutCreation != entity.BreakoutCreationEveryone {
+		t.Fatalf("child BreakoutCreation = %v, want everyone", child.BreakoutCreation)
+	}
+	if child.MaxBreakoutRooms == nil || *child.MaxBreakoutRooms != 3 {
+		t.Fatalf("child MaxBreakoutRooms = %v, want 3", child.MaxBreakoutRooms)
+	}
+	// Deep copy: mutating the child's pointers must not affect the parent's.
+	if child.EntryMode == parentSettings.EntryMode {
+		t.Fatal("child EntryMode pointer aliases parent (want deep copy)")
+	}
+	*child.MaxBreakoutRooms = 99
+	if parentSettings.MaxBreakoutRooms == nil || *parentSettings.MaxBreakoutRooms != 3 {
+		t.Fatalf("mutating child leaked into parent: parent MaxBreakoutRooms = %v", parentSettings.MaxBreakoutRooms)
+	}
+}
+
 func TestMoveEventOccurrence_InstanceNotInSeries_BadRequest(t *testing.T) {
 	ctx := context.Background()
 	wsID, orgID, eventID := uuid.New(), uuid.New(), uuid.New()
@@ -1784,7 +2427,7 @@ func (m fakeMembers) GetMember(_ context.Context, workspaceID, userID uuid.UUID)
 	return nil, cerrors.NotFound("workspace member not found")
 }
 
-func (m fakeMembers) ListMembers(context.Context, uuid.UUID, pagination.Params) ([]entity.WorkspaceMember, error) {
+func (m fakeMembers) ListMembers(context.Context, uuid.UUID, pagination.Params, string) ([]entity.WorkspaceMember, error) {
 	return nil, nil
 }
 
@@ -1794,6 +2437,7 @@ func (m fakeMembers) UpdateMemberRole(context.Context, uuid.UUID, uuid.UUID, ent
 func (m fakeMembers) RemoveMember(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 
 type fakeCallService struct {
+	mu          sync.Mutex
 	starts      int
 	deleteCalls int
 	ensureCalls int
@@ -1802,6 +2446,8 @@ type fakeCallService struct {
 }
 
 func (s *fakeCallService) StartCall(_ context.Context, workspaceID, userID uuid.UUID, callType entity.CallType, title string, channelID *uuid.UUID, settings entity.CallSettings, _ string) (*entity.Call, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.starts++
 	call := &entity.Call{
 		ID:          id.New(),
@@ -1811,14 +2457,73 @@ func (s *fakeCallService) StartCall(_ context.Context, workspaceID, userID uuid.
 		Status:      entity.CallStatusRinging,
 		Title:       title,
 		CreatedBy:   userID,
-		Settings:    settings,
-		CreatedAt:   time.Now().UTC(),
+		// Mirror call.Service.StartCall: the non-tx start-call path finalises the
+		// caller-supplied settings before persisting, so the fake must too — this
+		// is what makes the non-tx path comparable to the tx path (which calls
+		// FinalizeNewCallSettings directly) in the equivalence test. (ALK-819 review.)
+		Settings:  s.finalize(callType, settings),
+		CreatedAt: time.Now().UTC(),
 	}
 	s.calls[call.ID] = call
 	return call, nil
 }
 
+// finalize mirrors call.Service.FinalizeNewCallSettings so the fake produces the
+// same persisted settings the real call service would (ALK-819 review). It is a
+// pure function (no shared state) and safe to call without the mutex.
+func (s *fakeCallService) finalize(callType entity.CallType, settings entity.CallSettings) entity.CallSettings {
+	if callType == entity.CallTypeGroup || callType == entity.CallTypeMeeting {
+		settings.BreakoutRooms = true
+	}
+	settings.Recording = false // fake has no egress configured (s.recordingEnabled == false)
+	settings.Chat = true
+	if settings.MembersCanUnmuteMic == nil {
+		settings.MembersCanUnmuteMic = boolPtr(true)
+	}
+	if settings.MembersCanEnableCamera == nil {
+		settings.MembersCanEnableCamera = boolPtr(true)
+	}
+	entryMode := settings.ResolvedEntryMode()
+	settings.EntryMode = entryMode
+	settings.WaitingRoom = entryMode == entity.EntryModeManualAdmit
+	settings.BreakoutCreation = settings.ResolvedBreakoutCreation()
+	settings.MaxBreakoutRooms = settings.ResolvedMaxBreakoutRooms()
+	return settings
+}
+
+func (s *fakeCallService) FinalizeNewCallSettings(callType entity.CallType, settings entity.CallSettings) entity.CallSettings {
+	return s.finalize(callType, settings)
+}
+
+// ValidateNewCallSettings mirrors call.Service.ValidateNewCallSettings (a thin
+// wrapper over the package-private validateCallSettings) so the calendar service's
+// scheduled-settings chokepoint runs the SAME field validation against the fake
+// that it would against the real call service (ALK-819 review). It is a pure
+// function (no shared state) and safe to call without the mutex.
+func (s *fakeCallService) ValidateNewCallSettings(callType entity.CallType, settings entity.CallSettings) error {
+	switch callType {
+	case entity.CallTypeOneToOne, entity.CallTypeGroup, entity.CallTypeMeeting, entity.CallTypeWebinar, entity.CallTypeSelector:
+	default:
+		return cerrors.InvalidInput("invalid call type")
+	}
+	if settings.MaxParticipants < 0 {
+		return cerrors.InvalidInput("max_participants cannot be negative")
+	}
+	if settings.EntryMode != "" && !settings.EntryMode.Valid() {
+		return cerrors.InvalidInput("invalid entry_mode")
+	}
+	if settings.BreakoutCreation != "" && !settings.BreakoutCreation.Valid() {
+		return cerrors.InvalidInput("invalid breakout_creation")
+	}
+	if settings.MaxBreakoutRooms != 0 && (settings.MaxBreakoutRooms < 1 || settings.MaxBreakoutRooms > 8) {
+		return cerrors.InvalidInput("max_breakout_rooms must be between 1 and 8")
+	}
+	return nil
+}
+
 func (s *fakeCallService) GetCall(_ context.Context, _ uuid.UUID, callID, _ uuid.UUID) (*entity.Call, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	call := s.calls[callID]
 	if call == nil {
 		return nil, cerrors.NotFound("call not found")
@@ -1827,11 +2532,15 @@ func (s *fakeCallService) GetCall(_ context.Context, _ uuid.UUID, callID, _ uuid
 }
 
 func (s *fakeCallService) EnsureLiveKitRoomRequired(context.Context, *entity.Call) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.ensureCalls++
 	return s.ensureErr
 }
 
 func (s *fakeCallService) DeleteLiveKitRoom(context.Context, uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.deleteCalls++
 	return nil
 }

@@ -348,7 +348,7 @@ func (r *fakeWorkspaceRepo) GetMember(_ context.Context, workspaceID, userID uui
 	}
 	return nil, cerrors.NotFound("workspace member not found")
 }
-func (r *fakeWorkspaceRepo) ListMembers(context.Context, uuid.UUID, pagination.Params) ([]entity.WorkspaceMember, error) {
+func (r *fakeWorkspaceRepo) ListMembers(context.Context, uuid.UUID, pagination.Params, string) ([]entity.WorkspaceMember, error) {
 	return nil, nil
 }
 
@@ -508,3 +508,5 @@ func hasCode(err error, code cerrors.Code) bool {
 	appErr, ok := cerrors.AsAppError(err)
 	return ok && appErr.Code == code
 }
+
+func (r *fakeMessageRepo) HardDelete(context.Context, uuid.UUID) error { return nil }

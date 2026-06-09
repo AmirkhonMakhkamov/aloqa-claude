@@ -1723,7 +1723,7 @@ func (r *fakeWorkspaceRepo) GetMember(_ context.Context, workspaceID, userID uui
 	}
 	return nil, cerrors.NotFound("workspace member not found")
 }
-func (r *fakeWorkspaceRepo) ListMembers(_ context.Context, workspaceID uuid.UUID, p pagination.Params) ([]entity.WorkspaceMember, error) {
+func (r *fakeWorkspaceRepo) ListMembers(_ context.Context, workspaceID uuid.UUID, p pagination.Params, _ string) ([]entity.WorkspaceMember, error) {
 	if len(r.listMembers) == 0 {
 		return nil, nil
 	}
@@ -2185,3 +2185,5 @@ func (s *fakeChatTxScope) EnqueueRealtime(_ context.Context, evt eventpkg.Event,
 	s.events = append(s.events, evt)
 	return nil
 }
+
+func (r *fakeMessageRepo) HardDelete(context.Context, uuid.UUID) error { return nil }

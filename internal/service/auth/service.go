@@ -411,14 +411,14 @@ func (s *Service) ListWorkspaces(ctx context.Context, userID uuid.UUID) ([]entit
 // workspace, callable by any member of that workspace (not admin-gated).
 // This is the read-only sibling of admin.Service.ListMembers, intended for
 // clients that need to render member avatars / open a DM with another member.
-func (s *Service) ListWorkspaceMembers(ctx context.Context, workspaceID, actorID uuid.UUID, p pagination.Params) ([]entity.WorkspaceMember, error) {
+func (s *Service) ListWorkspaceMembers(ctx context.Context, workspaceID, actorID uuid.UUID, p pagination.Params, search string) ([]entity.WorkspaceMember, error) {
 	if _, err := s.workspaces.GetMember(ctx, workspaceID, actorID); err != nil {
 		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
 			return nil, cerrors.Forbidden("user is not a member of this workspace")
 		}
 		return nil, cerrors.Internal("failed to verify workspace membership", err)
 	}
-	return s.workspaces.ListMembers(ctx, workspaceID, p)
+	return s.workspaces.ListMembers(ctx, workspaceID, p, search)
 }
 
 // ListCommonChannels returns every non-archived channel in the workspace

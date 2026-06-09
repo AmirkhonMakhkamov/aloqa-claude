@@ -45,6 +45,7 @@ const (
 	TypeCallParticipantJoined  Type = "call.participant.joined"
 	TypeCallParticipantLeft    Type = "call.participant.left"
 	TypeCallParticipantUpdated Type = "call.participant.updated"
+	TypeCallInvited            Type = "call.invited"
 	TypeCallQualityAdapted     Type = "call.quality.adapted"
 	TypeCallMessageCreated     Type = "call.message.created"
 	TypeCallMessageDeleted     Type = "call.message.deleted"
@@ -71,6 +72,7 @@ const (
 	TypeBreakoutRoomsAllClosed   Type = "breakout.rooms.all_closed"
 	TypeBreakoutParticipantMoved Type = "breakout.participant.moved"
 	TypeBreakoutBroadcast        Type = "breakout.broadcast"
+	TypeBreakoutRoomInvite       Type = "breakout.room.invite"
 
 	// Signaling events (WebRTC).
 	TypeSignalOffer     Type = "signal.offer"
@@ -122,7 +124,7 @@ func DefinitionForType(t Type) Definition {
 	case TypeTypingStarted, TypeCallTypingStarted, TypeSignalOffer, TypeSignalAnswer, TypeSignalCandidate,
 		TypeCallHandRaised, TypeCallHandLowered, TypeCallReaction,
 		TypeCallShareRequestCreated, TypeCallShareRequestResolved, TypeCallFeaturedShareUpdated,
-		TypeBreakoutBroadcast:
+		TypeBreakoutBroadcast, TypeBreakoutRoomInvite, TypeCallInvited:
 		return Definition{
 			Version:          CurrentVersion,
 			DeliverySemantic: DeliveryEphemeral,
@@ -292,6 +294,16 @@ type CallParticipantPayload struct {
 	Participant *entity.CallParticipant `json:"participant"`
 }
 
+// CallInvitedPayload is the per-user ring delivered to a workspace member the
+// host invited into an ongoing call. Ephemeral (not persisted to the outbox).
+type CallInvitedPayload struct {
+	CallID        uuid.UUID  `json:"call_id"`
+	WorkspaceID   uuid.UUID  `json:"workspace_id"`
+	InviterUserID uuid.UUID  `json:"inviter_user_id"`
+	CallType      string     `json:"call_type"`
+	ChannelID     *uuid.UUID `json:"channel_id,omitempty"`
+}
+
 type CallQualityPayload struct {
 	CallID              uuid.UUID `json:"call_id"`
 	UserID              uuid.UUID `json:"user_id"`
@@ -372,6 +384,14 @@ type BreakoutBroadcastPayload struct {
 	CallID  uuid.UUID `json:"call_id"`
 	UserID  uuid.UUID `json:"user_id"`
 	Message string    `json:"message"`
+}
+
+type BreakoutRoomInvitePayload struct {
+	CallID         uuid.UUID `json:"call_id"`
+	BreakoutRoomID uuid.UUID `json:"breakout_room_id"`
+	InviterUserID  uuid.UUID `json:"inviter_user_id"`
+	InviteeUserID  uuid.UUID `json:"invitee_user_id"`
+	RoomName       string    `json:"room_name,omitempty"`
 }
 
 type UserCalendarPayload struct {

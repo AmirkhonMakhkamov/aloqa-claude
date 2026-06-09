@@ -12,19 +12,23 @@ import (
 	"aloqa/internal/pkg/cerrors"
 )
 
-// permissionForParticipant builds the full LiveKit ParticipantPermission for a
-// participant. UpdateParticipant REPLACES the permission, so every field must be
-// set. Viewers stay non-publishing; everyone else publishes camera+mic, plus
-// screen + screen-audio when canShare is true. (ALK-697)
-func permissionForParticipant(role entity.CallRole, canShare bool) *livekitpb.ParticipantPermission {
-	if role == entity.CallRoleViewer {
+// permissionForParticipant builds the full LiveKit ParticipantPermission from the
+// participant's role, the meeting-level member-permission policy, and their screen
+// grant. UpdateParticipant REPLACES the permission, so every field is set — which
+// means a screen grant/revoke MUST rebuild from the same resolver, otherwise it
+// would reset the member's mic/camera policy (ALK-812). An empty allowed source
+// set clears CanPublish (LiveKit reads an empty CanPublishSources as no
+// restriction). Host/co-host publish everything; viewers nothing. (ALK-697 + ALK-812)
+func permissionForParticipant(role entity.CallRole, settings entity.CallSettings, hasScreenGrant bool) *livekitpb.ParticipantPermission {
+	canMic, canCam, canShare, canPublish := resolveMemberPublish(role, settings, hasScreenGrant)
+	if !canPublish {
 		return &livekitpb.ParticipantPermission{CanSubscribe: true, CanPublish: false, CanPublishData: true}
 	}
 	return &livekitpb.ParticipantPermission{
 		CanSubscribe:      true,
 		CanPublish:        true,
 		CanPublishData:    true,
-		CanPublishSources: screenShareSources(canShare),
+		CanPublishSources: publishSources(canMic, canCam, canShare),
 	}
 }
 
@@ -59,7 +63,7 @@ func (s *Service) GrantScreenShare(ctx context.Context, workspaceID, callID, act
 	if target.Role == entity.CallRoleHost || target.Role == entity.CallRoleCoHost {
 		return nil // host/co-host already share freely (spec §6) — nothing to grant
 	}
-	if err := s.updateLiveKitParticipantPermission(ctx, callID, targetUserID, target.Role, true); err != nil {
+	if err := s.updateLiveKitParticipantPermission(ctx, callID, targetUserID, target.Role, call.Settings, true); err != nil {
 		return err
 	}
 	if err := s.calls.SetCanScreenShare(ctx, target.ID, true); err != nil {
@@ -94,7 +98,7 @@ func (s *Service) RevokeScreenShare(ctx context.Context, workspaceID, callID, ac
 	// Rebuild the permission from the target's role with canShare=false so the
 	// participant keeps camera/mic but loses screen; LiveKit auto-unpublishes any
 	// live screen track.
-	if err := s.updateLiveKitParticipantPermission(ctx, callID, targetUserID, target.Role, false); err != nil {
+	if err := s.updateLiveKitParticipantPermission(ctx, callID, targetUserID, target.Role, call.Settings, false); err != nil {
 		return err // do not report a revoke that didn't cut access
 	}
 	if err := s.calls.SetCanScreenShare(ctx, target.ID, false); err != nil {
@@ -106,15 +110,17 @@ func (s *Service) RevokeScreenShare(ctx context.Context, workspaceID, callID, ac
 }
 
 // updateLiveKitParticipantPermission applies the participant's rebuilt LiveKit
-// permission so a grant/revoke takes effect at the media plane with no rejoin.
-// A no-op when LiveKit is not wired up (e.g. local dev / tests without a room
-// client) so the REST + persisted grant still works.
-func (s *Service) updateLiveKitParticipantPermission(ctx context.Context, callID, userID uuid.UUID, role entity.CallRole, canShare bool) error {
+// permission so a grant/revoke (or a meeting-policy flip) takes effect at the
+// media plane with no rejoin. It threads the call settings + role + screen grant
+// through resolveMemberPublish so the mic/camera policy is never reset by a screen
+// grant/revoke (ALK-812). A no-op when LiveKit is not wired up (local dev / tests
+// without a room client) so the REST + persisted grant still works.
+func (s *Service) updateLiveKitParticipantPermission(ctx context.Context, callID, userID uuid.UUID, role entity.CallRole, settings entity.CallSettings, hasScreenGrant bool) error {
 	if s.livekitRooms == nil {
 		return nil
 	}
 	return s.livekitRooms.UpdateParticipant(ctx, callID.String(), userID.String(),
-		permissionForParticipant(role, canShare))
+		permissionForParticipant(role, settings, hasScreenGrant))
 }
 
 // RequestScreenShare: a connected non-viewer without a grant asks the host. Transient (no row).

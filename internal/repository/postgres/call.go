@@ -220,6 +220,8 @@ func (r *CallRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Call, err
 		return nil, fmt.Errorf("postgres: unmarshal call settings: %w", err)
 	}
 	call.Settings.EntryMode = call.Settings.ResolvedEntryMode()
+	call.Settings.BreakoutCreation = call.Settings.ResolvedBreakoutCreation()
+	call.Settings.MaxBreakoutRooms = call.Settings.ResolvedMaxBreakoutRooms()
 
 	return call, nil
 }
@@ -265,6 +267,8 @@ func (r *CallRepo) ListActiveByWorkspace(ctx context.Context, workspaceID uuid.U
 			return nil, fmt.Errorf("postgres: unmarshal call settings: %w", err)
 		}
 		call.Settings.EntryMode = call.Settings.ResolvedEntryMode()
+		call.Settings.BreakoutCreation = call.Settings.ResolvedBreakoutCreation()
+		call.Settings.MaxBreakoutRooms = call.Settings.ResolvedMaxBreakoutRooms()
 
 		calls = append(calls, call)
 	}
@@ -328,6 +332,8 @@ func (r *CallRepo) ListStaleOpen(ctx context.Context, before time.Time, limit in
 			return nil, fmt.Errorf("postgres: unmarshal stale call settings: %w", err)
 		}
 		call.Settings.EntryMode = call.Settings.ResolvedEntryMode()
+		call.Settings.BreakoutCreation = call.Settings.ResolvedBreakoutCreation()
+		call.Settings.MaxBreakoutRooms = call.Settings.ResolvedMaxBreakoutRooms()
 
 		calls = append(calls, call)
 	}
@@ -601,6 +607,8 @@ func (r *CallRepo) ListRecentByWorkspace(ctx context.Context, workspaceID uuid.U
 			return nil, fmt.Errorf("postgres: unmarshal recent call settings: %w", err)
 		}
 		call.Settings.EntryMode = call.Settings.ResolvedEntryMode()
+		call.Settings.BreakoutCreation = call.Settings.ResolvedBreakoutCreation()
+		call.Settings.MaxBreakoutRooms = call.Settings.ResolvedMaxBreakoutRooms()
 		calls = append(calls, call)
 	}
 	if err := rows.Err(); err != nil {
@@ -706,6 +714,26 @@ const endCallQuery = `
 		 WHERE cp.call_id = ended.id
 		   AND cp.status IN ('joining', 'connected', 'waiting')
 		RETURNING cp.id
+	),
+	superseded AS (
+		-- (zombie-calls) Tombstone the durable call.started event so it is not
+		-- replayed to clients that (re)subscribe after the call ends. The
+		-- realtime backend re-delivers replayable events to a freshly
+		-- subscribed socket; a brand-new tab would otherwise receive this
+		-- ancient call.started and seed a phantom in-call surface (the
+		-- 400+ hour zombie). Matched by the call id embedded in the event body
+		-- and compared AS TEXT, so a malformed body can never raise a uuid cast
+		-- error on the call-end path. Data-modifying CTEs run to completion
+		-- even though this clause is not read by the final SELECT. call.started
+		-- is enqueued exactly once at call creation with a fresh per-call id and
+		-- ids are never reused, so a single tombstone at end is sufficient.
+		UPDATE realtime_events re
+		   SET replayable = false
+		  FROM ended
+		 WHERE re.type = 'call.started'
+		   AND re.replayable = true
+		   AND (re.body #>> '{payload,call,id}') = ended.id::text
+		RETURNING re.id
 	)
 	SELECT (SELECT count(*) FROM ended), (SELECT count(*) FROM disconnected)`
 
@@ -727,6 +755,26 @@ const cancelRingingQuery = `
 		 WHERE cp.call_id = ended.id
 		   AND cp.status IN ('joining', 'connected', 'waiting')
 		RETURNING cp.id
+	),
+	superseded AS (
+		-- (zombie-calls) Tombstone the durable call.started event so it is not
+		-- replayed to clients that (re)subscribe after the call ends. The
+		-- realtime backend re-delivers replayable events to a freshly
+		-- subscribed socket; a brand-new tab would otherwise receive this
+		-- ancient call.started and seed a phantom in-call surface (the
+		-- 400+ hour zombie). Matched by the call id embedded in the event body
+		-- and compared AS TEXT, so a malformed body can never raise a uuid cast
+		-- error on the call-end path. Data-modifying CTEs run to completion
+		-- even though this clause is not read by the final SELECT. call.started
+		-- is enqueued exactly once at call creation with a fresh per-call id and
+		-- ids are never reused, so a single tombstone at end is sufficient.
+		UPDATE realtime_events re
+		   SET replayable = false
+		  FROM ended
+		 WHERE re.type = 'call.started'
+		   AND re.replayable = true
+		   AND (re.body #>> '{payload,call,id}') = ended.id::text
+		RETURNING re.id
 	)
 	SELECT (SELECT count(*) FROM ended), (SELECT count(*) FROM disconnected)`
 

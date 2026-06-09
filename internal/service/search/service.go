@@ -385,7 +385,7 @@ func (s *Service) BackfillWorkspaceMembers(ctx context.Context, workspaceID uuid
 		members, err := s.members.ListMembers(ctx, workspaceID, pagination.Params{
 			Cursor: cursor,
 			Limit:  batchSize,
-		})
+		}, "")
 		if err != nil {
 			return count, cerrors.Internal("failed to list workspace members for search backfill", err)
 		}

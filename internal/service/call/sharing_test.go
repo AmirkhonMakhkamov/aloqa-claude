@@ -43,7 +43,10 @@ func shareTestHarness(t *testing.T, callStatus entity.CallStatus) (
 	}}
 	calls := &fakeCallRepo{
 		calls: map[uuid.UUID]*entity.Call{
-			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: callStatus, CreatedAt: time.Now()},
+			// ScreenSharing=true: the meeting permits screen-share at the meeting
+			// level, so a per-participant ALK-697 grant resolves to a real screen
+			// source (the grant is ANDed with the meeting toggle under ALK-812).
+			callID: {ID: callID, WorkspaceID: workspaceID, Type: entity.CallTypeMeeting, Status: callStatus, CreatedAt: time.Now(), Settings: entity.CallSettings{ScreenSharing: true}},
 		},
 		participants: map[[2]uuid.UUID]*entity.CallParticipant{
 			{callID, hostID}:        {ID: uuid.New(), CallID: callID, UserID: hostID, Role: entity.CallRoleHost, Status: entity.ParticipantStatusConnected},
@@ -306,6 +309,44 @@ func TestUpdateMediaRejectsUngrantedScreenShare(t *testing.T) {
 	appErr, _ := cerrors.AsAppError(err)
 	if appErr == nil || appErr.Message != "screen_share_not_granted" {
 		t.Fatalf("error message = %v, want screen_share_not_granted", err)
+	}
+}
+
+func TestUpdateMediaRejectsMemberUnmuteWhenPolicyDenies(t *testing.T) {
+	ctx := context.Background()
+	svc, _, _, _, workspaceID, callID, _, participantID := shareTestHarness(t, entity.CallStatusActive)
+	denied := false
+	svc.calls.(*fakeCallRepo).calls[callID].Settings.MembersCanUnmuteMic = &denied
+
+	unmute := false // audio_muted=false → attempting to unmute
+	if err := svc.UpdateMedia(ctx, workspaceID, callID, participantID, &unmute, nil, nil); !hasCode(err, cerrors.CodeForbidden) {
+		t.Fatalf("member unmute under deny policy error = %v, want FORBIDDEN", err)
+	}
+}
+
+func TestUpdateMediaRejectsMemberCameraWhenPolicyDenies(t *testing.T) {
+	ctx := context.Background()
+	svc, _, _, _, workspaceID, callID, _, participantID := shareTestHarness(t, entity.CallStatusActive)
+	denied := false
+	svc.calls.(*fakeCallRepo).calls[callID].Settings.MembersCanEnableCamera = &denied
+
+	cameraOn := false // video_muted=false → attempting to enable the camera
+	if err := svc.UpdateMedia(ctx, workspaceID, callID, participantID, nil, &cameraOn, nil); !hasCode(err, cerrors.CodeForbidden) {
+		t.Fatalf("member camera under deny policy error = %v, want FORBIDDEN", err)
+	}
+}
+
+func TestUpdateMediaAllowsHostUnmuteWhenMemberPolicyDenies(t *testing.T) {
+	ctx := context.Background()
+	svc, _, _, _, workspaceID, callID, hostID, _ := shareTestHarness(t, entity.CallStatusActive)
+	denied := false
+	svc.calls.(*fakeCallRepo).calls[callID].Settings.MembersCanUnmuteMic = &denied
+	svc.calls.(*fakeCallRepo).calls[callID].Settings.MembersCanEnableCamera = &denied
+
+	unmute := false
+	cameraOn := false
+	if err := svc.UpdateMedia(ctx, workspaceID, callID, hostID, &unmute, &cameraOn, nil); err != nil {
+		t.Fatalf("host should be exempt from the member-permission policy, got %v", err)
 	}
 }
 

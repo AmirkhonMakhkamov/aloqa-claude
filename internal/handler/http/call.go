@@ -632,9 +632,15 @@ type updateMediaRequest struct {
 }
 
 type updateSettingsRequest struct {
-	EntryMode     *string `json:"entry_mode,omitempty"`
-	MuteOnJoin    *bool   `json:"mute_on_join,omitempty"`
-	BreakoutRooms *bool   `json:"breakout_rooms,omitempty"`
+	EntryMode              *string `json:"entry_mode,omitempty"`
+	MuteOnJoin             *bool   `json:"mute_on_join,omitempty"`
+	BreakoutRooms          *bool   `json:"breakout_rooms,omitempty"`
+	BreakoutCreation       *string `json:"breakout_creation,omitempty"`
+	MaxBreakoutRooms       *int    `json:"max_breakout_rooms,omitempty"`
+	ScreenSharing          *bool   `json:"screen_sharing,omitempty"`
+	Chat                   *bool   `json:"chat,omitempty"`
+	MembersCanUnmuteMic    *bool   `json:"members_can_unmute_mic,omitempty"`
+	MembersCanEnableCamera *bool   `json:"members_can_enable_camera,omitempty"`
 }
 
 func (h *CallHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
@@ -659,12 +665,21 @@ func (h *CallHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	patch := call.CallSettingsPatch{
-		MuteOnJoin:    req.MuteOnJoin,
-		BreakoutRooms: req.BreakoutRooms,
+		MuteOnJoin:             req.MuteOnJoin,
+		BreakoutRooms:          req.BreakoutRooms,
+		MaxBreakoutRooms:       req.MaxBreakoutRooms,
+		ScreenSharing:          req.ScreenSharing,
+		Chat:                   req.Chat,
+		MembersCanUnmuteMic:    req.MembersCanUnmuteMic,
+		MembersCanEnableCamera: req.MembersCanEnableCamera,
 	}
 	if req.EntryMode != nil {
 		mode := entity.EntryMode(*req.EntryMode)
 		patch.EntryMode = &mode
+	}
+	if req.BreakoutCreation != nil {
+		policy := entity.BreakoutCreationPolicy(*req.BreakoutCreation)
+		patch.BreakoutCreation = &policy
 	}
 
 	updated, err := h.svc.UpdateCallSettings(r.Context(), callID, userID, patch)
@@ -702,6 +717,44 @@ func (h *CallHandler) UpdateMedia(w http.ResponseWriter, r *http.Request) {
 
 type updateParticipantRoleRequest struct {
 	Role entity.CallRole `json:"role"`
+}
+
+type addParticipantsRequest struct {
+	UserIDs []uuid.UUID `json:"user_ids"`
+}
+
+const maxInviteParticipants = 100
+
+func (h *CallHandler) AddParticipants(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	var req addParticipantsRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if len(req.UserIDs) == 0 {
+		writeErr(w, cerrors.InvalidInput("user_ids is required"))
+		return
+	}
+	if len(req.UserIDs) > maxInviteParticipants {
+		writeErr(w, cerrors.InvalidInput("too many user_ids"))
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+	result, err := h.svc.InviteParticipants(r.Context(), workspaceID, callID, userID, req.UserIDs)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, result)
 }
 
 func (h *CallHandler) UpdateParticipantRole(w http.ResponseWriter, r *http.Request) {
@@ -759,6 +812,23 @@ func (h *CallHandler) TransferHost(w http.ResponseWriter, r *http.Request) {
 	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
 
 	if err := h.svc.TransferHost(r.Context(), workspaceID, callID, userID, targetUserID); err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeNoContent(w)
+}
+
+func (h *CallHandler) DeclineCall(w http.ResponseWriter, r *http.Request) {
+	callID, err := id.Parse(chi.URLParam(r, "callID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
+	if err := h.svc.DeclineCall(r.Context(), workspaceID, callID, userID); err != nil {
 		writeErr(w, err)
 		return
 	}

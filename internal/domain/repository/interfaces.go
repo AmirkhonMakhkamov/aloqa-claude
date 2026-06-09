@@ -28,7 +28,7 @@ type WorkspaceRepository interface {
 
 	AddMember(ctx context.Context, m *entity.WorkspaceMember) error
 	GetMember(ctx context.Context, workspaceID, userID uuid.UUID) (*entity.WorkspaceMember, error)
-	ListMembers(ctx context.Context, workspaceID uuid.UUID, p pagination.Params) ([]entity.WorkspaceMember, error)
+	ListMembers(ctx context.Context, workspaceID uuid.UUID, p pagination.Params, search string) ([]entity.WorkspaceMember, error)
 	UpdateMemberRole(ctx context.Context, workspaceID, userID uuid.UUID, role entity.WorkspaceRole) error
 	RemoveMember(ctx context.Context, workspaceID, userID uuid.UUID) error
 }
@@ -176,6 +176,7 @@ type MediaRepository interface {
 // BreakoutRoomRepository manages breakout room persistence.
 type BreakoutRoomRepository interface {
 	Create(ctx context.Context, room *entity.BreakoutRoom) error
+	CreateRoomsWithinCap(ctx context.Context, callID uuid.UUID, maxRooms int, rooms []entity.BreakoutRoom) error
 	GetByID(ctx context.Context, id uuid.UUID) (*entity.BreakoutRoom, error)
 	ListByCall(ctx context.Context, callID uuid.UUID) ([]entity.BreakoutRoom, error)
 	ListCallsWithExpiredActiveBreakouts(ctx context.Context, before time.Time, limit int) ([]uuid.UUID, error)

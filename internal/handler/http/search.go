@@ -35,6 +35,8 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 		Query:       q,
 		WorkspaceID: workspaceID,
 		Type:        r.URL.Query().Get("type"),
+		DateRange:   r.URL.Query().Get("date_range"),
+		Sort:        r.URL.Query().Get("sort"),
 		Limit:       20,
 		Offset:      0,
 	}
@@ -51,11 +53,28 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 			params.Offset = n
 		}
 	}
+
+	// Backward-compat single channel_id param.
 	if v := r.URL.Query().Get("channel_id"); v != "" {
 		if chID, err := uuid.Parse(v); err == nil {
 			params.ChannelID = &chID
 		}
 	}
+
+	// Multiple channel_ids (repeated param: channel_ids=<id>&channel_ids=<id>).
+	for _, v := range r.URL.Query()["channel_ids"] {
+		if chID, err := uuid.Parse(v); err == nil {
+			params.ChannelIDs = append(params.ChannelIDs, chID)
+		}
+	}
+
+	// Multiple direct_user_ids for DM filtering.
+	for _, v := range r.URL.Query()["direct_user_ids"] {
+		if uid, err := uuid.Parse(v); err == nil {
+			params.DirectUserIDs = append(params.DirectUserIDs, uid)
+		}
+	}
+
 	if v := r.URL.Query().Get("date_from"); v != "" {
 		if t, err := time.Parse(time.RFC3339, v); err == nil {
 			params.DateFrom = &t

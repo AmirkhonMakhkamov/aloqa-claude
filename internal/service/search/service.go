@@ -31,6 +31,8 @@ type Result struct {
 	ID          uuid.UUID    `json:"id"`
 	WorkspaceID uuid.UUID    `json:"workspace_id"`
 	ChannelID   *uuid.UUID   `json:"channel_id,omitempty"`
+	ChannelName string       `json:"channel_name,omitempty"`
+	ChannelType string       `json:"channel_type,omitempty"`
 	Title       string       `json:"title"`
 	Snippet     string       `json:"snippet"`
 	Score       float64      `json:"score"`
@@ -48,15 +50,19 @@ type SearchResults struct {
 
 // Params holds search query parameters.
 type Params struct {
-	Query       string     `json:"query"`
-	WorkspaceID uuid.UUID  `json:"workspace_id"`
-	ChannelID   *uuid.UUID `json:"channel_id,omitempty"`
-	UserID      *uuid.UUID `json:"user_id,omitempty"`
-	Type        string     `json:"type,omitempty"` // "message", "file", "channel", "user", ""=all
-	DateFrom    *time.Time `json:"date_from,omitempty"`
-	DateTo      *time.Time `json:"date_to,omitempty"`
-	Limit       int        `json:"limit"`
-	Offset      int        `json:"offset"`
+	Query         string      `json:"query"`
+	WorkspaceID   uuid.UUID   `json:"workspace_id"`
+	ChannelID     *uuid.UUID  `json:"channel_id,omitempty"`
+	ChannelIDs    []uuid.UUID `json:"channel_ids,omitempty"`
+	DirectUserIDs []uuid.UUID `json:"direct_user_ids,omitempty"`
+	UserID        *uuid.UUID  `json:"user_id,omitempty"`
+	Type          string      `json:"type,omitempty"` // "message", "file", "channel", "user", ""=all
+	DateFrom      *time.Time  `json:"date_from,omitempty"`
+	DateTo        *time.Time  `json:"date_to,omitempty"`
+	DateRange     string      `json:"date_range,omitempty"` // last_7_days, last_30_days, all_time
+	Sort          string      `json:"sort,omitempty"`       // relevance, alphabetical, date
+	Limit         int         `json:"limit"`
+	Offset        int         `json:"offset"`
 
 	AccessibleChannelIDs []uuid.UUID `json:"-"`
 	AllowUserResults     bool        `json:"-"`
@@ -167,6 +173,50 @@ func (s *Service) Search(ctx context.Context, params Params) (*SearchResults, er
 			}
 		}
 	}
+
+	// Convert DateRange preset to DateFrom if not already set explicitly.
+	if params.DateRange != "" && params.DateFrom == nil {
+		switch params.DateRange {
+		case "last_7_days":
+			t := time.Now().UTC().Add(-7 * 24 * time.Hour)
+			params.DateFrom = &t
+		case "last_30_days":
+			t := time.Now().UTC().Add(-30 * 24 * time.Hour)
+			params.DateFrom = &t
+		}
+	}
+
+	// Merge legacy single ChannelID into ChannelIDs slice for uniform handling.
+	if params.ChannelID != nil {
+		params.ChannelIDs = append(params.ChannelIDs, *params.ChannelID)
+	}
+
+	// Resolve DirectUserIDs to DM channel IDs.
+	for _, partnerID := range params.DirectUserIDs {
+		dmCh, err := s.channels.GetDMChannel(ctx, params.WorkspaceID, *params.UserID, partnerID)
+		if err != nil {
+			continue
+		}
+		params.ChannelIDs = append(params.ChannelIDs, dmCh.ID)
+	}
+
+	// Intersect requested ChannelIDs with AccessibleChannelIDs to enforce permissions.
+	if len(params.ChannelIDs) > 0 {
+		accessSet := make(map[uuid.UUID]bool, len(params.AccessibleChannelIDs))
+		for _, id := range params.AccessibleChannelIDs {
+			accessSet[id] = true
+		}
+		effective := make([]uuid.UUID, 0, len(params.ChannelIDs))
+		seen := make(map[uuid.UUID]bool)
+		for _, id := range params.ChannelIDs {
+			if accessSet[id] && !seen[id] {
+				effective = append(effective, id)
+				seen[id] = true
+			}
+		}
+		params.AccessibleChannelIDs = effective
+	}
+
 	results, err := s.searcher.Search(ctx, params)
 	if err != nil {
 		return nil, err

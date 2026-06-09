@@ -866,7 +866,7 @@ paths:
           description: Redemption result
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/AuthSession' }
+              schema: { $ref: '#/components/schemas/RedeemInviteResponse' }
 
   # -- Admin (members / roles / audit-log only) -----------------------------
   /api/v1/workspaces/{workspaceID}/admin/members:
@@ -1871,7 +1871,35 @@ components:
       type: object
       required: [display_name]
       properties:
+        email:
+          type: string
+          format: email
+          description: Optional for call-scoped guest links; required for email-scoped workspace/channel invites.
         display_name: { type: string, minLength: 1 }
+
+    RedeemInviteResponse:
+      type: object
+      required: [user, workspace_id, channel_ids, access_token, refresh_token, expires_in]
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        workspace_id: { $ref: '#/components/schemas/UUID' }
+        call_id:
+          allOf:
+            - $ref: '#/components/schemas/UUID'
+          nullable: true
+          description: Present for call-scoped guest links.
+        session_id:
+          type: string
+          description: Session cookie identifier returned when the backend issues a guest session.
+        channel_ids:
+          type: array
+          description: Channel grants for the redeemed invite. Call-scoped links return an empty array, never null.
+          items: { $ref: '#/components/schemas/UUID' }
+        access_token: { type: string }
+        refresh_token: { type: string }
+        expires_in:
+          type: integer
+          description: Access token lifetime in seconds.
 
     WorkspaceMember:
       type: object

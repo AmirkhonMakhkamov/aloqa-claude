@@ -1713,6 +1713,11 @@ components:
           type: array
           nullable: true
           items: { $ref: '#/components/schemas/Reaction' }
+        mentions:
+          description: User IDs resolved from supported @mention handles in message content.
+          type: array
+          nullable: true
+          items: { $ref: '#/components/schemas/UUID' }
         attachments:
           type: array
           nullable: true

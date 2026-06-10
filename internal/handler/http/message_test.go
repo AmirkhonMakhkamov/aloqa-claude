@@ -321,6 +321,54 @@ func TestMessagePostEchoesIdempotencyKeyHeaderWhenNoBodyField(t *testing.T) {
 	}
 }
 
+func TestMessagePostIncludesResolvedMentionsInResponseAndEvent(t *testing.T) {
+	f := newMessageHTTPFixture()
+	mentionedID := uuid.New()
+	f.messages.resolveMentionsFunc = func(_ context.Context, channelID, authorID uuid.UUID, content string) ([]uuid.UUID, error) {
+		if channelID != f.channelID {
+			t.Fatalf("ResolveMentions channel = %s, want %s", channelID, f.channelID)
+		}
+		if authorID != f.userID {
+			t.Fatalf("ResolveMentions author = %s, want %s", authorID, f.userID)
+		}
+		if content != "Hello @alice" {
+			t.Fatalf("ResolveMentions content = %q, want mention content", content)
+		}
+		return []uuid.UUID{mentionedID}, nil
+	}
+
+	res := f.serve(http.MethodPost, "/channels/"+f.channelID.String()+"/messages", `{"content":"Hello @alice"}`)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", res.Code, res.Body.String())
+	}
+
+	var msg entity.Message
+	if err := json.Unmarshal(res.Body.Bytes(), &msg); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	requireHTTPUUIDs(t, msg.Mentions, mentionedID)
+	if len(f.messages.resolveMentionsCalls) != 1 {
+		t.Fatalf("ResolveMentions calls = %d, want 1", len(f.messages.resolveMentionsCalls))
+	}
+	if len(f.publisher.events) == 0 {
+		t.Fatalf("expected message.created event")
+	}
+
+	var envelope struct {
+		Type    eventpkg.Type `json:"type"`
+		Payload struct {
+			Message entity.Message `json:"message"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(f.publisher.events[0], &envelope); err != nil {
+		t.Fatalf("decode event: %v", err)
+	}
+	if envelope.Type != eventpkg.TypeMessageCreated {
+		t.Fatalf("event type = %s, want %s", envelope.Type, eventpkg.TypeMessageCreated)
+	}
+	requireHTTPUUIDs(t, envelope.Payload.Message.Mentions, mentionedID)
+}
+
 func TestMessageGetIncludesForwardedFrom(t *testing.T) {
 	f := newMessageHTTPFixture()
 	forwardedFrom := json.RawMessage(`{"message_id":"m1","snapshot":{"content":"original"}}`)
@@ -887,8 +935,16 @@ func (r *messageHTTPChannelRepo) GetDMChannel(context.Context, uuid.UUID, uuid.U
 }
 
 type messageHTTPMessageRepo struct {
-	messages  map[uuid.UUID]*entity.Message
-	reactions map[uuid.UUID]entity.Reaction
+	messages             map[uuid.UUID]*entity.Message
+	reactions            map[uuid.UUID]entity.Reaction
+	resolveMentionsFunc  func(context.Context, uuid.UUID, uuid.UUID, string) ([]uuid.UUID, error)
+	resolveMentionsCalls []messageHTTPResolveMentionsCall
+}
+
+type messageHTTPResolveMentionsCall struct {
+	channelID uuid.UUID
+	authorID  uuid.UUID
+	content   string
 }
 
 func (r *messageHTTPMessageRepo) Create(_ context.Context, msg *entity.Message) error {
@@ -914,6 +970,17 @@ func (r *messageHTTPMessageRepo) ListByChannel(_ context.Context, channelID uuid
 }
 func (r *messageHTTPMessageRepo) ListThreadReplies(context.Context, uuid.UUID, pagination.Params) ([]entity.Message, error) {
 	return nil, nil
+}
+func (r *messageHTTPMessageRepo) ResolveMentions(ctx context.Context, channelID, authorID uuid.UUID, content string) ([]uuid.UUID, error) {
+	r.resolveMentionsCalls = append(r.resolveMentionsCalls, messageHTTPResolveMentionsCall{
+		channelID: channelID,
+		authorID:  authorID,
+		content:   content,
+	})
+	if r.resolveMentionsFunc != nil {
+		return r.resolveMentionsFunc(ctx, channelID, authorID, content)
+	}
+	return []uuid.UUID{}, nil
 }
 func (r *messageHTTPMessageRepo) HasActiveMessage(context.Context, uuid.UUID) (bool, error) {
 	return false, nil
@@ -1055,6 +1122,18 @@ func (r *messageHTTPMessageRepo) BatchUnreadCounts(context.Context, uuid.UUID, u
 }
 func (r *messageHTTPMessageRepo) CountThreadReplies(context.Context, uuid.UUID) (int, error) {
 	return 0, nil
+}
+
+func requireHTTPUUIDs(t *testing.T, got []uuid.UUID, want ...uuid.UUID) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("uuid slice = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("uuid slice = %v, want %v", got, want)
+		}
+	}
 }
 
 func jsonEqual(a, b json.RawMessage) bool {

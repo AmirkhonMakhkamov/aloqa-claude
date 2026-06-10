@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -646,11 +647,12 @@ func (r *MessageRepo) ListPinned(ctx context.Context, channelID uuid.UUID) ([]en
 // ListMentions returns recent @-mentions of the calling user across every
 // channel the user is a member of in the given workspace.
 //
-// The mention syntax stored in `messages.content` is `@<email-local-part>`
-// (composer-web `mention-transformer.ts`). We derive the local-part from the
-// caller's `users.email` on the fly. Self-mentions and tombstoned messages are
-// excluded. The query intentionally avoids the notifications table — that
-// path is currently unused for chat mentions; this is the express read model.
+// The mention syntax stored in `messages.content` may be either
+// `@<email-local-part>` or `@<display_name_with_underscores>` depending on the
+// composer version. We derive both handles from users on the fly. Self-mentions
+// and tombstoned messages are excluded. The query intentionally avoids the
+// notifications table — that path is currently unused for chat mentions; this
+// is the express read model.
 func (r *MessageRepo) ListMentions(
 	ctx context.Context,
 	workspaceID, userID uuid.UUID,
@@ -660,10 +662,10 @@ func (r *MessageRepo) ListMentions(
 		limit = 50
 	}
 
-	// regexp_replace escapes POSIX regex metachars in the caller's local-part
-	// before splicing it into the body regex. Without it, emails like `john.doe`
-	// or `user+tag` would broaden matching (`.`, `+` are metachars), and an
-	// attacker-shaped local-part could trigger catastrophic backtracking (ReDoS).
+	// regexp_replace escapes POSIX regex metachars in candidate handles before
+	// splicing them into the body regex. Without it, values like `john.doe` or
+	// `user+tag` would broaden matching (`.`, `+` are metachars), and an
+	// attacker-shaped handle could trigger catastrophic backtracking (ReDoS).
 	// Saved-message channels (own scratch space) are excluded — they cannot
 	// produce real cross-user @mentions.
 	query := `
@@ -674,7 +676,13 @@ func (r *MessageRepo) ListMentions(
 					'([.+*?()\[\]{}|\\^$])',
 					'\\\1',
 					'g'
-				) AS handle
+				) AS email_handle,
+				regexp_replace(
+					LOWER(regexp_replace(COALESCE(display_name, ''), '\s+', '_', 'g')),
+					'([.+*?()\[\]{}|\\^$])',
+					'\\\1',
+					'g'
+				) AS display_handle
 			FROM users
 			WHERE id = $2
 		)
@@ -700,8 +708,10 @@ func (r *MessageRepo) ListMentions(
 		  AND c.type NOT IN ('saved', 'saved_global')
 		  AND m.deleted_at IS NULL
 		  AND m.user_id <> caller.id
-		  AND caller.handle <> ''
-		  AND m.content ~* ('(^|[^A-Za-z0-9_])@' || caller.handle || '([^A-Za-z0-9_.-]|$)')
+		  AND (
+		    (caller.email_handle <> '' AND m.content ~* ('(^|[^A-Za-z0-9_])@' || caller.email_handle || '([^A-Za-z0-9_.-]|$)'))
+		    OR (caller.display_handle <> '' AND m.content ~* ('(^|[^A-Za-z0-9_])@' || caller.display_handle || '([^A-Za-z0-9_.-]|$)'))
+		  )
 		ORDER BY m.created_at DESC, m.id DESC
 		LIMIT $3`
 
@@ -737,6 +747,140 @@ func (r *MessageRepo) ListMentions(
 	}
 
 	return mentions, nil
+}
+
+// ResolveMentions returns channel member user IDs mentioned by the message
+// content using the same handle matching contract as ListMentions.
+func (r *MessageRepo) ResolveMentions(
+	ctx context.Context,
+	channelID, authorID uuid.UUID,
+	content string,
+) ([]uuid.UUID, error) {
+	if !strings.Contains(content, "@") {
+		return []uuid.UUID{}, nil
+	}
+
+	// Keep this regex in lockstep with ListMentions above: handles are escaped
+	// before being interpolated, and saved-message channels cannot produce
+	// cross-user mentions.
+	query := `
+		WITH member_handles AS (
+			SELECT u.id,
+				regexp_replace(
+					LOWER(SPLIT_PART(u.email, '@', 1)),
+					'([.+*?()\[\]{}|\\^$])',
+					'\\\1',
+					'g'
+				) AS email_handle,
+				regexp_replace(
+					LOWER(regexp_replace(COALESCE(u.display_name, ''), '\s+', '_', 'g')),
+					'([.+*?()\[\]{}|\\^$])',
+					'\\\1',
+					'g'
+				) AS display_handle
+			FROM channels c
+			INNER JOIN channel_members cm ON cm.channel_id = c.id
+			INNER JOIN users u ON u.id = cm.user_id
+			WHERE c.id = $1
+			  AND c.type NOT IN ('saved', 'saved_global')
+			  AND u.id <> $2
+		)
+		SELECT id
+		FROM member_handles
+		WHERE (email_handle <> '' AND $3 ~* ('(^|[^A-Za-z0-9_])@' || email_handle || '([^A-Za-z0-9_.-]|$)'))
+		   OR (display_handle <> '' AND $3 ~* ('(^|[^A-Za-z0-9_])@' || display_handle || '([^A-Za-z0-9_.-]|$)'))
+		ORDER BY id`
+
+	rows, err := r.db.Query(ctx, query, channelID, authorID, content)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: resolve mentions: %w", err)
+	}
+	defer rows.Close()
+
+	mentions := make([]uuid.UUID, 0)
+	for rows.Next() {
+		var userID uuid.UUID
+		if err := rows.Scan(&userID); err != nil {
+			return nil, fmt.Errorf("postgres: resolve mentions scan: %w", err)
+		}
+		mentions = append(mentions, userID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: resolve mentions rows: %w", err)
+	}
+
+	return mentions, nil
+}
+
+// ResolveMentionsByMessageIDs returns resolved mention user IDs for persisted
+// messages in one batch. It intentionally mirrors ResolveMentions/ListMentions
+// so reload/history reads expose the same transient Message.Mentions contract
+// as mutation responses and realtime events.
+func (r *MessageRepo) ResolveMentionsByMessageIDs(
+	ctx context.Context,
+	messageIDs []uuid.UUID,
+) (map[uuid.UUID][]uuid.UUID, error) {
+	mentionsByMessageID := make(map[uuid.UUID][]uuid.UUID, len(messageIDs))
+	if len(messageIDs) == 0 {
+		return mentionsByMessageID, nil
+	}
+
+	query := `
+		WITH target_messages AS (
+			SELECT id, channel_id, user_id, content
+			FROM messages
+			WHERE id = ANY($1)
+			  AND deleted_at IS NULL
+			  AND POSITION('@' IN content) > 0
+		),
+		member_handles AS (
+			SELECT m.id AS message_id,
+				u.id AS user_id,
+				m.content,
+				regexp_replace(
+					LOWER(SPLIT_PART(u.email, '@', 1)),
+					'([.+*?()\[\]{}|\\^$])',
+					'\\\1',
+					'g'
+				) AS email_handle,
+				regexp_replace(
+					LOWER(regexp_replace(COALESCE(u.display_name, ''), '\s+', '_', 'g')),
+					'([.+*?()\[\]{}|\\^$])',
+					'\\\1',
+					'g'
+				) AS display_handle
+			FROM target_messages m
+			INNER JOIN channels c ON c.id = m.channel_id
+			INNER JOIN channel_members cm ON cm.channel_id = c.id
+			INNER JOIN users u ON u.id = cm.user_id
+			WHERE c.type NOT IN ('saved', 'saved_global')
+			  AND u.id <> m.user_id
+		)
+		SELECT message_id, user_id
+		FROM member_handles
+		WHERE (email_handle <> '' AND content ~* ('(^|[^A-Za-z0-9_])@' || email_handle || '([^A-Za-z0-9_.-]|$)'))
+		   OR (display_handle <> '' AND content ~* ('(^|[^A-Za-z0-9_])@' || display_handle || '([^A-Za-z0-9_.-]|$)'))
+		ORDER BY message_id, user_id`
+
+	rows, err := r.db.Query(ctx, query, messageIDs)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: resolve mentions by message ids: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var messageID uuid.UUID
+		var userID uuid.UUID
+		if err := rows.Scan(&messageID, &userID); err != nil {
+			return nil, fmt.Errorf("postgres: resolve mentions by message ids scan: %w", err)
+		}
+		mentionsByMessageID[messageID] = append(mentionsByMessageID[messageID], userID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: resolve mentions by message ids rows: %w", err)
+	}
+
+	return mentionsByMessageID, nil
 }
 
 // --- Reaction methods ---

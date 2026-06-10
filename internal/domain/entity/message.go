@@ -67,6 +67,7 @@ type Message struct {
 	// Aggregated fields (populated by queries, not stored directly).
 	ReplyCount  int          `json:"reply_count,omitempty"`
 	Reactions   []Reaction   `json:"reactions,omitempty"`
+	Mentions    []uuid.UUID  `json:"mentions"`
 	Attachments []Attachment `json:"attachments,omitempty"`
 	User        *User        `json:"user,omitempty"`
 

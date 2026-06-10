@@ -672,15 +672,14 @@ func (s *Service) RefreshToken(ctx context.Context, refreshToken string) (*Login
 		// have just rotated this token away. Within the grace window, replay the
 		// successor instead of logging the user out across every tab.
 		if errors.Is(err, ErrRefreshTokenNotFound) {
-			result, graceErr := s.replayRotatedRefresh(ctx, refreshToken)
+			result, graceErr := s.graceReplay(ctx, refreshToken)
 			if graceErr == nil {
 				return result, nil
 			}
-			// ErrNoRotationGrace is the expected "no live grace" path; anything
-			// else (Redis failure, internal error) is surfaced so a transient
-			// infra problem on the replay path is not masked as a routine 401.
+			// Anything other than "no live grace" (deactivated account, Redis
+			// failure) is surfaced with its real status instead of masked as 401.
 			if !errors.Is(graceErr, ErrNoRotationGrace) {
-				slog.WarnContext(ctx, "refresh token grace replay failed", "error", graceErr)
+				return nil, graceErr
 			}
 		}
 		slog.WarnContext(ctx, "refresh token validation failed", "error", err)
@@ -713,12 +712,12 @@ func (s *Service) RefreshToken(ctx context.Context, refreshToken string) (*Login
 	newRefreshToken, err := s.sessions.RotateRefreshToken(ctx, session.ID, hashToken(refreshToken))
 	if err != nil {
 		if errors.Is(err, ErrRotationSuperseded) {
-			result, graceErr := s.replayRotatedRefresh(ctx, refreshToken)
+			result, graceErr := s.graceReplay(ctx, refreshToken)
 			if graceErr == nil {
 				return result, nil
 			}
 			if !errors.Is(graceErr, ErrNoRotationGrace) {
-				slog.WarnContext(ctx, "refresh token grace replay failed after superseded rotation", "error", graceErr)
+				return nil, graceErr
 			}
 			return nil, cerrors.Unauthorized("invalid refresh token")
 		}
@@ -740,6 +739,22 @@ func (s *Service) RefreshToken(ctx context.Context, refreshToken string) (*Login
 		SessionID:    session.ID,
 		ExpiresIn:    int(s.accessTTL.Seconds()),
 	}, nil
+}
+
+// graceReplay wraps replayRotatedRefresh with consistent logging. It returns
+// (result, nil) on success, (nil, ErrNoRotationGrace) for the expected "no live
+// grace" case so callers fall through to their 401, and (nil, err) verbatim for
+// any real failure (deactivated account, Redis error) so it keeps its true
+// status instead of being masked as an invalid-token 401.
+func (s *Service) graceReplay(ctx context.Context, refreshToken string) (*LoginResult, error) {
+	result, err := s.replayRotatedRefresh(ctx, refreshToken)
+	if err == nil {
+		return result, nil
+	}
+	if !errors.Is(err, ErrNoRotationGrace) {
+		slog.WarnContext(ctx, "refresh token grace replay failed", "error", err)
+	}
+	return nil, err
 }
 
 // replayRotatedRefresh tolerates the multi-tab rotation race: when a refresh

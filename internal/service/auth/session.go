@@ -534,6 +534,11 @@ func (sm *SessionManager) ReplayRotation(ctx context.Context, refreshToken strin
 		if err := json.Unmarshal([]byte(nextData), &next); err != nil {
 			return nil, "", fmt.Errorf("unmarshal rotation grace chain: %w", err)
 		}
+		// Defense-in-depth: never cross session boundaries while following the
+		// chain (every hop must belong to the session we validated).
+		if next.SessionID != record.SessionID {
+			break
+		}
 		successor = next.NewToken
 	}
 

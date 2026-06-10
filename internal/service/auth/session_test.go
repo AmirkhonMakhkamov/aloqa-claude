@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,41 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 )
+
+func TestRotateRefreshTokenRejectsSupersededRotation(t *testing.T) {
+	ctx := context.Background()
+	sm, _ := newTestSessionManager(t)
+
+	session, token, err := sm.Create(ctx, "user-1", "ua", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	oldHash := hashToken(token)
+
+	// First rotation with the validated hash wins.
+	newToken1, err := sm.RotateRefreshToken(ctx, session.ID, oldHash)
+	if err != nil {
+		t.Fatalf("first RotateRefreshToken returned error: %v", err)
+	}
+	if newToken1 == token {
+		t.Fatalf("expected a rotated token")
+	}
+
+	// A second rotation presenting the same (now consumed) hash is superseded —
+	// the atomic CAS prevents a silent double-rotation.
+	if _, err := sm.RotateRefreshToken(ctx, session.ID, oldHash); !errors.Is(err, ErrRotationSuperseded) {
+		t.Fatalf("second RotateRefreshToken err = %v, want ErrRotationSuperseded", err)
+	}
+
+	// The grace record for the consumed token resolves to the winner's successor.
+	_, successor, err := sm.ReplayRotation(ctx, token)
+	if err != nil {
+		t.Fatalf("ReplayRotation returned error: %v", err)
+	}
+	if successor != newToken1 {
+		t.Fatalf("grace successor = %q, want %q", successor, newToken1)
+	}
+}
 
 func TestSessionBelongsToUser(t *testing.T) {
 	ctx := context.Background()

@@ -52,6 +52,11 @@ var ErrRefreshTokenNotFound = errors.New("refresh token not found or expired")
 // no live grace record (it was never rotated, or the grace window has elapsed).
 var ErrNoRotationGrace = errors.New("no rotation grace for refresh token")
 
+// ErrRotationSuperseded is returned by RotateRefreshToken when a concurrent
+// refresh already rotated the token away (the optimistic CAS lost). The caller
+// should replay the winner's successor via ReplayRotation rather than 401.
+var ErrRotationSuperseded = errors.New("refresh token rotation superseded")
+
 // rotationGraceRecord stores, for a recently-rotated token hash, the successor
 // token to hand back during the grace window.
 //
@@ -358,64 +363,103 @@ func (sm *SessionManager) ValidateRefreshToken(ctx context.Context, refreshToken
 	return storable.toSession(), nil
 }
 
-// RotateRefreshToken replaces the refresh token on an existing session.
-// Returns the new opaque refresh token.
-func (sm *SessionManager) RotateRefreshToken(ctx context.Context, sessionID string) (string, error) {
+// RotateRefreshToken atomically replaces the refresh token on a session and
+// returns the new opaque token. expectedOldHash is the hash of the token the
+// caller validated; rotation only proceeds while refresh:<expectedOldHash> still
+// maps to this session. Two concurrent callers that both validated the same
+// token therefore cannot both rotate — the loser gets ErrRotationSuperseded and
+// the caller falls back to a grace replay of the winner's successor.
+//
+// Atomicity comes from an optimistic WATCH on refresh:<expectedOldHash> plus a
+// MULTI/EXEC pipeline: if another client consumes that key between our read and
+// our commit, EXEC fails and we report ErrRotationSuperseded. The watched key is
+// the refresh key (not the session key) so background LastActiveAt touches do
+// not spuriously abort the rotation. The grace breadcrumb is written inside the
+// same transaction as the delete, so a concurrent loser always finds it.
+func (sm *SessionManager) RotateRefreshToken(ctx context.Context, sessionID, expectedOldHash string) (string, error) {
 	ctx, cancel := sm.operationCtx(ctx)
 	defer cancel()
 
-	data, err := sm.rdb.Get(ctx, sessionKey(sessionID)).Result()
-	if err != nil {
-		return "", fmt.Errorf("lookup session: %w", err)
-	}
+	oldRefreshKey := refreshKey(expectedOldHash)
+	var newToken string
 
-	var storable sessionStorable
-	if err := json.Unmarshal([]byte(data), &storable); err != nil {
-		return "", fmt.Errorf("unmarshal session: %w", err)
-	}
-	oldHash := storable.RefreshTokenHash
+	txf := func(tx *redis.Tx) error {
+		owner, err := tx.Get(ctx, oldRefreshKey).Result()
+		if err == redis.Nil {
+			return ErrRotationSuperseded
+		}
+		if err != nil {
+			return fmt.Errorf("lookup refresh token: %w", err)
+		}
+		if owner != sessionID {
+			return ErrRotationSuperseded
+		}
 
-	// Generate new refresh token.
-	newToken, newHash, err := generateRefreshToken()
-	if err != nil {
-		return "", fmt.Errorf("generate new refresh token: %w", err)
-	}
+		data, err := tx.Get(ctx, sessionKey(sessionID)).Result()
+		if err == redis.Nil {
+			return ErrRotationSuperseded
+		}
+		if err != nil {
+			return fmt.Errorf("lookup session: %w", err)
+		}
 
-	storable.RefreshTokenHash = newHash
-	storable.LastActiveAt = time.Now()
+		var storable sessionStorable
+		if err := json.Unmarshal([]byte(data), &storable); err != nil {
+			return fmt.Errorf("unmarshal session: %w", err)
+		}
 
-	updated, err := json.Marshal(storable)
-	if err != nil {
-		return "", fmt.Errorf("marshal session: %w", err)
-	}
+		ttl := time.Until(storable.ExpiresAt)
+		if ttl <= 0 {
+			return fmt.Errorf("session expired")
+		}
 
-	ttl := time.Until(storable.ExpiresAt)
-	if ttl <= 0 {
-		return "", fmt.Errorf("session expired")
-	}
+		token, newHash, err := generateRefreshToken()
+		if err != nil {
+			return fmt.Errorf("generate new refresh token: %w", err)
+		}
 
-	// A plain pipeline is not a transaction, so other clients' commands can
-	// interleave between ours. Write the grace breadcrumb and the new token
-	// BEFORE deleting the old one, so there is never a moment where the old
-	// refresh key is gone but neither the new key nor the grace record resolves
-	// — that gap would 401 a concurrent loser, the exact logout being fixed.
-	pipe := sm.rdb.Pipeline()
-	if sm.rotationGrace > 0 {
+		storable.RefreshTokenHash = newHash
+		storable.LastActiveAt = time.Now()
+		updated, err := json.Marshal(storable)
+		if err != nil {
+			return fmt.Errorf("marshal session: %w", err)
+		}
+
+		var graceData []byte
 		graceTTL := sm.rotationGrace
-		if graceTTL > ttl {
-			graceTTL = ttl
+		if sm.rotationGrace > 0 {
+			if graceTTL > ttl {
+				graceTTL = ttl
+			}
+			graceData, err = json.Marshal(rotationGraceRecord{SessionID: sessionID, NewToken: token})
+			if err != nil {
+				return fmt.Errorf("marshal rotation grace: %w", err)
+			}
 		}
-		graceData, marshalErr := json.Marshal(rotationGraceRecord{SessionID: sessionID, NewToken: newToken})
-		if marshalErr != nil {
-			return "", fmt.Errorf("marshal rotation grace: %w", marshalErr)
+
+		_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			if sm.rotationGrace > 0 {
+				pipe.Set(ctx, graceKey(expectedOldHash), graceData, graceTTL)
+			}
+			pipe.Set(ctx, sessionKey(sessionID), updated, ttl)
+			pipe.Set(ctx, refreshKey(newHash), sessionID, ttl)
+			pipe.Del(ctx, oldRefreshKey)
+			return nil
+		})
+		if err != nil {
+			return err
 		}
-		pipe.Set(ctx, graceKey(oldHash), graceData, graceTTL)
+
+		newToken = token
+		return nil
 	}
-	pipe.Set(ctx, sessionKey(sessionID), updated, ttl)
-	pipe.Set(ctx, refreshKey(newHash), sessionID, ttl)
-	pipe.Del(ctx, refreshKey(oldHash))
-	if _, err := pipe.Exec(ctx); err != nil {
-		return "", fmt.Errorf("rotate refresh token in redis: %w", err)
+
+	if err := sm.rdb.Watch(ctx, txf, oldRefreshKey); err != nil {
+		// EXEC aborted because a concurrent rotation consumed the token first.
+		if errors.Is(err, redis.TxFailedErr) {
+			return "", ErrRotationSuperseded
+		}
+		return "", err
 	}
 
 	return newToken, nil

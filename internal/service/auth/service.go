@@ -706,9 +706,22 @@ func (s *Service) RefreshToken(ctx context.Context, refreshToken string) (*Login
 		return nil, cerrors.Forbidden("account is not active")
 	}
 
-	// Rotate the refresh token on the existing session.
-	newRefreshToken, err := s.sessions.RotateRefreshToken(ctx, session.ID)
+	// Rotate the refresh token on the existing session. The rotation is an
+	// atomic CAS on the presented token, so a concurrent refresh that already
+	// rotated it leaves us superseded — fall back to replaying that winner's
+	// successor instead of erroring (or double-rotating).
+	newRefreshToken, err := s.sessions.RotateRefreshToken(ctx, session.ID, hashToken(refreshToken))
 	if err != nil {
+		if errors.Is(err, ErrRotationSuperseded) {
+			result, graceErr := s.replayRotatedRefresh(ctx, refreshToken)
+			if graceErr == nil {
+				return result, nil
+			}
+			if !errors.Is(graceErr, ErrNoRotationGrace) {
+				slog.WarnContext(ctx, "refresh token grace replay failed after superseded rotation", "error", graceErr)
+			}
+			return nil, cerrors.Unauthorized("invalid refresh token")
+		}
 		slog.ErrorContext(ctx, "failed to rotate refresh token", "session_id", session.ID, "error", err)
 		return nil, cerrors.Internal("failed to rotate refresh token", err)
 	}

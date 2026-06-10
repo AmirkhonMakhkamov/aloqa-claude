@@ -24,9 +24,23 @@ import (
 // browser tabs, a retrying mobile client) routinely fire refresh in lockstep;
 // the loser would otherwise present an already-consumed token and be logged out,
 // taking the shared session down with it. Within this window the loser converges
-// on the same successor instead. Kept short to bound the reuse window — reuse
-// after it elapses is still rejected.
-const DefaultRotationGrace = 30 * time.Second
+// on the same successor instead.
+//
+// Trade-off: this deliberately widens the reuse window. Before the grace, a
+// replay of a consumed token returned a hard 401 (the token hash was already
+// deleted); within the grace it now returns the live successor + a fresh access
+// token for up to this duration. Kept short to bound that exposure; reuse after
+// it elapses is rejected again. maxRotationGrace caps any misconfiguration.
+const DefaultRotationGrace = 10 * time.Second
+
+// maxRotationGrace is a defensive ceiling so a misconfigured SetRotationGrace
+// cannot widen the reuse window toward the (much longer) session TTL.
+const maxRotationGrace = 2 * time.Minute
+
+// maxGraceChainHops bounds how far ReplayRotation follows a chain of successive
+// rotations to reach the live token (rapid back-to-back refreshes within the
+// grace window). Bounded so a corrupted/looping chain cannot spin.
+const maxGraceChainHops = 8
 
 // ErrRefreshTokenNotFound is returned by ValidateRefreshToken when the presented
 // refresh token hash is absent from Redis — typically because a concurrent
@@ -39,11 +53,14 @@ var ErrRefreshTokenNotFound = errors.New("refresh token not found or expired")
 var ErrNoRotationGrace = errors.New("no rotation grace for refresh token")
 
 // rotationGraceRecord stores, for a recently-rotated token hash, the successor
-// token to hand back during the grace window. The plaintext successor lives in
-// Redis only for rotationGrace (default 30s). An attacker would need both Redis
-// read access and the consumed token's hash to use it, and could already replay
-// the consumed token itself within the same window — so this does not weaken the
-// model beyond the chosen window.
+// token to hand back during the grace window.
+//
+// SECURITY: the successor is stored in plaintext (the rest of the system stores
+// only hashes). It lives in Redis for at most rotationGrace, and only Redis-read
+// access combined with the consumed token's hash could surface it. This is a
+// deliberate, bounded exposure accepted to stop the multi-tab logout; keep
+// DefaultRotationGrace small. If refresh-token reuse detection is added later,
+// the grace replay path must be exempted explicitly.
 type rotationGraceRecord struct {
 	SessionID string `json:"session_id"`
 	NewToken  string `json:"new_token"`
@@ -115,10 +132,17 @@ func NewSessionManager(rdb *redis.Client, maxSessions int, sessionTTL time.Durat
 
 // SetRotationGrace overrides how long a rotated token's successor stays
 // replayable. A non-positive value disables the grace entirely (every consumed
-// token is an immediate 401).
+// token is an immediate 401); values above maxRotationGrace are clamped. Call
+// only during construction / before serving traffic — rotationGrace is read
+// without synchronization on the hot path.
 func (sm *SessionManager) SetRotationGrace(grace time.Duration) {
 	if sm == nil {
 		return
+	}
+	if grace > maxRotationGrace {
+		slog.Warn("rotation grace exceeds maximum; clamping",
+			"requested", grace, "max", maxRotationGrace)
+		grace = maxRotationGrace
 	}
 	sm.rotationGrace = grace
 }
@@ -370,13 +394,12 @@ func (sm *SessionManager) RotateRefreshToken(ctx context.Context, sessionID stri
 		return "", fmt.Errorf("session expired")
 	}
 
+	// A plain pipeline is not a transaction, so other clients' commands can
+	// interleave between ours. Write the grace breadcrumb and the new token
+	// BEFORE deleting the old one, so there is never a moment where the old
+	// refresh key is gone but neither the new key nor the grace record resolves
+	// — that gap would 401 a concurrent loser, the exact logout being fixed.
 	pipe := sm.rdb.Pipeline()
-	pipe.Del(ctx, refreshKey(oldHash))
-	pipe.Set(ctx, sessionKey(sessionID), updated, ttl)
-	pipe.Set(ctx, refreshKey(newHash), sessionID, ttl)
-	// Leave a short-lived breadcrumb so a concurrent client that still holds the
-	// now-consumed token can be handed this same successor instead of being
-	// logged out (see ReplayRotation). Bounded by min(rotationGrace, ttl).
 	if sm.rotationGrace > 0 {
 		graceTTL := sm.rotationGrace
 		if graceTTL > ttl {
@@ -388,6 +411,9 @@ func (sm *SessionManager) RotateRefreshToken(ctx context.Context, sessionID stri
 		}
 		pipe.Set(ctx, graceKey(oldHash), graceData, graceTTL)
 	}
+	pipe.Set(ctx, sessionKey(sessionID), updated, ttl)
+	pipe.Set(ctx, refreshKey(newHash), sessionID, ttl)
+	pipe.Del(ctx, refreshKey(oldHash))
 	if _, err := pipe.Exec(ctx); err != nil {
 		return "", fmt.Errorf("rotate refresh token in redis: %w", err)
 	}
@@ -397,18 +423,20 @@ func (sm *SessionManager) RotateRefreshToken(ctx context.Context, sessionID stri
 
 // ReplayRotation handles a refresh token that a concurrent refresh already
 // rotated away. If the consumed token has a live grace record, it returns the
-// session plus the successor token issued to the winning caller, so both
-// converge on the same token instead of one being logged out. The grace record
-// is left in place (it expires on its own) so several concurrent losers all
-// converge. Returns ErrNoRotationGrace when there is no live record or the
-// session is gone.
+// session plus the live successor token, so the straggler converges on the
+// current token instead of being logged out. Grace records are left in place
+// (they expire on their own) so several concurrent losers all converge.
+//
+// When rotations happen back-to-back within the grace window, the recorded
+// successor may itself have been rotated away; ReplayRotation then follows the
+// grace chain (bounded by maxGraceChainHops) until it reaches a successor whose
+// refresh key is still live. Returns ErrNoRotationGrace when there is no live
+// record, the session is gone, or the chain dead-ends without a live successor.
 func (sm *SessionManager) ReplayRotation(ctx context.Context, refreshToken string) (*Session, string, error) {
 	ctx, cancel := sm.operationCtx(ctx)
 	defer cancel()
 
-	tokenHash := hashToken(refreshToken)
-
-	data, err := sm.rdb.Get(ctx, graceKey(tokenHash)).Result()
+	data, err := sm.rdb.Get(ctx, graceKey(hashToken(refreshToken))).Result()
 	if err == redis.Nil {
 		return nil, "", ErrNoRotationGrace
 	}
@@ -438,7 +466,34 @@ func (sm *SessionManager) ReplayRotation(ctx context.Context, refreshToken strin
 		return nil, "", ErrNoRotationGrace
 	}
 
-	return storable.toSession(), record.NewToken, nil
+	// Follow the grace chain to the live successor: a successor recorded here may
+	// itself have been rotated away by a later refresh within the grace window.
+	successor := record.NewToken
+	for hop := 0; hop < maxGraceChainHops; hop++ {
+		sessionID, err := sm.rdb.Get(ctx, refreshKey(hashToken(successor))).Result()
+		if err == nil && sessionID == record.SessionID {
+			return storable.toSession(), successor, nil
+		}
+		if err != nil && err != redis.Nil {
+			return nil, "", fmt.Errorf("lookup successor token: %w", err)
+		}
+
+		// Successor is no longer live; hop to its own successor if recorded.
+		nextData, err := sm.rdb.Get(ctx, graceKey(hashToken(successor))).Result()
+		if err == redis.Nil {
+			break
+		}
+		if err != nil {
+			return nil, "", fmt.Errorf("follow rotation grace chain: %w", err)
+		}
+		var next rotationGraceRecord
+		if err := json.Unmarshal([]byte(nextData), &next); err != nil {
+			return nil, "", fmt.Errorf("unmarshal rotation grace chain: %w", err)
+		}
+		successor = next.NewToken
+	}
+
+	return nil, "", ErrNoRotationGrace
 }
 
 // Revoke deletes a session and its associated refresh token mapping.

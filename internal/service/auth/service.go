@@ -672,8 +672,15 @@ func (s *Service) RefreshToken(ctx context.Context, refreshToken string) (*Login
 		// have just rotated this token away. Within the grace window, replay the
 		// successor instead of logging the user out across every tab.
 		if errors.Is(err, ErrRefreshTokenNotFound) {
-			if result, graceErr := s.replayRotatedRefresh(ctx, refreshToken); graceErr == nil {
+			result, graceErr := s.replayRotatedRefresh(ctx, refreshToken)
+			if graceErr == nil {
 				return result, nil
+			}
+			// ErrNoRotationGrace is the expected "no live grace" path; anything
+			// else (Redis failure, internal error) is surfaced so a transient
+			// infra problem on the replay path is not masked as a routine 401.
+			if !errors.Is(graceErr, ErrNoRotationGrace) {
+				slog.WarnContext(ctx, "refresh token grace replay failed", "error", graceErr)
 			}
 		}
 		slog.WarnContext(ctx, "refresh token validation failed", "error", err)

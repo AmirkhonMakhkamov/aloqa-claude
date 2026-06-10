@@ -459,6 +459,8 @@ func (s *fakeMoveCalHTTPScope) Workspaces() repository.WorkspaceRepository { ret
 
 func (s *fakeMoveCalHTTPScope) Messages() repository.MessageRepository { return nil }
 
+func (s *fakeMoveCalHTTPScope) Files() repository.FileRepository { return nil }
+
 func (s *fakeMoveCalHTTPScope) Channels() repository.ChannelRepository { return nil }
 
 func (s *fakeMoveCalHTTPScope) ChannelGrants() repository.ChannelAccessGrantRepository { return nil }

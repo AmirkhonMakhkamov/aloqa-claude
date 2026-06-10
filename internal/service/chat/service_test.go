@@ -2906,6 +2906,7 @@ type fakeChatTxScope struct {
 func (s *fakeChatTxScope) Users() repository.UserRepository                       { return nil }
 func (s *fakeChatTxScope) Workspaces() repository.WorkspaceRepository             { return nil }
 func (s *fakeChatTxScope) Messages() repository.MessageRepository                 { return s.messages }
+func (s *fakeChatTxScope) Files() repository.FileRepository                       { return nil }
 func (s *fakeChatTxScope) Channels() repository.ChannelRepository                 { return s.channels }
 func (s *fakeChatTxScope) ChannelGrants() repository.ChannelAccessGrantRepository { return nil }
 func (s *fakeChatTxScope) Calls() repository.CallRepository                       { return nil }

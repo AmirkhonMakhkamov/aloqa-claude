@@ -9,7 +9,11 @@ import type {
   CallParticipant,
   CallSettings,
   Channel,
+  FileDownloadURL,
+  FileListResponse,
+  FileStorageUsage,
   GuestInvite,
+  LibraryFile,
   Message,
   Notification,
   Paginated,
@@ -89,10 +93,11 @@ export const messagesApi = {
       `/api/v1/workspaces/${wsId}/channels/${chId}/messages`,
       { query: { cursor, limit } },
     ),
-  send: (wsId: UUID, chId: UUID, content: string, parent_id?: UUID) =>
+  send: (wsId: UUID, chId: UUID, content: string, parent_id?: UUID, file_ids?: UUID[]) =>
     http.post<Message>(`/api/v1/workspaces/${wsId}/channels/${chId}/messages`, {
       content,
       parent_id,
+      file_ids,
     }),
   edit: (wsId: UUID, chId: UUID, msgId: UUID, content: string) =>
     http.put<Message>(`/api/v1/workspaces/${wsId}/channels/${chId}/messages/${msgId}`, {
@@ -122,6 +127,40 @@ export const messagesApi = {
 
 // ── Files ─────────────────────────────────────────────────────────────
 export const filesApi = {
+  listLibrary: (
+    wsId: UUID,
+    opts: {
+      q?: string;
+      sort?: "date" | "name" | "size";
+      dir?: "asc" | "desc";
+      scope?: "all" | "mine" | "shared" | "favorites";
+      chat_id?: UUID;
+      limit?: number;
+      cursor?: string;
+    } = {},
+  ) =>
+    http.get<FileListResponse>("/api/v1/users/me/files", {
+      query: { workspace_id: wsId, ...opts },
+    }),
+  storage: () => http.get<FileStorageUsage>("/api/v1/users/me/storage"),
+  uploadLibrary: async (workspaceId: UUID, file: File, contextId?: UUID) => {
+    const fd = new FormData();
+    fd.set("file", file);
+    fd.set("workspace_id", workspaceId);
+    if (contextId) fd.set("context_id", contextId);
+    return http.post<LibraryFile>("/api/v1/files/upload", fd);
+  },
+  url: (fileId: UUID, disposition: "attachment" | "inline" = "attachment") =>
+    http.get<FileDownloadURL>(`/api/v1/files/${fileId}`, { query: { disposition } }),
+  favorite: (fileId: UUID) => http.put<void>(`/api/v1/files/${fileId}/favorite`),
+  unfavorite: (fileId: UUID) => http.del<void>(`/api/v1/files/${fileId}/favorite`),
+  deleteLibrary: (fileId: UUID) => http.del<void>(`/api/v1/files/${fileId}`),
+  share: (fileId: UUID, targetId: UUID, type: "channel" | "user" = "channel") =>
+    http.post<void>(`/api/v1/files/${fileId}/shares`, { type, target_id: targetId }),
+  revokeShare: (fileId: UUID, targetId: UUID, type: "channel" | "user" = "channel") =>
+    http.del<void>(`/api/v1/files/${fileId}/shares`, {
+      body: { type, target_id: targetId },
+    }),
   upload: async (wsId: UUID, chId: UUID, msgId: UUID, file: File) => {
     const fd = new FormData();
     fd.set("file", file);

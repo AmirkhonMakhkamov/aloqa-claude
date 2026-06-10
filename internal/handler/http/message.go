@@ -32,6 +32,7 @@ type sendMessageRequest struct {
 	QuotedMessageID *string                   `json:"quoted_message_id,omitempty"`
 	QuotedSnapshot  *chat.QuotedSnapshotInput `json:"quoted_snapshot,omitempty"`
 	ProfileShare    *profileShareRequest      `json:"profile_share,omitempty"`
+	FileIDs         []string                  `json:"file_ids,omitempty"`
 	// Optional client-generated id (the optimistic message id). Echoed back on
 	// the message.created event so the client can dedup by exact id (ALK-440).
 	ClientMessageID *string `json:"client_message_id,omitempty"`
@@ -95,6 +96,11 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	fileIDs, err := parseMessageFileIDs(req.FileIDs)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
 
 	userID := middleware.UserIDFromContext(r.Context())
 
@@ -116,6 +122,7 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 		QuotedMessageID: quotedMessageID,
 		QuotedSnapshot:  quotedSnapshot,
 		ProfileShare:    profileShare,
+		FileIDs:         fileIDs,
 		ClientMessageID: clientMessageID,
 	})
 	if err != nil {
@@ -124,6 +131,26 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeCreated(w, msg)
+}
+
+func parseMessageFileIDs(values []string) ([]uuid.UUID, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	parsed := make([]uuid.UUID, 0, len(values))
+	seen := make(map[uuid.UUID]struct{}, len(values))
+	for _, value := range values {
+		fileID, err := id.Parse(value)
+		if err != nil {
+			return nil, cerrors.InvalidInput("file_ids must contain valid ids")
+		}
+		if _, ok := seen[fileID]; ok {
+			continue
+		}
+		seen[fileID] = struct{}{}
+		parsed = append(parsed, fileID)
+	}
+	return parsed, nil
 }
 
 func parseProfileShareInput(input *profileShareRequest) (*chat.ProfileShareInput, error) {

@@ -2778,6 +2778,7 @@ type fakeCalendarTxScope struct {
 func (s *fakeCalendarTxScope) Users() repository.UserRepository                       { return nil }
 func (s *fakeCalendarTxScope) Workspaces() repository.WorkspaceRepository             { return nil }
 func (s *fakeCalendarTxScope) Messages() repository.MessageRepository                 { return nil }
+func (s *fakeCalendarTxScope) Files() repository.FileRepository                       { return nil }
 func (s *fakeCalendarTxScope) Channels() repository.ChannelRepository                 { return nil }
 func (s *fakeCalendarTxScope) ChannelGrants() repository.ChannelAccessGrantRepository { return nil }
 func (s *fakeCalendarTxScope) Calls() repository.CallRepository                       { return s.calls }

@@ -83,6 +83,7 @@ type Directory struct {
 type Service struct {
 	channels      repository.ChannelRepository
 	messages      repository.MessageRepository
+	files         repository.FileRepository
 	members       repository.WorkspaceRepository
 	channelGrants repository.ChannelAccessGrantRepository
 	readStates    repository.ChannelAccessStateRepository
@@ -157,6 +158,10 @@ func requestWorkspaceIDForMessage(ctx context.Context, ch *entity.Channel) (uuid
 
 func (s *Service) SetChannelAccessStates(states repository.ChannelAccessStateRepository) {
 	s.readStates = states
+}
+
+func (s *Service) SetFileRepository(files repository.FileRepository) {
+	s.files = files
 }
 
 func (s *Service) SetTransactionManager(manager txscope.Manager) {
@@ -311,6 +316,7 @@ type SendMessageInput struct {
 	QuotedMessageID *uuid.UUID
 	QuotedSnapshot  *ParsedQuotedSnapshotInput
 	ProfileShare    *ProfileShareInput
+	FileIDs         []uuid.UUID
 	// Optional client-supplied id, echoed on the created message for dedup (ALK-440).
 	ClientMessageID *string
 }
@@ -1475,7 +1481,7 @@ func (s *Service) SendMessage(
 	// (ForwardedFrom) OR a quoted snapshot (Share message flow — the source
 	// message becomes a quote and the author may omit their own text) OR a
 	// profile share card (ALK-708).
-	if (input.ForwardedFrom == nil || len(*input.ForwardedFrom) == 0) && input.QuotedSnapshot == nil && input.ProfileShare == nil && contentLen < 1 {
+	if (input.ForwardedFrom == nil || len(*input.ForwardedFrom) == 0) && input.QuotedSnapshot == nil && input.ProfileShare == nil && len(input.FileIDs) == 0 && contentLen < 1 {
 		return nil, cerrors.InvalidInput("content is required")
 	}
 	if contentLen > 40000 {
@@ -1556,6 +1562,7 @@ func (s *Service) SendMessage(
 		QuotedMessageID: input.QuotedMessageID,
 		QuotedSnapshot:  quotedSnapshot,
 		ProfileShare:    profileShare,
+		FileIDs:         append([]uuid.UUID(nil), input.FileIDs...),
 		CreatedAt:       now,
 		UpdatedAt:       now,
 		// Transient echo only — not a persisted column (see entity.Message).
@@ -1570,6 +1577,12 @@ func (s *Service) SendMessage(
 		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
 			if scope.Messages() == nil {
 				return cerrors.Unavailable("message transaction scope is not configured")
+			}
+			if err := s.shareMessageFilesTx(ctx, scope, msg.FileIDs, workspaceID, channelID, userID); err != nil {
+				return err
+			}
+			if err := s.hydrateMessageFilesTx(ctx, scope, msg); err != nil {
+				return err
 			}
 			if err := scope.Messages().Create(ctx, msg); err != nil {
 				return err
@@ -1586,7 +1599,14 @@ func (s *Service) SendMessage(
 			return nil, cerrors.Internal("failed to create message", err)
 		}
 	} else {
+		if err := s.shareMessageFiles(ctx, msg.FileIDs, workspaceID, channelID, userID); err != nil {
+			return nil, err
+		}
+		if err := s.hydrateMessageFilesForSend(ctx, msg); err != nil {
+			return nil, err
+		}
 		if err := s.messages.Create(ctx, msg); err != nil {
+			s.revokeMessageFileSharesBestEffort(ctx, msg.FileIDs, workspaceID, channelID, userID)
 			slog.ErrorContext(ctx, "failed to create message", "channel_id", channelID, "error", err)
 			return nil, cerrors.Internal("failed to create message", err)
 		}
@@ -1618,6 +1638,9 @@ func (s *Service) GetMessage(ctx context.Context, messageID, userID uuid.UUID) (
 	if err := s.hydrateMessageMentionsForRead(ctx, items); err != nil {
 		return nil, err
 	}
+	if err := s.hydrateMessageFiles(ctx, items); err != nil {
+		return nil, err
+	}
 	*msg = items[0]
 	return msg, nil
 }
@@ -1645,6 +1668,9 @@ func (s *Service) GetMessages(ctx context.Context, channelID, userID uuid.UUID, 
 	if err := s.hydrateMessageMentionsForRead(ctx, page.Items); err != nil {
 		return pagination.Page[entity.Message]{}, err
 	}
+	if err := s.hydrateMessageFiles(ctx, page.Items); err != nil {
+		return pagination.Page[entity.Message]{}, err
+	}
 	redactDeletedMessages(page.Items)
 	return page, nil
 }
@@ -1666,6 +1692,9 @@ func (s *Service) GetPinnedMessages(ctx context.Context, channelID, userID uuid.
 		return nil, err
 	}
 	if err := s.hydrateMessageMentionsForRead(ctx, items); err != nil {
+		return nil, err
+	}
+	if err := s.hydrateMessageFiles(ctx, items); err != nil {
 		return nil, err
 	}
 	return items, nil
@@ -1691,6 +1720,9 @@ func (s *Service) GetThreadReplies(ctx context.Context, parentID, userID uuid.UU
 		return pagination.Page[entity.Message]{}, err
 	}
 	if err := s.hydrateMessageMentionsForRead(ctx, page.Items); err != nil {
+		return pagination.Page[entity.Message]{}, err
+	}
+	if err := s.hydrateMessageFiles(ctx, page.Items); err != nil {
 		return pagination.Page[entity.Message]{}, err
 	}
 	redactDeletedMessages(page.Items)
@@ -2915,6 +2947,119 @@ func (s *Service) hydrateMessageReactions(ctx context.Context, items []entity.Me
 	return nil
 }
 
+func (s *Service) shareMessageFilesTx(ctx context.Context, scope txscope.Scope, fileIDs []uuid.UUID, workspaceID, channelID, userID uuid.UUID) error {
+	if len(fileIDs) == 0 {
+		return nil
+	}
+	if scope.Files() == nil {
+		return cerrors.Unavailable("file transaction scope is not configured")
+	}
+	for _, fileID := range fileIDs {
+		if fileID == uuid.Nil {
+			return cerrors.InvalidInput("file_ids must contain valid ids")
+		}
+		if err := scope.Files().ShareFile(ctx, fileID, repository.FileShareOptions{
+			TargetType:  entity.FileShareTargetChannel,
+			TargetID:    channelID,
+			WorkspaceID: workspaceID,
+			ActorID:     userID,
+			OwnerOnly:   false,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) shareMessageFiles(ctx context.Context, fileIDs []uuid.UUID, workspaceID, channelID, userID uuid.UUID) error {
+	if len(fileIDs) == 0 {
+		return nil
+	}
+	if s.files == nil {
+		return cerrors.Unavailable("file library is not configured")
+	}
+	for _, fileID := range fileIDs {
+		if fileID == uuid.Nil {
+			return cerrors.InvalidInput("file_ids must contain valid ids")
+		}
+		if err := s.files.ShareFile(ctx, fileID, repository.FileShareOptions{
+			TargetType:  entity.FileShareTargetChannel,
+			TargetID:    channelID,
+			WorkspaceID: workspaceID,
+			ActorID:     userID,
+			OwnerOnly:   false,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) revokeMessageFileSharesBestEffort(ctx context.Context, fileIDs []uuid.UUID, workspaceID, channelID, userID uuid.UUID) {
+	if len(fileIDs) == 0 || s.files == nil {
+		return
+	}
+	for _, fileID := range fileIDs {
+		if err := s.files.RevokeFileShare(ctx, fileID, repository.FileShareOptions{
+			TargetType:  entity.FileShareTargetChannel,
+			TargetID:    channelID,
+			WorkspaceID: workspaceID,
+			ActorID:     userID,
+			OwnerOnly:   false,
+		}); err != nil {
+			slog.WarnContext(ctx, "failed to revoke file share after message create failure", "file_id", fileID, "channel_id", channelID, "error", err)
+		}
+	}
+}
+
+func (s *Service) hydrateMessageFilesTx(ctx context.Context, scope txscope.Scope, msg *entity.Message) error {
+	if msg == nil || len(msg.FileIDs) == 0 {
+		return nil
+	}
+	if scope.Files() == nil {
+		return cerrors.Unavailable("file transaction scope is not configured")
+	}
+	files, err := scope.Files().ResolveMessageFiles(ctx, msg.FileIDs)
+	if err != nil {
+		return cerrors.Internal("failed to resolve message files", err)
+	}
+	msg.Files = files
+	return nil
+}
+
+func (s *Service) hydrateMessageFilesForSend(ctx context.Context, msg *entity.Message) error {
+	if msg == nil || len(msg.FileIDs) == 0 {
+		return nil
+	}
+	if s.files == nil {
+		return cerrors.Unavailable("file library is not configured")
+	}
+	files, err := s.files.ResolveMessageFiles(ctx, msg.FileIDs)
+	if err != nil {
+		return cerrors.Internal("failed to resolve message files", err)
+	}
+	msg.Files = files
+	return nil
+}
+
+func (s *Service) hydrateMessageFiles(ctx context.Context, items []entity.Message) error {
+	if s.files == nil {
+		return nil
+	}
+	for i := range items {
+		if items[i].DeletedAt != nil || len(items[i].FileIDs) == 0 {
+			items[i].Files = nil
+			continue
+		}
+		files, err := s.files.ResolveMessageFiles(ctx, items[i].FileIDs)
+		if err != nil {
+			return cerrors.Internal("failed to resolve message files", err)
+		}
+		items[i].Files = files
+	}
+	return nil
+}
+
 func (s *Service) hydrateMessageMentionsForRead(ctx context.Context, items []entity.Message) error {
 	resolver, ok := s.messages.(messageMentionBatchResolver)
 	if !ok {
@@ -2975,6 +3120,8 @@ func redactDeletedMessage(msg entity.Message) entity.Message {
 	msg.Reactions = nil
 	msg.Mentions = nil
 	msg.Attachments = nil
+	msg.FileIDs = nil
+	msg.Files = nil
 	return msg
 }
 

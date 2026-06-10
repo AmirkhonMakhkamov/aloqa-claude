@@ -1596,6 +1596,9 @@ func (s *Service) SendMessage(
 			return s.enqueueEventTx(ctx, scope, event.TypeMessageCreated, fmt.Sprintf("aloqa.ws.%s", workspaceID), workspaceID, channelID, userID, event.NewMessagePayload(msg, ch))
 		}); err != nil {
 			slog.ErrorContext(ctx, "failed to create message transaction", "channel_id", channelID, "error", err)
+			if appErr, ok := cerrors.AsAppError(err); ok {
+				return nil, appErr
+			}
 			return nil, cerrors.Internal("failed to create message", err)
 		}
 	} else {

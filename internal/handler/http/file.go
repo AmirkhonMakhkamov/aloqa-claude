@@ -3,10 +3,12 @@ package http
 import (
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -57,6 +59,33 @@ func libraryDisposition(requested string, file *entity.LibraryFile) string {
 		return "inline"
 	}
 	return "attachment"
+}
+
+func contentDispositionHeader(disposition, filename string) string {
+	if disposition != "inline" {
+		disposition = "attachment"
+	}
+	safeFilename := contentDispositionFilename(filename)
+	header := mime.FormatMediaType(disposition, map[string]string{"filename": safeFilename})
+	if header == "" {
+		return disposition + `; filename="download"`
+	}
+	return header
+}
+
+func contentDispositionFilename(filename string) string {
+	base := filepath.Base(strings.ReplaceAll(filename, "\\", "/"))
+	base = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, base)
+	base = strings.TrimSpace(base)
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		return "download"
+	}
+	return base
 }
 
 // FileHandler handles file upload and download HTTP endpoints.
@@ -188,7 +217,7 @@ func (h *FileHandler) DownloadLibraryContent(w http.ResponseWriter, r *http.Requ
 
 	disposition := libraryDisposition(r.URL.Query().Get("disposition"), file)
 	w.Header().Set("Content-Type", file.MimeType)
-	w.Header().Set("Content-Disposition", disposition+"; filename=\""+filepath.Base(file.Filename)+"\"")
+	w.Header().Set("Content-Disposition", contentDispositionHeader(disposition, file.Filename))
 	w.Header().Set("Content-Length", strconv.FormatInt(file.Size, 10))
 	w.Header().Set("Cache-Control", "private, max-age=300")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -402,9 +431,6 @@ func (h *FileHandler) Download(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Derive a safe filename for the Content-Disposition header.
-	filename := filepath.Base(key)
-
 	// Force binary content type for safety; override only for known-safe types.
 	contentType := "application/octet-stream"
 	if info.MimeType != "" {
@@ -412,7 +438,7 @@ func (h *FileHandler) Download(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
+	w.Header().Set("Content-Disposition", contentDispositionHeader("attachment", key))
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size, 10))
 	w.Header().Set("Cache-Control", "private, max-age=86400")
 	w.Header().Set("X-Content-Type-Options", "nosniff")

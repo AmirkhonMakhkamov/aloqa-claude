@@ -475,6 +475,79 @@ func hasCode(err error, code cerrors.Code) bool {
 	return ok && appErr.Code == code
 }
 
+func TestRefreshTokenToleratesConcurrentRotationRace(t *testing.T) {
+	ctx := context.Background()
+	env := newServiceSessionTestEnv(t)
+	env.addCredentialedUser(t, "race@test.dev", "Password123!", entity.UserStatusActive)
+
+	login, err := env.svc.Login(ctx, "race@test.dev", "Password123!", "ua", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("Login returned error: %v", err)
+	}
+	t0 := login.RefreshToken
+
+	// First refresh rotates T0 -> T1 (the tab that wins the race).
+	first, err := env.svc.RefreshToken(ctx, t0)
+	if err != nil {
+		t.Fatalf("first RefreshToken returned error: %v", err)
+	}
+	t1 := first.RefreshToken
+	if t1 == t0 {
+		t.Fatalf("expected refresh token to rotate")
+	}
+
+	// The lagging tab still holds the already-consumed T0. Within the grace
+	// window it must converge on the same successor instead of being rejected
+	// (the rejection is what logged users out across all tabs).
+	second, err := env.svc.RefreshToken(ctx, t0)
+	if err != nil {
+		t.Fatalf("second RefreshToken (rotation grace) returned error: %v", err)
+	}
+	if second.RefreshToken != t1 {
+		t.Fatalf("grace replay returned %q, want successor %q", second.RefreshToken, t1)
+	}
+	if second.SessionID != first.SessionID {
+		t.Fatalf("grace replay session id = %q, want %q", second.SessionID, first.SessionID)
+	}
+	if second.AccessToken == "" {
+		t.Fatalf("grace replay returned empty access token")
+	}
+
+	// The successor stays usable afterwards: the session was neither revoked
+	// nor clobbered by the grace replay.
+	third, err := env.svc.RefreshToken(ctx, t1)
+	if err != nil {
+		t.Fatalf("RefreshToken(successor) returned error: %v", err)
+	}
+	if third.RefreshToken == t1 {
+		t.Fatalf("expected successor to rotate on its own refresh")
+	}
+}
+
+func TestRefreshTokenRejectsConsumedTokenAfterGraceWindow(t *testing.T) {
+	ctx := context.Background()
+	env := newServiceSessionTestEnv(t)
+	env.addCredentialedUser(t, "grace@test.dev", "Password123!", entity.UserStatusActive)
+
+	login, err := env.svc.Login(ctx, "grace@test.dev", "Password123!", "ua", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("Login returned error: %v", err)
+	}
+	t0 := login.RefreshToken
+
+	if _, err := env.svc.RefreshToken(ctx, t0); err != nil {
+		t.Fatalf("first RefreshToken returned error: %v", err)
+	}
+
+	// Past the grace window a consumed token is a hard 401 again: the grace
+	// must not turn rotation into an unbounded reuse window.
+	env.redis.FastForward(DefaultRotationGrace + time.Second)
+
+	if _, err := env.svc.RefreshToken(ctx, t0); err == nil {
+		t.Fatalf("RefreshToken with consumed token after grace = nil error, want unauthorized")
+	}
+}
+
 type serviceSessionTestEnv struct {
 	svc   *Service
 	users *fakeUserRepo

@@ -19,6 +19,58 @@ import (
 	"aloqa/internal/platform/reliability"
 )
 
+// DefaultRotationGrace is how long a just-rotated refresh token's successor
+// remains replayable. Concurrent clients that share one refresh cookie (several
+// browser tabs, a retrying mobile client) routinely fire refresh in lockstep;
+// the loser would otherwise present an already-consumed token and be logged out,
+// taking the shared session down with it. Within this window the loser converges
+// on the same successor instead.
+//
+// Trade-off: this deliberately widens the reuse window. Before the grace, a
+// replay of a consumed token returned a hard 401 (the token hash was already
+// deleted); within the grace it now returns the live successor + a fresh access
+// token for up to this duration. Kept short to bound that exposure; reuse after
+// it elapses is rejected again. maxRotationGrace caps any misconfiguration.
+const DefaultRotationGrace = 10 * time.Second
+
+// maxRotationGrace is a defensive ceiling so a misconfigured SetRotationGrace
+// cannot widen the reuse window toward the (much longer) session TTL.
+const maxRotationGrace = 2 * time.Minute
+
+// maxGraceChainHops bounds how far ReplayRotation follows a chain of successive
+// rotations to reach the live token (rapid back-to-back refreshes within the
+// grace window). Bounded so a corrupted/looping chain cannot spin.
+const maxGraceChainHops = 8
+
+// ErrRefreshTokenNotFound is returned by ValidateRefreshToken when the presented
+// refresh token hash is absent from Redis — typically because a concurrent
+// refresh already rotated (consumed) it. Callers use errors.Is to detect this
+// case and attempt a rotation-grace replay.
+var ErrRefreshTokenNotFound = errors.New("refresh token not found or expired")
+
+// ErrNoRotationGrace is returned by ReplayRotation when the consumed token has
+// no live grace record (it was never rotated, or the grace window has elapsed).
+var ErrNoRotationGrace = errors.New("no rotation grace for refresh token")
+
+// ErrRotationSuperseded is returned by RotateRefreshToken when a concurrent
+// refresh already rotated the token away (the optimistic CAS lost). The caller
+// should replay the winner's successor via ReplayRotation rather than 401.
+var ErrRotationSuperseded = errors.New("refresh token rotation superseded")
+
+// rotationGraceRecord stores, for a recently-rotated token hash, the successor
+// token to hand back during the grace window.
+//
+// SECURITY: the successor is stored in plaintext (the rest of the system stores
+// only hashes). It lives in Redis for at most rotationGrace, and only Redis-read
+// access combined with the consumed token's hash could surface it. This is a
+// deliberate, bounded exposure accepted to stop the multi-tab logout; keep
+// DefaultRotationGrace small. If refresh-token reuse detection is added later,
+// the grace replay path must be exempted explicitly.
+type rotationGraceRecord struct {
+	SessionID string `json:"session_id"`
+	NewToken  string `json:"new_token"`
+}
+
 // Session represents an authenticated user session stored in Redis.
 type Session struct {
 	ID           string    `json:"id"`
@@ -57,11 +109,12 @@ func (s *sessionStorable) toSession() *Session {
 
 // SessionManager handles server-side session tracking in Redis.
 type SessionManager struct {
-	rdb         *redis.Client
-	maxSessions int
-	sessionTTL  time.Duration
-	notifier    SessionEventNotifier
-	opTimeout   time.Duration
+	rdb           *redis.Client
+	maxSessions   int
+	sessionTTL    time.Duration
+	rotationGrace time.Duration
+	notifier      SessionEventNotifier
+	opTimeout     time.Duration
 
 	// Pending touches are batched and flushed by RunTouchWorker instead of
 	// spawning a goroutine per request.
@@ -74,11 +127,29 @@ func NewSessionManager(rdb *redis.Client, maxSessions int, sessionTTL time.Durat
 		maxSessions = 5
 	}
 	return &SessionManager{
-		rdb:         rdb,
-		maxSessions: maxSessions,
-		sessionTTL:  sessionTTL,
-		opTimeout:   3 * time.Second,
+		rdb:           rdb,
+		maxSessions:   maxSessions,
+		sessionTTL:    sessionTTL,
+		rotationGrace: DefaultRotationGrace,
+		opTimeout:     3 * time.Second,
 	}
+}
+
+// SetRotationGrace overrides how long a rotated token's successor stays
+// replayable. A non-positive value disables the grace entirely (every consumed
+// token is an immediate 401); values above maxRotationGrace are clamped. Call
+// only during construction / before serving traffic — rotationGrace is read
+// without synchronization on the hot path.
+func (sm *SessionManager) SetRotationGrace(grace time.Duration) {
+	if sm == nil {
+		return
+	}
+	if grace > maxRotationGrace {
+		slog.Warn("rotation grace exceeds maximum; clamping",
+			"requested", grace, "max", maxRotationGrace)
+		grace = maxRotationGrace
+	}
+	sm.rotationGrace = grace
 }
 
 func (sm *SessionManager) SetNotifier(notifier SessionEventNotifier) {
@@ -96,6 +167,7 @@ func (sm *SessionManager) SetOperationTimeout(timeout time.Duration) {
 func sessionKey(sessionID string) string   { return "session:" + sessionID }
 func userSessionsKey(userID string) string { return "user_sessions:" + userID }
 func refreshKey(tokenHash string) string   { return "refresh:" + tokenHash }
+func graceKey(tokenHash string) string     { return "refresh_grace:" + tokenHash }
 
 // generateRefreshToken creates a crypto-random 32-byte opaque token encoded as hex.
 func generateRefreshToken() (token string, hash string, err error) {
@@ -248,7 +320,7 @@ func (sm *SessionManager) ValidateRefreshToken(ctx context.Context, refreshToken
 
 	sessionID, err := sm.rdb.Get(ctx, refreshKey(tokenHash)).Result()
 	if err == redis.Nil {
-		return nil, fmt.Errorf("refresh token not found or expired")
+		return nil, ErrRefreshTokenNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("lookup refresh token: %w", err)
@@ -291,51 +363,186 @@ func (sm *SessionManager) ValidateRefreshToken(ctx context.Context, refreshToken
 	return storable.toSession(), nil
 }
 
-// RotateRefreshToken replaces the refresh token on an existing session.
-// Returns the new opaque refresh token.
-func (sm *SessionManager) RotateRefreshToken(ctx context.Context, sessionID string) (string, error) {
+// RotateRefreshToken atomically replaces the refresh token on a session and
+// returns the new opaque token. expectedOldHash is the hash of the token the
+// caller validated; rotation only proceeds while refresh:<expectedOldHash> still
+// maps to this session. Two concurrent callers that both validated the same
+// token therefore cannot both rotate — the loser gets ErrRotationSuperseded and
+// the caller falls back to a grace replay of the winner's successor.
+//
+// Atomicity comes from an optimistic WATCH on refresh:<expectedOldHash> plus a
+// MULTI/EXEC pipeline: if another client consumes that key between our read and
+// our commit, EXEC fails and we report ErrRotationSuperseded. The watched key is
+// the refresh key (not the session key) so background LastActiveAt touches do
+// not spuriously abort the rotation. The grace breadcrumb is written inside the
+// same transaction as the delete, so a concurrent loser always finds it.
+func (sm *SessionManager) RotateRefreshToken(ctx context.Context, sessionID, expectedOldHash string) (string, error) {
 	ctx, cancel := sm.operationCtx(ctx)
 	defer cancel()
 
-	data, err := sm.rdb.Get(ctx, sessionKey(sessionID)).Result()
-	if err != nil {
-		return "", fmt.Errorf("lookup session: %w", err)
+	oldRefreshKey := refreshKey(expectedOldHash)
+	var newToken string
+
+	txf := func(tx *redis.Tx) error {
+		owner, err := tx.Get(ctx, oldRefreshKey).Result()
+		if err == redis.Nil {
+			return ErrRotationSuperseded
+		}
+		if err != nil {
+			return fmt.Errorf("lookup refresh token: %w", err)
+		}
+		if owner != sessionID {
+			return ErrRotationSuperseded
+		}
+
+		data, err := tx.Get(ctx, sessionKey(sessionID)).Result()
+		if err == redis.Nil {
+			return ErrRotationSuperseded
+		}
+		if err != nil {
+			return fmt.Errorf("lookup session: %w", err)
+		}
+
+		var storable sessionStorable
+		if err := json.Unmarshal([]byte(data), &storable); err != nil {
+			return fmt.Errorf("unmarshal session: %w", err)
+		}
+
+		ttl := time.Until(storable.ExpiresAt)
+		if ttl <= 0 {
+			return fmt.Errorf("session expired")
+		}
+
+		token, newHash, err := generateRefreshToken()
+		if err != nil {
+			return fmt.Errorf("generate new refresh token: %w", err)
+		}
+
+		storable.RefreshTokenHash = newHash
+		storable.LastActiveAt = time.Now()
+		updated, err := json.Marshal(storable)
+		if err != nil {
+			return fmt.Errorf("marshal session: %w", err)
+		}
+
+		var graceData []byte
+		graceTTL := sm.rotationGrace
+		if sm.rotationGrace > 0 {
+			if graceTTL > ttl {
+				graceTTL = ttl
+			}
+			graceData, err = json.Marshal(rotationGraceRecord{SessionID: sessionID, NewToken: token})
+			if err != nil {
+				return fmt.Errorf("marshal rotation grace: %w", err)
+			}
+		}
+
+		_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			if sm.rotationGrace > 0 {
+				pipe.Set(ctx, graceKey(expectedOldHash), graceData, graceTTL)
+			}
+			pipe.Set(ctx, sessionKey(sessionID), updated, ttl)
+			pipe.Set(ctx, refreshKey(newHash), sessionID, ttl)
+			pipe.Del(ctx, oldRefreshKey)
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+
+		newToken = token
+		return nil
 	}
 
-	var storable sessionStorable
-	if err := json.Unmarshal([]byte(data), &storable); err != nil {
-		return "", fmt.Errorf("unmarshal session: %w", err)
-	}
-	oldHash := storable.RefreshTokenHash
-
-	// Generate new refresh token.
-	newToken, newHash, err := generateRefreshToken()
-	if err != nil {
-		return "", fmt.Errorf("generate new refresh token: %w", err)
-	}
-
-	storable.RefreshTokenHash = newHash
-	storable.LastActiveAt = time.Now()
-
-	updated, err := json.Marshal(storable)
-	if err != nil {
-		return "", fmt.Errorf("marshal session: %w", err)
-	}
-
-	ttl := time.Until(storable.ExpiresAt)
-	if ttl <= 0 {
-		return "", fmt.Errorf("session expired")
-	}
-
-	pipe := sm.rdb.Pipeline()
-	pipe.Del(ctx, refreshKey(oldHash))
-	pipe.Set(ctx, sessionKey(sessionID), updated, ttl)
-	pipe.Set(ctx, refreshKey(newHash), sessionID, ttl)
-	if _, err := pipe.Exec(ctx); err != nil {
-		return "", fmt.Errorf("rotate refresh token in redis: %w", err)
+	if err := sm.rdb.Watch(ctx, txf, oldRefreshKey); err != nil {
+		// EXEC aborted because a concurrent rotation consumed the token first.
+		if errors.Is(err, redis.TxFailedErr) {
+			return "", ErrRotationSuperseded
+		}
+		return "", err
 	}
 
 	return newToken, nil
+}
+
+// ReplayRotation handles a refresh token that a concurrent refresh already
+// rotated away. If the consumed token has a live grace record, it returns the
+// session plus the live successor token, so the straggler converges on the
+// current token instead of being logged out. Grace records are left in place
+// (they expire on their own) so several concurrent losers all converge.
+//
+// When rotations happen back-to-back within the grace window, the recorded
+// successor may itself have been rotated away; ReplayRotation then follows the
+// grace chain (bounded by maxGraceChainHops) until it reaches a successor whose
+// refresh key is still live. Returns ErrNoRotationGrace when there is no live
+// record, the session is gone, or the chain dead-ends without a live successor.
+func (sm *SessionManager) ReplayRotation(ctx context.Context, refreshToken string) (*Session, string, error) {
+	ctx, cancel := sm.operationCtx(ctx)
+	defer cancel()
+
+	data, err := sm.rdb.Get(ctx, graceKey(hashToken(refreshToken))).Result()
+	if err == redis.Nil {
+		return nil, "", ErrNoRotationGrace
+	}
+	if err != nil {
+		return nil, "", fmt.Errorf("lookup rotation grace: %w", err)
+	}
+
+	var record rotationGraceRecord
+	if err := json.Unmarshal([]byte(data), &record); err != nil {
+		return nil, "", fmt.Errorf("unmarshal rotation grace: %w", err)
+	}
+
+	sessionData, err := sm.rdb.Get(ctx, sessionKey(record.SessionID)).Result()
+	if err == redis.Nil {
+		return nil, "", ErrNoRotationGrace
+	}
+	if err != nil {
+		return nil, "", fmt.Errorf("lookup session for rotation grace: %w", err)
+	}
+
+	var storable sessionStorable
+	if err := json.Unmarshal([]byte(sessionData), &storable); err != nil {
+		return nil, "", fmt.Errorf("unmarshal session: %w", err)
+	}
+
+	if time.Now().After(storable.ExpiresAt) {
+		return nil, "", ErrNoRotationGrace
+	}
+
+	// Follow the grace chain to the live successor: a successor recorded here may
+	// itself have been rotated away by a later refresh within the grace window.
+	successor := record.NewToken
+	for hop := 0; hop < maxGraceChainHops; hop++ {
+		sessionID, err := sm.rdb.Get(ctx, refreshKey(hashToken(successor))).Result()
+		if err == nil && sessionID == record.SessionID {
+			return storable.toSession(), successor, nil
+		}
+		if err != nil && err != redis.Nil {
+			return nil, "", fmt.Errorf("lookup successor token: %w", err)
+		}
+
+		// Successor is no longer live; hop to its own successor if recorded.
+		nextData, err := sm.rdb.Get(ctx, graceKey(hashToken(successor))).Result()
+		if err == redis.Nil {
+			break
+		}
+		if err != nil {
+			return nil, "", fmt.Errorf("follow rotation grace chain: %w", err)
+		}
+		var next rotationGraceRecord
+		if err := json.Unmarshal([]byte(nextData), &next); err != nil {
+			return nil, "", fmt.Errorf("unmarshal rotation grace chain: %w", err)
+		}
+		// Defense-in-depth: never cross session boundaries while following the
+		// chain (every hop must belong to the session we validated).
+		if next.SessionID != record.SessionID {
+			break
+		}
+		successor = next.NewToken
+	}
+
+	return nil, "", ErrNoRotationGrace
 }
 
 // Revoke deletes a session and its associated refresh token mapping.

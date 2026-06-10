@@ -106,6 +106,7 @@ export interface Message {
   parent_id?: UUID | null;
   reply_count?: number;
   reactions?: Reaction[];
+  mentions?: UUID[] | null;
   attachments?: Attachment[];
   pinned?: boolean;
   pinned_by?: UUID | null;

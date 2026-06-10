@@ -20,10 +20,9 @@ type MentionsLister interface {
 // ListMentions returns recent @-mentions of the calling user across every
 // channel they are a member of inside the workspace.
 //
-// Handle resolution is done in SQL — the query JOINs `users` to derive the
-// caller's email local-part (the mention slug stored in `messages.content`
-// by composer-web `mention-transformer.ts`). Self-mentions and tombstoned
-// messages are excluded.
+// Handle resolution is done in SQL — the query JOINs `users` to derive both
+// supported mention handles: email local-part and display name with whitespace
+// replaced by underscores. Self-mentions and tombstoned messages are excluded.
 func (s *Service) ListMentions(
 	ctx context.Context,
 	workspaceID, userID uuid.UUID,

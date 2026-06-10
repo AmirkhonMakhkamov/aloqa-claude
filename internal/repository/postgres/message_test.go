@@ -269,6 +269,84 @@ func TestMessageRepoListReactionsByMessageIDsBatchesAndGroups(t *testing.T) {
 	}
 }
 
+func TestMessageRepoMentionResolutionMatchesEmailAndDisplayHandles(t *testing.T) {
+	ctx, pool := setupMessageRepoPostgresTest(t)
+	env := setupMessageRepoTestEnv(t, ctx, pool)
+	repo := NewMessageRepo(pool)
+	now := time.Now().UTC()
+	authorID := uuid.New()
+	emailMentionID := messageRepoTestUUID(47)
+	displayMentionID := messageRepoTestUUID(48)
+	callerEmailLocalPart := "message-test-" + env.userID.String()
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cleanupCancel()
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM workspaces WHERE id = $1`, env.workspaceID)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM users WHERE id = $1`, authorID)
+	})
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO users (id, email, display_name, avatar_url, password_hash, status, locale, created_at, updated_at)
+		VALUES ($1, $2, 'Mention Author', '', 'hash', 'active', 'en', $3, $3)`,
+		authorID,
+		"mention-author-"+authorID.String()+"@example.com",
+		now,
+	); err != nil {
+		t.Fatalf("insert author: %v", err)
+	}
+	for _, userID := range []uuid.UUID{env.userID, authorID} {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO channel_members (id, channel_id, user_id, role, last_read_at, joined_at)
+			VALUES ($1, $2, $3, 'member', $4, $4)`,
+			uuid.New(),
+			env.channelID,
+			userID,
+			now,
+		); err != nil {
+			t.Fatalf("insert channel member %s: %v", userID, err)
+		}
+	}
+
+	emailMention := newMessageRepoTestMessage(env.channelID, authorID, emailMentionID, "hello @"+callerEmailLocalPart)
+	displayMention := newMessageRepoTestMessage(env.channelID, authorID, displayMentionID, "hello @Message_Test_User")
+	for _, msg := range []*entity.Message{emailMention, displayMention} {
+		if err := repo.Create(ctx, msg); err != nil {
+			t.Fatalf("create message %s: %v", msg.ID, err)
+		}
+	}
+
+	resolved, err := repo.ResolveMentions(ctx, env.channelID, authorID, "hello @Message_Test_User")
+	if err != nil {
+		t.Fatalf("ResolveMentions returned error: %v", err)
+	}
+	if len(resolved) != 1 || resolved[0] != env.userID {
+		t.Fatalf("ResolveMentions = %v, want caller id %s", resolved, env.userID)
+	}
+
+	batch, err := repo.ResolveMentionsByMessageIDs(ctx, []uuid.UUID{emailMentionID, displayMentionID})
+	if err != nil {
+		t.Fatalf("ResolveMentionsByMessageIDs returned error: %v", err)
+	}
+	if len(batch[emailMentionID]) != 1 || batch[emailMentionID][0] != env.userID {
+		t.Fatalf("email mention batch = %v, want caller id %s", batch[emailMentionID], env.userID)
+	}
+	if len(batch[displayMentionID]) != 1 || batch[displayMentionID][0] != env.userID {
+		t.Fatalf("display mention batch = %v, want caller id %s", batch[displayMentionID], env.userID)
+	}
+
+	rows, err := repo.ListMentions(ctx, env.workspaceID, env.userID, 10)
+	if err != nil {
+		t.Fatalf("ListMentions returned error: %v", err)
+	}
+	gotMentionIDs := map[uuid.UUID]bool{}
+	for _, row := range rows {
+		gotMentionIDs[row.MessageID] = true
+	}
+	if !gotMentionIDs[emailMentionID] || !gotMentionIDs[displayMentionID] {
+		t.Fatalf("ListMentions IDs = %v, want email and display mention messages", gotMentionIDs)
+	}
+}
+
 func TestMessageForwardedFromMigrationUpDownIdempotent(t *testing.T) {
 	ctx, pool := setupMessageRepoPostgresTest(t)
 	env := setupMessageRepoTestEnv(t, ctx, pool)

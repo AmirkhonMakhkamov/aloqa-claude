@@ -339,6 +339,193 @@ func TestSendMessageAllowsGlobalSavedChannelFromWorkspaceRoute(t *testing.T) {
 	}
 }
 
+func TestSendMessageResolvesMentionsForCreatedEvent(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	userID := uuid.New()
+	mentionedID := uuid.New()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, userID}: {ChannelID: channelID, UserID: userID},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	messages := &fakeMessageRepo{
+		messages: map[uuid.UUID]*entity.Message{},
+		resolveMentionsFunc: func(_ context.Context, gotChannelID, gotAuthorID uuid.UUID, content string) ([]uuid.UUID, error) {
+			if gotChannelID != channelID {
+				t.Fatalf("ResolveMentions channel = %s, want %s", gotChannelID, channelID)
+			}
+			if gotAuthorID != userID {
+				t.Fatalf("ResolveMentions author = %s, want %s", gotAuthorID, userID)
+			}
+			if content != "Hello @alice" {
+				t.Fatalf("ResolveMentions content = %q, want mention content", content)
+			}
+			return []uuid.UUID{mentionedID}, nil
+		},
+	}
+	publisher := &recordingSubjectPublisher{}
+	svc := NewService(channels, messages, workspaces, nil, publisher, nil, nil, nil, nil)
+
+	msg, err := svc.SendMessage(ctx, channelID, userID, SendMessageInput{Content: "Hello @alice"})
+	if err != nil {
+		t.Fatalf("SendMessage returned error: %v", err)
+	}
+	requireUUIDs(t, msg.Mentions, mentionedID)
+	if len(messages.resolveMentionsCalls) != 1 {
+		t.Fatalf("ResolveMentions calls = %d, want 1", len(messages.resolveMentionsCalls))
+	}
+	if len(publisher.events) != 2 {
+		t.Fatalf("published events = %d, want channel + workspace message.created events", len(publisher.events))
+	}
+
+	var envelope struct {
+		Type    eventpkg.Type `json:"type"`
+		Payload struct {
+			Message entity.Message `json:"message"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(publisher.events[0].data, &envelope); err != nil {
+		t.Fatalf("decode event: %v", err)
+	}
+	if envelope.Type != eventpkg.TypeMessageCreated {
+		t.Fatalf("event type = %s, want %s", envelope.Type, eventpkg.TypeMessageCreated)
+	}
+	requireUUIDs(t, envelope.Payload.Message.Mentions, mentionedID)
+}
+
+func TestEditMessageResolvesMentionsForUpdatedEvent(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	userID := uuid.New()
+	messageID := uuid.New()
+	mentionedID := uuid.New()
+	now := time.Now().UTC()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, userID}: {ChannelID: channelID, UserID: userID},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	messages := &fakeMessageRepo{
+		messages: map[uuid.UUID]*entity.Message{
+			messageID: {
+				ID:        messageID,
+				ChannelID: channelID,
+				UserID:    userID,
+				Content:   "old content",
+				Type:      entity.MessageTypeText,
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
+		},
+		resolveMentionsFunc: func(_ context.Context, gotChannelID, gotAuthorID uuid.UUID, content string) ([]uuid.UUID, error) {
+			if gotChannelID != channelID || gotAuthorID != userID || content != "Now hello @alice" {
+				t.Fatalf("ResolveMentions args = %s/%s/%q, want %s/%s/%q", gotChannelID, gotAuthorID, content, channelID, userID, "Now hello @alice")
+			}
+			return []uuid.UUID{mentionedID}, nil
+		},
+	}
+	publisher := &recordingSubjectPublisher{}
+	svc := NewService(channels, messages, workspaces, nil, publisher, nil, nil, nil, nil)
+
+	msg, err := svc.EditMessage(ctx, messageID, userID, "Now hello @alice")
+	if err != nil {
+		t.Fatalf("EditMessage returned error: %v", err)
+	}
+	requireUUIDs(t, msg.Mentions, mentionedID)
+	if len(messages.resolveMentionsCalls) != 1 {
+		t.Fatalf("ResolveMentions calls = %d, want 1", len(messages.resolveMentionsCalls))
+	}
+	if len(publisher.events) != 2 {
+		t.Fatalf("published events = %d, want channel + workspace message.updated events", len(publisher.events))
+	}
+
+	var envelope struct {
+		Type    eventpkg.Type `json:"type"`
+		Payload struct {
+			Message entity.Message `json:"message"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(publisher.events[0].data, &envelope); err != nil {
+		t.Fatalf("decode event: %v", err)
+	}
+	if envelope.Type != eventpkg.TypeMessageUpdated {
+		t.Fatalf("event type = %s, want %s", envelope.Type, eventpkg.TypeMessageUpdated)
+	}
+	requireUUIDs(t, envelope.Payload.Message.Mentions, mentionedID)
+}
+
+func TestEditMessageEmitsEmptyMentionsWhenMentionRemoved(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	userID := uuid.New()
+	messageID := uuid.New()
+	oldMentionedID := uuid.New()
+	now := time.Now().UTC()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, userID}: {ChannelID: channelID, UserID: userID},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	messages := &fakeMessageRepo{
+		messages: map[uuid.UUID]*entity.Message{
+			messageID: {
+				ID:        messageID,
+				ChannelID: channelID,
+				UserID:    userID,
+				Content:   "old @alice",
+				Type:      entity.MessageTypeText,
+				Mentions:  []uuid.UUID{oldMentionedID},
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
+		},
+	}
+	publisher := &recordingSubjectPublisher{}
+	svc := NewService(channels, messages, workspaces, nil, publisher, nil, nil, nil, nil)
+
+	msg, err := svc.EditMessage(ctx, messageID, userID, "mention removed")
+	if err != nil {
+		t.Fatalf("EditMessage returned error: %v", err)
+	}
+	if len(msg.Mentions) != 0 {
+		t.Fatalf("message mentions = %v, want empty slice", msg.Mentions)
+	}
+	if len(messages.resolveMentionsCalls) != 0 {
+		t.Fatalf("ResolveMentions calls = %d, want 0 for content without @", len(messages.resolveMentionsCalls))
+	}
+	if len(publisher.events) == 0 {
+		t.Fatalf("expected message.updated event")
+	}
+	if !strings.Contains(string(publisher.events[0].data), `"mentions":[]`) {
+		t.Fatalf("message.updated payload = %s, want explicit empty mentions", publisher.events[0].data)
+	}
+}
+
 func TestMoveMessageMovesAcrossAccessibleChannels(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -1310,6 +1497,123 @@ func TestGetMessagesHydratesReactionsInSingleBatch(t *testing.T) {
 	}
 }
 
+func TestGetMessageHydratesMentions(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	userID := uuid.New()
+	messageID := uuid.New()
+	mentionedID := uuid.New()
+	now := time.Now().UTC()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, userID}: {ChannelID: channelID, UserID: userID},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	messages := &fakeMessageRepo{
+		messages: map[uuid.UUID]*entity.Message{
+			messageID: {
+				ID:        messageID,
+				ChannelID: channelID,
+				UserID:    userID,
+				Content:   "hello @alice",
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
+		},
+		mentionsByMessageID: map[uuid.UUID][]uuid.UUID{
+			messageID: {mentionedID},
+		},
+	}
+	svc := NewService(channels, messages, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+
+	msg, err := svc.GetMessage(ctx, messageID, userID)
+	if err != nil {
+		t.Fatalf("GetMessage returned error: %v", err)
+	}
+	requireUUIDs(t, msg.Mentions, mentionedID)
+	if messages.resolveMentionsByMessageIDsCalls != 1 {
+		t.Fatalf("ResolveMentionsByMessageIDs calls = %d, want 1", messages.resolveMentionsByMessageIDsCalls)
+	}
+	requireUUIDs(t, messages.lastResolveMentionsByMessageIDsArg, messageID)
+}
+
+func TestGetMessagesHydratesMentionsInSingleBatch(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	userID := uuid.New()
+	messageID := uuid.New()
+	secondMessageID := uuid.New()
+	noMentionMessageID := uuid.New()
+	deletedMessageID := uuid.New()
+	mentionedID := uuid.New()
+	secondMentionedID := uuid.New()
+	deletedMentionedID := uuid.New()
+	deletedAt := time.Now().UTC()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, userID}: {ChannelID: channelID, UserID: userID},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	messages := &fakeMessageRepo{
+		messages: map[uuid.UUID]*entity.Message{
+			messageID:          {ID: messageID, ChannelID: channelID, UserID: userID, Content: "one @alice", CreatedAt: deletedAt.Add(-4 * time.Minute), UpdatedAt: deletedAt.Add(-4 * time.Minute)},
+			secondMessageID:    {ID: secondMessageID, ChannelID: channelID, UserID: userID, Content: "two @bob", CreatedAt: deletedAt.Add(-3 * time.Minute), UpdatedAt: deletedAt.Add(-3 * time.Minute)},
+			noMentionMessageID: {ID: noMentionMessageID, ChannelID: channelID, UserID: userID, Content: "plain text", CreatedAt: deletedAt.Add(-2 * time.Minute), UpdatedAt: deletedAt.Add(-2 * time.Minute)},
+			deletedMessageID:   {ID: deletedMessageID, ChannelID: channelID, UserID: userID, Content: "deleted @chris", CreatedAt: deletedAt.Add(-time.Minute), UpdatedAt: deletedAt, DeletedAt: &deletedAt},
+		},
+		mentionsByMessageID: map[uuid.UUID][]uuid.UUID{
+			messageID:        {mentionedID},
+			secondMessageID:  {secondMentionedID},
+			deletedMessageID: {deletedMentionedID},
+		},
+	}
+	svc := NewService(channels, messages, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+
+	page, err := svc.GetMessages(ctx, channelID, userID, pagination.Params{Limit: 10})
+	if err != nil {
+		t.Fatalf("GetMessages returned error: %v", err)
+	}
+	if messages.resolveMentionsByMessageIDsCalls != 1 {
+		t.Fatalf("ResolveMentionsByMessageIDs calls = %d, want 1", messages.resolveMentionsByMessageIDsCalls)
+	}
+	batchedIDs := map[uuid.UUID]bool{}
+	for _, id := range messages.lastResolveMentionsByMessageIDsArg {
+		batchedIDs[id] = true
+	}
+	if len(batchedIDs) != 2 || !batchedIDs[messageID] || !batchedIDs[secondMessageID] {
+		t.Fatalf("batch message IDs = %v, want only active messages with @", messages.lastResolveMentionsByMessageIDsArg)
+	}
+
+	gotByID := map[uuid.UUID]entity.Message{}
+	for _, msg := range page.Items {
+		gotByID[msg.ID] = msg
+	}
+	requireUUIDs(t, gotByID[messageID].Mentions, mentionedID)
+	requireUUIDs(t, gotByID[secondMessageID].Mentions, secondMentionedID)
+	if len(gotByID[noMentionMessageID].Mentions) != 0 {
+		t.Fatalf("plain message mentions = %+v, want empty slice", gotByID[noMentionMessageID].Mentions)
+	}
+	if gotByID[deletedMessageID].Mentions != nil {
+		t.Fatalf("deleted message mentions = %+v, want nil", gotByID[deletedMessageID].Mentions)
+	}
+}
+
 func TestDeleteMessagePublishesRedactedTombstone(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -1532,6 +1836,91 @@ func TestListChannelsHidesRecipientDMWithOnlyDeletedMessages(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("channels = %+v, want recipient-side deleted-only DM hidden", got)
+	}
+}
+
+func TestListChannelsStampsLastActivityFromNonDeletedMessages(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	userID := uuid.New()
+	activeChannelID := uuid.New()
+	emptyChannelID := uuid.New()
+	oldMessageID := uuid.New()
+	latestMessageID := uuid.New()
+	deletedMessageID := uuid.New()
+	olderAt := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	latestAt := time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC)
+	deletedAt := time.Date(2026, 6, 10, 10, 0, 0, 0, time.UTC)
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			activeChannelID: {
+				ID:          activeChannelID,
+				WorkspaceID: &workspaceID,
+				Type:        entity.ChannelTypePublic,
+				Name:        "active",
+			},
+			emptyChannelID: {
+				ID:          emptyChannelID,
+				WorkspaceID: &workspaceID,
+				Type:        entity.ChannelTypePublic,
+				Name:        "empty",
+			},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{activeChannelID, userID}: {ChannelID: activeChannelID, UserID: userID},
+			{emptyChannelID, userID}:  {ChannelID: emptyChannelID, UserID: userID},
+		},
+	}
+	messages := &fakeMessageRepo{
+		messages: map[uuid.UUID]*entity.Message{
+			oldMessageID: {
+				ID:        oldMessageID,
+				ChannelID: activeChannelID,
+				UserID:    userID,
+				Content:   "old",
+				CreatedAt: olderAt,
+				UpdatedAt: olderAt,
+			},
+			latestMessageID: {
+				ID:        latestMessageID,
+				ChannelID: activeChannelID,
+				UserID:    userID,
+				Content:   "latest",
+				CreatedAt: latestAt,
+				UpdatedAt: latestAt,
+			},
+			deletedMessageID: {
+				ID:        deletedMessageID,
+				ChannelID: activeChannelID,
+				UserID:    userID,
+				Content:   "",
+				CreatedAt: deletedAt,
+				UpdatedAt: deletedAt,
+				DeletedAt: &deletedAt,
+			},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	svc := NewService(channels, messages, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+
+	got, err := svc.ListChannels(ctx, workspaceID, userID)
+	if err != nil {
+		t.Fatalf("ListChannels returned error: %v", err)
+	}
+
+	byID := make(map[uuid.UUID]entity.Channel, len(got))
+	for _, channel := range got {
+		byID[channel.ID] = channel
+	}
+	active := byID[activeChannelID]
+	if active.LastActivityAt == nil || !active.LastActivityAt.Equal(latestAt) {
+		t.Fatalf("active LastActivityAt = %v, want %v", active.LastActivityAt, latestAt)
+	}
+	if empty := byID[emptyChannelID]; empty.LastActivityAt != nil {
+		t.Fatalf("empty LastActivityAt = %v, want nil", empty.LastActivityAt)
 	}
 }
 
@@ -1933,6 +2322,18 @@ func hasUUID(values []uuid.UUID, want uuid.UUID) bool {
 	return false
 }
 
+func requireUUIDs(t *testing.T, got []uuid.UUID, want ...uuid.UUID) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("uuid slice = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("uuid slice = %v, want %v", got, want)
+		}
+	}
+}
+
 type recordingSearchIndexer struct {
 	indexedChannels []uuid.UUID
 	deletedChannels []uuid.UUID
@@ -2222,11 +2623,22 @@ func (r *fakeChannelRepo) GetDMChannel(context.Context, uuid.UUID, uuid.UUID, uu
 }
 
 type fakeMessageRepo struct {
-	messages                         map[uuid.UUID]*entity.Message
-	reactions                        map[uuid.UUID]entity.Reaction
-	listReactionsCalls               int
-	listReactionsByMessageIDsCalls   int
-	lastListReactionsByMessageIDsArg []uuid.UUID
+	messages                           map[uuid.UUID]*entity.Message
+	reactions                          map[uuid.UUID]entity.Reaction
+	listReactionsCalls                 int
+	listReactionsByMessageIDsCalls     int
+	lastListReactionsByMessageIDsArg   []uuid.UUID
+	resolveMentionsFunc                func(context.Context, uuid.UUID, uuid.UUID, string) ([]uuid.UUID, error)
+	resolveMentionsCalls               []resolveMentionsCall
+	resolveMentionsByMessageIDsCalls   int
+	lastResolveMentionsByMessageIDsArg []uuid.UUID
+	mentionsByMessageID                map[uuid.UUID][]uuid.UUID
+}
+
+type resolveMentionsCall struct {
+	channelID uuid.UUID
+	authorID  uuid.UUID
+	content   string
 }
 
 func (r *fakeMessageRepo) Create(_ context.Context, msg *entity.Message) error {
@@ -2254,6 +2666,32 @@ func (r *fakeMessageRepo) ListByChannel(_ context.Context, channelID uuid.UUID, 
 func (r *fakeMessageRepo) ListThreadReplies(context.Context, uuid.UUID, pagination.Params) ([]entity.Message, error) {
 	return nil, nil
 }
+func (r *fakeMessageRepo) ResolveMentions(ctx context.Context, channelID, authorID uuid.UUID, content string) ([]uuid.UUID, error) {
+	r.resolveMentionsCalls = append(r.resolveMentionsCalls, resolveMentionsCall{
+		channelID: channelID,
+		authorID:  authorID,
+		content:   content,
+	})
+	if r.resolveMentionsFunc != nil {
+		return r.resolveMentionsFunc(ctx, channelID, authorID, content)
+	}
+	return []uuid.UUID{}, nil
+}
+func (r *fakeMessageRepo) ResolveMentionsByMessageIDs(_ context.Context, messageIDs []uuid.UUID) (map[uuid.UUID][]uuid.UUID, error) {
+	r.resolveMentionsByMessageIDsCalls++
+	r.lastResolveMentionsByMessageIDsArg = append([]uuid.UUID(nil), messageIDs...)
+	mentionsByMessageID := make(map[uuid.UUID][]uuid.UUID, len(messageIDs))
+	messageIDSet := make(map[uuid.UUID]struct{}, len(messageIDs))
+	for _, messageID := range messageIDs {
+		messageIDSet[messageID] = struct{}{}
+	}
+	for messageID, mentions := range r.mentionsByMessageID {
+		if _, ok := messageIDSet[messageID]; ok {
+			mentionsByMessageID[messageID] = append([]uuid.UUID(nil), mentions...)
+		}
+	}
+	return mentionsByMessageID, nil
+}
 func (r *fakeMessageRepo) HasActiveMessage(_ context.Context, channelID uuid.UUID) (bool, error) {
 	for _, msg := range r.messages {
 		if msg.ChannelID == channelID && msg.DeletedAt == nil {
@@ -2261,6 +2699,22 @@ func (r *fakeMessageRepo) HasActiveMessage(_ context.Context, channelID uuid.UUI
 		}
 	}
 	return false, nil
+}
+func (r *fakeMessageRepo) LastActivityByChannels(_ context.Context, channelIDs []uuid.UUID) (map[uuid.UUID]time.Time, error) {
+	allowed := make(map[uuid.UUID]struct{}, len(channelIDs))
+	for _, channelID := range channelIDs {
+		allowed[channelID] = struct{}{}
+	}
+	activity := make(map[uuid.UUID]time.Time, len(channelIDs))
+	for _, msg := range r.messages {
+		if _, ok := allowed[msg.ChannelID]; !ok || msg.DeletedAt != nil {
+			continue
+		}
+		if current, found := activity[msg.ChannelID]; !found || msg.CreatedAt.After(current) {
+			activity[msg.ChannelID] = msg.CreatedAt
+		}
+	}
+	return activity, nil
 }
 func (r *fakeMessageRepo) Update(context.Context, *entity.Message) error { return nil }
 func (r *fakeMessageRepo) Move(_ context.Context, msg *entity.Message) error {

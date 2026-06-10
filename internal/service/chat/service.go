@@ -1147,6 +1147,14 @@ type mentionableMemberSearcher interface {
 	) ([]entity.MentionSuggestion, error)
 }
 
+type messageMentionResolver interface {
+	ResolveMentions(ctx context.Context, channelID, authorID uuid.UUID, content string) ([]uuid.UUID, error)
+}
+
+type messageMentionBatchResolver interface {
+	ResolveMentionsByMessageIDs(ctx context.Context, messageIDs []uuid.UUID) (map[uuid.UUID][]uuid.UUID, error)
+}
+
 // SearchChannelMentions returns members of the conversation matching the query
 // for @mention autocomplete (ALK-838), excluding the requester. Works for both
 // channels and direct messages (the DM's participants); the composer decides
@@ -1180,6 +1188,29 @@ func (s *Service) SearchChannelMentions(
 	}
 
 	return results, nil
+}
+
+func (s *Service) hydrateMessageMentions(ctx context.Context, msg *entity.Message, ch *entity.Channel) error {
+	if msg == nil {
+		return nil
+	}
+	msg.Mentions = []uuid.UUID{}
+	if ch == nil || ch.Type == entity.ChannelTypeSaved || ch.Type == entity.ChannelTypeSavedGlobal || !strings.Contains(msg.Content, "@") {
+		return nil
+	}
+
+	resolver, ok := s.messages.(messageMentionResolver)
+	if !ok {
+		return nil
+	}
+
+	mentions, err := resolver.ResolveMentions(ctx, msg.ChannelID, msg.UserID, msg.Content)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to resolve message mentions", "message_id", msg.ID, "channel_id", msg.ChannelID, "error", err)
+		return cerrors.Internal("failed to resolve message mentions", err)
+	}
+	msg.Mentions = mentions
+	return nil
 }
 
 // AddChannelMembers adds workspace members to a channel when the actor can manage membership.
@@ -1531,6 +1562,10 @@ func (s *Service) SendMessage(
 		ClientMessageID: input.ClientMessageID,
 	}
 
+	if err := s.hydrateMessageMentions(ctx, msg, ch); err != nil {
+		return nil, err
+	}
+
 	if s.tx != nil {
 		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
 			if scope.Messages() == nil {
@@ -1580,6 +1615,9 @@ func (s *Service) GetMessage(ctx context.Context, messageID, userID uuid.UUID) (
 	if err := s.hydrateMessageReactions(ctx, items); err != nil {
 		return nil, err
 	}
+	if err := s.hydrateMessageMentionsForRead(ctx, items); err != nil {
+		return nil, err
+	}
 	*msg = items[0]
 	return msg, nil
 }
@@ -1604,6 +1642,9 @@ func (s *Service) GetMessages(ctx context.Context, channelID, userID uuid.UUID, 
 	if err := s.hydrateMessageReactions(ctx, page.Items); err != nil {
 		return pagination.Page[entity.Message]{}, err
 	}
+	if err := s.hydrateMessageMentionsForRead(ctx, page.Items); err != nil {
+		return pagination.Page[entity.Message]{}, err
+	}
 	redactDeletedMessages(page.Items)
 	return page, nil
 }
@@ -1622,6 +1663,9 @@ func (s *Service) GetPinnedMessages(ctx context.Context, channelID, userID uuid.
 	}
 
 	if err := s.hydrateMessageReactions(ctx, items); err != nil {
+		return nil, err
+	}
+	if err := s.hydrateMessageMentionsForRead(ctx, items); err != nil {
 		return nil, err
 	}
 	return items, nil
@@ -1644,6 +1688,9 @@ func (s *Service) GetThreadReplies(ctx context.Context, parentID, userID uuid.UU
 
 	page := buildMessagePage(items, p.Limit)
 	if err := s.hydrateMessageReactions(ctx, page.Items); err != nil {
+		return pagination.Page[entity.Message]{}, err
+	}
+	if err := s.hydrateMessageMentionsForRead(ctx, page.Items); err != nil {
 		return pagination.Page[entity.Message]{}, err
 	}
 	redactDeletedMessages(page.Items)
@@ -1670,6 +1717,9 @@ func (s *Service) EditMessage(ctx context.Context, messageID, userID uuid.UUID, 
 
 	workspaceID := uuid.Nil
 	workspaceID = channelWorkspaceIDOrNil(ch)
+	if err := s.hydrateMessageMentions(ctx, msg, ch); err != nil {
+		return nil, err
+	}
 	if s.tx != nil {
 		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
 			if scope.Messages() == nil {
@@ -1780,6 +1830,9 @@ func (s *Service) MoveMessage(
 	msg.PinnedBy = nil
 	msg.PinnedAt = nil
 	msg.UpdatedAt = now
+	if err := s.hydrateMessageMentions(ctx, msg, targetCh); err != nil {
+		return nil, err
+	}
 
 	if s.tx != nil {
 		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
@@ -2862,6 +2915,48 @@ func (s *Service) hydrateMessageReactions(ctx context.Context, items []entity.Me
 	return nil
 }
 
+func (s *Service) hydrateMessageMentionsForRead(ctx context.Context, items []entity.Message) error {
+	resolver, ok := s.messages.(messageMentionBatchResolver)
+	if !ok {
+		return nil
+	}
+
+	messageIDs := make([]uuid.UUID, 0, len(items))
+	seen := make(map[uuid.UUID]struct{}, len(items))
+	for i := range items {
+		if items[i].DeletedAt != nil {
+			items[i].Mentions = nil
+			continue
+		}
+		items[i].Mentions = []uuid.UUID{}
+		if !strings.Contains(items[i].Content, "@") {
+			continue
+		}
+		if _, ok := seen[items[i].ID]; ok {
+			continue
+		}
+		seen[items[i].ID] = struct{}{}
+		messageIDs = append(messageIDs, items[i].ID)
+	}
+	if len(messageIDs) == 0 {
+		return nil
+	}
+
+	mentionsByMessageID, err := resolver.ResolveMentionsByMessageIDs(ctx, messageIDs)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to resolve message mentions", "message_count", len(messageIDs), "error", err)
+		return cerrors.Internal("failed to resolve message mentions", err)
+	}
+
+	for i := range items {
+		if items[i].DeletedAt != nil {
+			continue
+		}
+		items[i].Mentions = mentionsByMessageID[items[i].ID]
+	}
+	return nil
+}
+
 func redactDeletedMessage(msg entity.Message) entity.Message {
 	if msg.DeletedAt == nil {
 		return msg
@@ -2878,6 +2973,7 @@ func redactDeletedMessage(msg entity.Message) entity.Message {
 	msg.QuotedSnapshot = nil
 	msg.ProfileShare = nil
 	msg.Reactions = nil
+	msg.Mentions = nil
 	msg.Attachments = nil
 	return msg
 }

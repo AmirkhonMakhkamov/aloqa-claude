@@ -53,8 +53,9 @@ type Channel struct {
 }
 
 // MentionSuggestion is a channel member surfaced as an @mention autocomplete
-// candidate (ALK-838). Username is the local part of the member's email — the
-// handle the composer inserts as `@username`.
+// candidate (ALK-838). Username is the local part of the member's email; some
+// composer versions insert it directly, while legacy web inserts display name
+// with whitespace replaced by underscores.
 type MentionSuggestion struct {
 	ID          uuid.UUID `json:"id"`
 	Username    string    `json:"username"`

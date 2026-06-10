@@ -668,6 +668,20 @@ func (s *Service) Login(ctx context.Context, email, password, deviceInfo, ipAddr
 func (s *Service) RefreshToken(ctx context.Context, refreshToken string) (*LoginResult, error) {
 	session, err := s.sessions.ValidateRefreshToken(ctx, refreshToken)
 	if err != nil {
+		// A concurrent refresh (e.g. two browser tabs sharing the cookie) may
+		// have just rotated this token away. Within the grace window, replay the
+		// successor instead of logging the user out across every tab.
+		if errors.Is(err, ErrRefreshTokenNotFound) {
+			result, graceErr := s.graceReplay(ctx, refreshToken)
+			if graceErr == nil {
+				return result, nil
+			}
+			// Anything other than "no live grace" (deactivated account, Redis
+			// failure) is surfaced with its real status instead of masked as 401.
+			if !errors.Is(graceErr, ErrNoRotationGrace) {
+				return nil, graceErr
+			}
+		}
 		slog.WarnContext(ctx, "refresh token validation failed", "error", err)
 		return nil, cerrors.Unauthorized("invalid refresh token")
 	}
@@ -691,9 +705,22 @@ func (s *Service) RefreshToken(ctx context.Context, refreshToken string) (*Login
 		return nil, cerrors.Forbidden("account is not active")
 	}
 
-	// Rotate the refresh token on the existing session.
-	newRefreshToken, err := s.sessions.RotateRefreshToken(ctx, session.ID)
+	// Rotate the refresh token on the existing session. The rotation is an
+	// atomic CAS on the presented token, so a concurrent refresh that already
+	// rotated it leaves us superseded — fall back to replaying that winner's
+	// successor instead of erroring (or double-rotating).
+	newRefreshToken, err := s.sessions.RotateRefreshToken(ctx, session.ID, hashToken(refreshToken))
 	if err != nil {
+		if errors.Is(err, ErrRotationSuperseded) {
+			result, graceErr := s.graceReplay(ctx, refreshToken)
+			if graceErr == nil {
+				return result, nil
+			}
+			if !errors.Is(graceErr, ErrNoRotationGrace) {
+				return nil, graceErr
+			}
+			return nil, cerrors.Unauthorized("invalid refresh token")
+		}
 		slog.ErrorContext(ctx, "failed to rotate refresh token", "session_id", session.ID, "error", err)
 		return nil, cerrors.Internal("failed to rotate refresh token", err)
 	}
@@ -709,6 +736,70 @@ func (s *Service) RefreshToken(ctx context.Context, refreshToken string) (*Login
 	return &LoginResult{
 		AccessToken:  newAccessToken,
 		RefreshToken: newRefreshToken,
+		SessionID:    session.ID,
+		ExpiresIn:    int(s.accessTTL.Seconds()),
+	}, nil
+}
+
+// graceReplay wraps replayRotatedRefresh with consistent logging. It returns
+// (result, nil) on success, (nil, ErrNoRotationGrace) for the expected "no live
+// grace" case so callers fall through to their 401, and (nil, err) verbatim for
+// any real failure (deactivated account, Redis error) so it keeps its true
+// status instead of being masked as an invalid-token 401.
+func (s *Service) graceReplay(ctx context.Context, refreshToken string) (*LoginResult, error) {
+	result, err := s.replayRotatedRefresh(ctx, refreshToken)
+	if err == nil {
+		return result, nil
+	}
+	if !errors.Is(err, ErrNoRotationGrace) {
+		slog.WarnContext(ctx, "refresh token grace replay failed", "error", err)
+	}
+	return nil, err
+}
+
+// replayRotatedRefresh tolerates the multi-tab rotation race: when a refresh
+// token was already consumed by a concurrent refresh, hand back the successor
+// the winning caller received (within the grace window) plus a fresh access
+// token, instead of rejecting and logging the user out. It does NOT rotate
+// again — both callers converge on the same successor. Returns an error (so the
+// caller falls through to a 401) when there is no live grace record or the user
+// is no longer eligible.
+func (s *Service) replayRotatedRefresh(ctx context.Context, refreshToken string) (*LoginResult, error) {
+	session, successor, err := s.sessions.ReplayRotation(ctx, refreshToken)
+	if err != nil {
+		return nil, err
+	}
+
+	userID, err := uuid.Parse(session.UserID)
+	if err != nil {
+		return nil, cerrors.Internal("invalid user ID in session", err)
+	}
+
+	user, err := s.users.GetByID(ctx, userID)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return nil, cerrors.Unauthorized("user not found")
+		}
+		return nil, cerrors.Internal("failed to fetch user", err)
+	}
+
+	if user.Status != entity.UserStatusActive {
+		return nil, cerrors.Forbidden("account is not active")
+	}
+
+	accessToken, err := s.generateToken(userID, session.ID, s.accessTTL)
+	if err != nil {
+		return nil, cerrors.Internal("failed to generate access token", err)
+	}
+
+	slog.InfoContext(ctx, "tokens refreshed via rotation grace",
+		"user_id", userID,
+		"session_id", session.ID,
+	)
+
+	return &LoginResult{
+		AccessToken:  accessToken,
+		RefreshToken: successor,
 		SessionID:    session.ID,
 		ExpiresIn:    int(s.accessTTL.Seconds()),
 	}, nil

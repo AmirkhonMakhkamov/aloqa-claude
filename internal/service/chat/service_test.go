@@ -1839,6 +1839,91 @@ func TestListChannelsHidesRecipientDMWithOnlyDeletedMessages(t *testing.T) {
 	}
 }
 
+func TestListChannelsStampsLastActivityFromNonDeletedMessages(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	userID := uuid.New()
+	activeChannelID := uuid.New()
+	emptyChannelID := uuid.New()
+	oldMessageID := uuid.New()
+	latestMessageID := uuid.New()
+	deletedMessageID := uuid.New()
+	olderAt := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	latestAt := time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC)
+	deletedAt := time.Date(2026, 6, 10, 10, 0, 0, 0, time.UTC)
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			activeChannelID: {
+				ID:          activeChannelID,
+				WorkspaceID: &workspaceID,
+				Type:        entity.ChannelTypePublic,
+				Name:        "active",
+			},
+			emptyChannelID: {
+				ID:          emptyChannelID,
+				WorkspaceID: &workspaceID,
+				Type:        entity.ChannelTypePublic,
+				Name:        "empty",
+			},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{activeChannelID, userID}: {ChannelID: activeChannelID, UserID: userID},
+			{emptyChannelID, userID}:  {ChannelID: emptyChannelID, UserID: userID},
+		},
+	}
+	messages := &fakeMessageRepo{
+		messages: map[uuid.UUID]*entity.Message{
+			oldMessageID: {
+				ID:        oldMessageID,
+				ChannelID: activeChannelID,
+				UserID:    userID,
+				Content:   "old",
+				CreatedAt: olderAt,
+				UpdatedAt: olderAt,
+			},
+			latestMessageID: {
+				ID:        latestMessageID,
+				ChannelID: activeChannelID,
+				UserID:    userID,
+				Content:   "latest",
+				CreatedAt: latestAt,
+				UpdatedAt: latestAt,
+			},
+			deletedMessageID: {
+				ID:        deletedMessageID,
+				ChannelID: activeChannelID,
+				UserID:    userID,
+				Content:   "",
+				CreatedAt: deletedAt,
+				UpdatedAt: deletedAt,
+				DeletedAt: &deletedAt,
+			},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	svc := NewService(channels, messages, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+
+	got, err := svc.ListChannels(ctx, workspaceID, userID)
+	if err != nil {
+		t.Fatalf("ListChannels returned error: %v", err)
+	}
+
+	byID := make(map[uuid.UUID]entity.Channel, len(got))
+	for _, channel := range got {
+		byID[channel.ID] = channel
+	}
+	active := byID[activeChannelID]
+	if active.LastActivityAt == nil || !active.LastActivityAt.Equal(latestAt) {
+		t.Fatalf("active LastActivityAt = %v, want %v", active.LastActivityAt, latestAt)
+	}
+	if empty := byID[emptyChannelID]; empty.LastActivityAt != nil {
+		t.Fatalf("empty LastActivityAt = %v, want nil", empty.LastActivityAt)
+	}
+}
+
 func TestListChannelsUsesMembershipForWorkspaceMembersWithAccessPolicy(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -2614,6 +2699,22 @@ func (r *fakeMessageRepo) HasActiveMessage(_ context.Context, channelID uuid.UUI
 		}
 	}
 	return false, nil
+}
+func (r *fakeMessageRepo) LastActivityByChannels(_ context.Context, channelIDs []uuid.UUID) (map[uuid.UUID]time.Time, error) {
+	allowed := make(map[uuid.UUID]struct{}, len(channelIDs))
+	for _, channelID := range channelIDs {
+		allowed[channelID] = struct{}{}
+	}
+	activity := make(map[uuid.UUID]time.Time, len(channelIDs))
+	for _, msg := range r.messages {
+		if _, ok := allowed[msg.ChannelID]; !ok || msg.DeletedAt != nil {
+			continue
+		}
+		if current, found := activity[msg.ChannelID]; !found || msg.CreatedAt.After(current) {
+			activity[msg.ChannelID] = msg.CreatedAt
+		}
+	}
+	return activity, nil
 }
 func (r *fakeMessageRepo) Update(context.Context, *entity.Message) error { return nil }
 func (r *fakeMessageRepo) Move(_ context.Context, msg *entity.Message) error {

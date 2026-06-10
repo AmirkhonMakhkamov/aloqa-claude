@@ -1608,6 +1608,12 @@ components:
         archived: { type: boolean }
         created_at: { $ref: '#/components/schemas/IsoDatetime' }
         updated_at: { $ref: '#/components/schemas/IsoDatetime' }
+        # Populated by the per-user channel list so clients can order sidebars
+        # by the most recent non-deleted message in each channel (ALK-837).
+        last_activity_at:
+          allOf:
+            - { $ref: '#/components/schemas/IsoDatetime' }
+          nullable: true
         # Populated only for `type` in (dm, group_dm) so the client can render
         # the counterpart user without an extra round-trip per row. Backend
         # leaves the field unset for public/private channels.

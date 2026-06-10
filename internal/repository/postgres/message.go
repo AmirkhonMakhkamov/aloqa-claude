@@ -1062,6 +1062,47 @@ func (r *MessageRepo) BatchUnreadCounts(ctx context.Context, workspaceID, userID
 	return out, nil
 }
 
+// LastActivityByChannels returns the created_at of the most recent non-deleted
+// message in each of the given channels, in a single query. Channels with no
+// messages are omitted from the map. Used to order the sidebar by last activity
+// (ALK-837).
+func (r *MessageRepo) LastActivityByChannels(
+	ctx context.Context,
+	channelIDs []uuid.UUID,
+) (map[uuid.UUID]time.Time, error) {
+	out := make(map[uuid.UUID]time.Time, len(channelIDs))
+	if len(channelIDs) == 0 {
+		return out, nil
+	}
+
+	query := `
+		SELECT channel_id, MAX(created_at)
+		FROM messages
+		WHERE channel_id = ANY($1) AND deleted_at IS NULL
+		GROUP BY channel_id`
+
+	rows, err := r.db.Query(ctx, query, channelIDs)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: last activity by channels: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			channelID uuid.UUID
+			lastAt    time.Time
+		)
+		if err := rows.Scan(&channelID, &lastAt); err != nil {
+			return nil, fmt.Errorf("postgres: last activity by channels scan: %w", err)
+		}
+		out[channelID] = lastAt
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: last activity by channels rows: %w", err)
+	}
+	return out, nil
+}
+
 func (r *MessageRepo) CountThreadReplies(ctx context.Context, parentID uuid.UUID) (int, error) {
 	query := `
 		SELECT COUNT(*)

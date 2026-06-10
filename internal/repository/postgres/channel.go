@@ -407,6 +407,55 @@ func (r *ChannelRepo) ListMembers(ctx context.Context, channelID uuid.UUID) ([]e
 	return members, nil
 }
 
+// SearchMentionableMembers returns channel members matching the query for
+// @mention autocomplete (ALK-838), ranked by display name. Matches the display
+// name (substring) and the username = email local part (prefix), both
+// case-insensitive. An empty query returns the first `limit` members.
+func (r *ChannelRepo) SearchMentionableMembers(
+	ctx context.Context,
+	channelID, excludeUserID uuid.UUID,
+	query string,
+	limit int,
+) ([]entity.MentionSuggestion, error) {
+	const q = `
+		SELECT u.id,
+		       split_part(u.email, '@', 1) AS username,
+		       u.display_name,
+		       COALESCE(u.avatar_url, '') AS avatar_url,
+		       u.position
+		FROM channel_members cm
+		JOIN users u ON u.id = cm.user_id
+		WHERE cm.channel_id = $1
+		  AND u.id <> $2
+		  AND (
+		    $3 = ''
+		    OR u.display_name ILIKE '%' || $3 || '%'
+		    OR split_part(u.email, '@', 1) ILIKE $3 || '%'
+		  )
+		ORDER BY u.display_name
+		LIMIT $4`
+
+	rows, err := r.db.Query(ctx, q, channelID, excludeUserID, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: search mentionable members: %w", err)
+	}
+	defer rows.Close()
+
+	results := make([]entity.MentionSuggestion, 0)
+	for rows.Next() {
+		var m entity.MentionSuggestion
+		if err := rows.Scan(&m.ID, &m.Username, &m.DisplayName, &m.AvatarURL, &m.Position); err != nil {
+			return nil, fmt.Errorf("postgres: search mentionable members scan: %w", err)
+		}
+		results = append(results, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: search mentionable members rows: %w", err)
+	}
+
+	return results, nil
+}
+
 func (r *ChannelRepo) RemoveMember(ctx context.Context, channelID, userID uuid.UUID) error {
 	query := `
 		DELETE FROM channel_members

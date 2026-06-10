@@ -321,6 +321,11 @@ func (s *Service) IndexChannel(ctx context.Context, workspaceID, channelID uuid.
 	if s.indexer == nil {
 		return nil
 	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	topic = strings.TrimSpace(topic)
 	return s.indexer.EnqueueUpsert(ctx, Document{
 		WorkspaceID: workspaceID,
 		ResourceID:  channelID,

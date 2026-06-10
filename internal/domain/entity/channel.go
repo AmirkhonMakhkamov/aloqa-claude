@@ -40,10 +40,27 @@ type Channel struct {
 	Archived    bool        `json:"archived"`
 	CreatedAt   time.Time   `json:"created_at"`
 	UpdatedAt   time.Time   `json:"updated_at"`
-	// Members is populated only for DM and group DM channels so the client can
-	// resolve the counterpart user(s) without an extra round-trip per row in
-	// the sidebar. Kept omitempty so non-DM channels keep their existing shape.
+	// LastActivityAt is the created_at of the most recent non-deleted message in
+	// the channel, used by the client to order the sidebar by last activity
+	// (ALK-837). Populated only by the per-user channel list (ListByUser); other
+	// responses leave it nil and omitempty keeps their shape unchanged.
+	LastActivityAt *time.Time `json:"last_activity_at,omitempty"`
+	// Members is populated for DM/group DM list rows and selected realtime
+	// channel payloads so clients can decide whether the current user is part
+	// of a channel without an extra round-trip. Kept omitempty so ordinary
+	// non-DM channel responses keep their existing shape.
 	Members []uuid.UUID `json:"members,omitempty"`
+}
+
+// MentionSuggestion is a channel member surfaced as an @mention autocomplete
+// candidate (ALK-838). Username is the local part of the member's email — the
+// handle the composer inserts as `@username`.
+type MentionSuggestion struct {
+	ID          uuid.UUID `json:"id"`
+	Username    string    `json:"username"`
+	DisplayName string    `json:"display_name"`
+	AvatarURL   string    `json:"avatar_url,omitempty"`
+	Position    *string   `json:"position"`
 }
 
 // ArchivedChannelInfo carries the per-row data the Archived Channels list

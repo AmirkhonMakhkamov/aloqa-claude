@@ -7189,6 +7189,23 @@ components:
       properties:
         last_read_message_id:
           $ref: '#/components/schemas/UUID'
+    ChannelReadPayload:
+      type: object
+      description: >-
+        Realtime `channel.read` event payload (ALK-111): a user advanced their
+        last-read watermark on a channel. Clients use it to update seen
+        indicators in realtime.
+      required:
+        - channel_id
+        - user_id
+        - last_read_at
+      properties:
+        channel_id:
+          $ref: '#/components/schemas/UUID'
+        user_id:
+          $ref: '#/components/schemas/UUID'
+        last_read_at:
+          $ref: '#/components/schemas/IsoDatetime'
     Message:
       type: object
       required:
@@ -9991,6 +10008,7 @@ components:
         - typing.started
         - channel.created
         - channel.updated
+        - channel.read
         - member.joined
         - member.left
         - notification.added
@@ -10559,6 +10577,7 @@ x-ws-require-concrete:
   - typing.started
   - channel.created
   - channel.updated
+  - channel.read
   - member.joined
   - member.left
   - notification.added
@@ -10620,6 +10639,7 @@ x-ws-payloads:
   typing.started: '#/components/schemas/TypingPayload'
   channel.created: '#/components/schemas/Channel'
   channel.updated: '#/components/schemas/Channel'
+  channel.read: '#/components/schemas/ChannelReadPayload'
   member.joined: '#/components/schemas/WorkspaceMember'
   member.left: '#/components/schemas/WorkspaceMember'
   notification.added: '#/components/schemas/Notification'

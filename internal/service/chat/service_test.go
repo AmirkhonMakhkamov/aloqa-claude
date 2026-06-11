@@ -799,6 +799,54 @@ func TestGuestCanSendAndTrackUnreadWithSharedAccessPolicy(t *testing.T) {
 	}
 }
 
+func TestMarkReadPublishesChannelReadEvent(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	userID := uuid.New()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, userID}: {ChannelID: channelID, UserID: userID},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	publisher := &recordingPublisher{}
+	svc := NewService(channels, &fakeMessageRepo{}, workspaces, nil, publisher, nil, nil, nil, nil)
+	svc.SetAccessPolicy(accesspolicy.NewChecker(workspaces, channels, nil, nil))
+
+	if err := svc.MarkRead(ctx, channelID, userID); err != nil {
+		t.Fatalf("MarkRead returned error: %v", err)
+	}
+
+	// MarkRead broadcasts a single channel.read event so other clients update
+	// seen indicators in realtime (ALK-111).
+	if len(publisher.events) != 1 {
+		t.Fatalf("published events = %d, want 1 channel.read", len(publisher.events))
+	}
+	var envelope struct {
+		Type    eventpkg.Type               `json:"type"`
+		Payload eventpkg.ChannelReadPayload `json:"payload"`
+	}
+	if err := json.Unmarshal(publisher.events[0], &envelope); err != nil {
+		t.Fatalf("unmarshal channel.read envelope: %v", err)
+	}
+	if envelope.Type != eventpkg.TypeChannelRead {
+		t.Fatalf("event type = %s, want channel.read", envelope.Type)
+	}
+	if envelope.Payload.ChannelID != channelID || envelope.Payload.UserID != userID {
+		t.Fatalf("payload = %+v, want channel %s / user %s", envelope.Payload, channelID, userID)
+	}
+	if envelope.Payload.LastReadAt.IsZero() {
+		t.Fatalf("payload last_read_at is zero, want a timestamp")
+	}
+}
+
 func TestCollaboratorCanSendWithSharedAccessPolicy(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()

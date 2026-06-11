@@ -2734,6 +2734,17 @@ func (s *Service) MarkRead(ctx context.Context, channelID, userID uuid.UUID) err
 		return cerrors.Internal("failed to mark as read", err)
 	}
 
+	// Broadcast the advanced read watermark so other clients viewing the
+	// channel can update seen indicators in realtime (ALK-111). Best-effort:
+	// publishEvent swallows transport errors, so a failure never fails the read.
+	if decision.Channel != nil && decision.Channel.WorkspaceID != nil {
+		s.publishEvent(ctx, event.TypeChannelRead, *decision.Channel.WorkspaceID, channelID, userID, event.ChannelReadPayload{
+			ChannelID:  channelID,
+			UserID:     userID,
+			LastReadAt: time.Now().UTC(),
+		})
+	}
+
 	return nil
 }
 

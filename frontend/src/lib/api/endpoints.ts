@@ -9,6 +9,7 @@ import type {
   CallParticipant,
   CallSettings,
   Channel,
+  FileCategory,
   FileDownloadURL,
   FileListResponse,
   FileStorageUsage,
@@ -135,6 +136,7 @@ export const filesApi = {
       dir?: "asc" | "desc";
       scope?: "all" | "mine" | "shared" | "favorites";
       chat_id?: UUID;
+      category?: FileCategory;
       limit?: number;
       cursor?: string;
     } = {},

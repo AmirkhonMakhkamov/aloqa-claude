@@ -132,6 +132,7 @@ type FileListParams struct {
 	Dir         string
 	Scope       string
 	ChatID      *uuid.UUID
+	Category    string
 	Limit       int
 	Cursor      string
 }

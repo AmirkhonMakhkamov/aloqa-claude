@@ -132,6 +132,7 @@ func (h *FileHandler) ListLibrary(w http.ResponseWriter, r *http.Request) {
 		Dir:         r.URL.Query().Get("dir"),
 		Scope:       r.URL.Query().Get("scope"),
 		ChatID:      chatID,
+		Category:    r.URL.Query().Get("category"),
 		Limit:       limit,
 		Cursor:      r.URL.Query().Get("cursor"),
 	})

@@ -1183,6 +1183,9 @@ func (r *messageHTTPMessageRepo) GetAttachmentByStoragePath(context.Context, str
 func (r *messageHTTPMessageRepo) ListAttachments(context.Context, uuid.UUID) ([]entity.Attachment, error) {
 	return nil, nil
 }
+func (r *messageHTTPMessageRepo) ListAttachmentsByMessageIDs(context.Context, []uuid.UUID) (map[uuid.UUID][]entity.Attachment, error) {
+	return nil, nil
+}
 func (r *messageHTTPMessageRepo) CountUnread(context.Context, uuid.UUID, uuid.UUID, time.Time) (int, error) {
 	return 0, nil
 }

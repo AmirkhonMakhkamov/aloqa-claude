@@ -550,6 +550,9 @@ func (r *fakeMessageRepo) GetAttachmentByStoragePath(_ context.Context, storageP
 func (r *fakeMessageRepo) ListAttachments(context.Context, uuid.UUID) ([]entity.Attachment, error) {
 	return nil, nil
 }
+func (r *fakeMessageRepo) ListAttachmentsByMessageIDs(context.Context, []uuid.UUID) (map[uuid.UUID][]entity.Attachment, error) {
+	return nil, nil
+}
 func (r *fakeMessageRepo) CountUnread(context.Context, uuid.UUID, uuid.UUID, time.Time) (int, error) {
 	return 0, nil
 }

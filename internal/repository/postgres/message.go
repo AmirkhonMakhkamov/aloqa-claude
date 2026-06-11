@@ -1159,6 +1159,47 @@ func (r *MessageRepo) ListAttachments(ctx context.Context, messageID uuid.UUID) 
 	return attachments, nil
 }
 
+func (r *MessageRepo) ListAttachmentsByMessageIDs(ctx context.Context, messageIDs []uuid.UUID) (map[uuid.UUID][]entity.Attachment, error) {
+	attachmentsByMessageID := make(map[uuid.UUID][]entity.Attachment, len(messageIDs))
+	if len(messageIDs) == 0 {
+		return attachmentsByMessageID, nil
+	}
+
+	query := `
+		SELECT id, message_id, file_name, file_size, mime_type, storage_path, created_at
+		FROM attachments
+		WHERE message_id = ANY($1)
+		ORDER BY message_id, created_at`
+
+	rows, err := r.db.Query(ctx, query, messageIDs)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list attachments by message ids: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var a entity.Attachment
+		if err := rows.Scan(
+			&a.ID,
+			&a.MessageID,
+			&a.FileName,
+			&a.FileSize,
+			&a.MimeType,
+			&a.StoragePath,
+			&a.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("postgres: list attachments by message ids scan: %w", err)
+		}
+		a.URL = "/files/" + a.StoragePath
+		attachmentsByMessageID[a.MessageID] = append(attachmentsByMessageID[a.MessageID], a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list attachments by message ids rows: %w", err)
+	}
+
+	return attachmentsByMessageID, nil
+}
+
 func (r *MessageRepo) CountUnread(ctx context.Context, channelID, userID uuid.UUID, since time.Time) (int, error) {
 	query := `
 		SELECT COUNT(*)

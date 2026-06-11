@@ -1644,6 +1644,9 @@ func (s *Service) GetMessage(ctx context.Context, messageID, userID uuid.UUID) (
 	if err := s.hydrateMessageFiles(ctx, items); err != nil {
 		return nil, err
 	}
+	if err := s.hydrateMessageAttachments(ctx, items); err != nil {
+		return nil, err
+	}
 	*msg = items[0]
 	return msg, nil
 }
@@ -1674,6 +1677,9 @@ func (s *Service) GetMessages(ctx context.Context, channelID, userID uuid.UUID, 
 	if err := s.hydrateMessageFiles(ctx, page.Items); err != nil {
 		return pagination.Page[entity.Message]{}, err
 	}
+	if err := s.hydrateMessageAttachments(ctx, page.Items); err != nil {
+		return pagination.Page[entity.Message]{}, err
+	}
 	redactDeletedMessages(page.Items)
 	return page, nil
 }
@@ -1698,6 +1704,9 @@ func (s *Service) GetPinnedMessages(ctx context.Context, channelID, userID uuid.
 		return nil, err
 	}
 	if err := s.hydrateMessageFiles(ctx, items); err != nil {
+		return nil, err
+	}
+	if err := s.hydrateMessageAttachments(ctx, items); err != nil {
 		return nil, err
 	}
 	return items, nil
@@ -1726,6 +1735,9 @@ func (s *Service) GetThreadReplies(ctx context.Context, parentID, userID uuid.UU
 		return pagination.Page[entity.Message]{}, err
 	}
 	if err := s.hydrateMessageFiles(ctx, page.Items); err != nil {
+		return pagination.Page[entity.Message]{}, err
+	}
+	if err := s.hydrateMessageAttachments(ctx, page.Items); err != nil {
 		return pagination.Page[entity.Message]{}, err
 	}
 	redactDeletedMessages(page.Items)
@@ -2957,6 +2969,36 @@ func (s *Service) hydrateMessageReactions(ctx context.Context, items []entity.Me
 		}
 
 		items[i].Reactions = reactionsByMessageID[items[i].ID]
+	}
+	return nil
+}
+
+func (s *Service) hydrateMessageAttachments(ctx context.Context, items []entity.Message) error {
+	messageIDs := make([]uuid.UUID, 0, len(items))
+	for i := range items {
+		if items[i].DeletedAt != nil {
+			items[i].Attachments = nil
+			continue
+		}
+
+		messageIDs = append(messageIDs, items[i].ID)
+	}
+	if len(messageIDs) == 0 {
+		return nil
+	}
+
+	attachmentsByMessageID, err := s.messages.ListAttachmentsByMessageIDs(ctx, messageIDs)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to list message attachments", "message_count", len(messageIDs), "error", err)
+		return cerrors.Internal("failed to list message attachments", err)
+	}
+
+	for i := range items {
+		if items[i].DeletedAt != nil {
+			continue
+		}
+
+		items[i].Attachments = attachmentsByMessageID[items[i].ID]
 	}
 	return nil
 }

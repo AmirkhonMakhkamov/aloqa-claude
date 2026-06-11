@@ -95,7 +95,8 @@ export interface Attachment {
   created_at: ISODate;
 }
 
-export type FileCategory = "image" | "document" | "text" | "archive" | "video" | "audio";
+export type FileCategory = "image" | "document" | "archive" | "video" | "audio" | "code";
+export type FileUploadLimitCategory = "image" | "document" | "text" | "archive" | "video" | "audio";
 export type FileSharedTargetType = "channel" | "dm";
 
 export interface FileOwner {
@@ -153,7 +154,7 @@ export interface FileListResponse {
 export interface FileStorageUsage {
   used_bytes: number;
   limit_bytes: number;
-  upload_limits: Record<FileCategory, number>;
+  upload_limits: Record<FileUploadLimitCategory, number>;
 }
 
 export interface FileDownloadURL {

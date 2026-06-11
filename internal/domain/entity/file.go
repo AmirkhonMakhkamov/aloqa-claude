@@ -11,10 +11,10 @@ type FileCategory string
 const (
 	FileCategoryImage    FileCategory = "image"
 	FileCategoryDocument FileCategory = "document"
-	FileCategoryText     FileCategory = "text"
 	FileCategoryArchive  FileCategory = "archive"
 	FileCategoryVideo    FileCategory = "video"
 	FileCategoryAudio    FileCategory = "audio"
+	FileCategoryCode     FileCategory = "code"
 )
 
 type FileShareTargetType string

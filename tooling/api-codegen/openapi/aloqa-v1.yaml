@@ -228,6 +228,9 @@ paths:
         - name: chat_id
           in: query
           schema: { $ref: '#/components/schemas/UUID' }
+        - name: category
+          in: query
+          schema: { type: string, enum: [image, document, archive, video, audio, code] }
         - name: limit
           in: query
           schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
@@ -2083,7 +2086,7 @@ components:
       type: object
       required: [type, count]
       properties:
-        type: { type: string, enum: [image, document, text, archive, video, audio] }
+        type: { type: string, enum: [image, document, archive, video, audio, code] }
         count: { type: integer }
 
     FileChatFacet:

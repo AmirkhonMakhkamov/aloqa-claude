@@ -99,6 +99,7 @@ func (r *FileRepo) ListFiles(ctx context.Context, params repository.FileListPara
 	sortKey := normalizeFileSort(params.Sort)
 	dir := normalizeFileDir(params.Dir, sortKey)
 	scope := normalizeFileScope(params.Scope)
+	category := normalizeFileCategory(params.Category)
 
 	files, err := r.loadAccessibleFiles(ctx, params.UserID, nil, "")
 	if err != nil {
@@ -108,7 +109,7 @@ func (r *FileRepo) ListFiles(ctx context.Context, params repository.FileListPara
 		return entity.FileListResult{}, err
 	}
 
-	filtered := filterLibraryFiles(files, params.WorkspaceID, strings.TrimSpace(params.Query), scope, params.ChatID, params.UserID)
+	filtered := filterLibraryFiles(files, params.WorkspaceID, strings.TrimSpace(params.Query), scope, params.ChatID, category, params.UserID)
 	sortLibraryFiles(filtered, sortKey, dir)
 
 	totalBytes := int64(0)
@@ -531,7 +532,7 @@ func (r *FileRepo) hydrateSharedTargets(ctx context.Context, viewerID uuid.UUID,
 	return nil
 }
 
-func filterLibraryFiles(files []entity.LibraryFile, workspaceID uuid.UUID, query string, scope string, chatID *uuid.UUID, userID uuid.UUID) []entity.LibraryFile {
+func filterLibraryFiles(files []entity.LibraryFile, workspaceID uuid.UUID, query string, scope string, chatID *uuid.UUID, category entity.FileCategory, userID uuid.UUID) []entity.LibraryFile {
 	lowerQuery := strings.ToLower(query)
 	filtered := make([]entity.LibraryFile, 0, len(files))
 	for _, file := range files {
@@ -551,6 +552,9 @@ func filterLibraryFiles(files []entity.LibraryFile, workspaceID uuid.UUID, query
 			continue
 		}
 		if chatID != nil && !fileSharedWithChat(file, *chatID) {
+			continue
+		}
+		if category != "" && categorizeFile(file.MimeType, file.Extension) != category {
 			continue
 		}
 		filtered = append(filtered, file)
@@ -684,6 +688,20 @@ func normalizeFileScope(value string) string {
 	}
 }
 
+func normalizeFileCategory(value string) entity.FileCategory {
+	switch entity.FileCategory(value) {
+	case entity.FileCategoryImage,
+		entity.FileCategoryDocument,
+		entity.FileCategoryArchive,
+		entity.FileCategoryVideo,
+		entity.FileCategoryAudio,
+		entity.FileCategoryCode:
+		return entity.FileCategory(value)
+	default:
+		return ""
+	}
+}
+
 func decodeFileCursor(value string) (uuid.UUID, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(value)
 	if err != nil {
@@ -711,6 +729,18 @@ func encodeFileCursor(id uuid.UUID) string {
 func categorizeFile(mimeType string, extension string) entity.FileCategory {
 	lowerMime := strings.ToLower(mimeType)
 	lowerExt := strings.TrimPrefix(strings.ToLower(extension), ".")
+	switch lowerExt {
+	case "avif", "bmp", "gif", "heic", "heif", "jpeg", "jpg", "png", "tif", "tiff", "webp":
+		return entity.FileCategoryImage
+	case "avi", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "webm":
+		return entity.FileCategoryVideo
+	case "aac", "aiff", "flac", "m4a", "mp3", "ogg", "opus", "wav":
+		return entity.FileCategoryAudio
+	case "7z", "bz2", "gz", "rar", "tar", "tgz", "zip":
+		return entity.FileCategoryArchive
+	case "c", "cpp", "cs", "css", "csv", "diff", "doc", "docx", "go", "h", "html", "java", "js", "json", "jsx", "key", "kt", "log", "md", "numbers", "odp", "ods", "odt", "pages", "pdf", "php", "ppt", "pptx", "py", "rb", "rs", "rtf", "sh", "sql", "swift", "toml", "ts", "tsx", "txt", "xls", "xlsx", "xml", "yaml", "yml":
+		return entity.FileCategoryDocument
+	}
 	if strings.HasPrefix(lowerMime, "image/") {
 		return entity.FileCategoryImage
 	}
@@ -720,17 +750,11 @@ func categorizeFile(mimeType string, extension string) entity.FileCategory {
 	if strings.HasPrefix(lowerMime, "audio/") {
 		return entity.FileCategoryAudio
 	}
-	if strings.HasPrefix(lowerMime, "text/") {
-		return entity.FileCategoryText
-	}
-	switch lowerExt {
-	case "zip", "rar", "7z", "tar", "gz":
+	switch lowerMime {
+	case "application/zip", "application/x-7z-compressed", "application/x-rar-compressed", "application/gzip":
 		return entity.FileCategoryArchive
-	case "txt", "md", "csv", "json", "xml", "yaml", "yml":
-		return entity.FileCategoryText
-	default:
-		return entity.FileCategoryDocument
 	}
+	return entity.FileCategoryDocument
 }
 
 func shouldExposePreviewURL(mimeType string, extension string, messageCard bool) bool {

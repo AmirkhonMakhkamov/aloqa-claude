@@ -124,6 +124,41 @@ type MessageRepository interface {
 	CountThreadReplies(ctx context.Context, parentID uuid.UUID) (int, error)
 }
 
+type FileListParams struct {
+	UserID      uuid.UUID
+	WorkspaceID uuid.UUID
+	Query       string
+	Sort        string
+	Dir         string
+	Scope       string
+	ChatID      *uuid.UUID
+	Category    string
+	Limit       int
+	Cursor      string
+}
+
+type FileShareOptions struct {
+	TargetType  entity.FileShareTargetType
+	TargetID    uuid.UUID
+	WorkspaceID uuid.UUID
+	ActorID     uuid.UUID
+	OwnerOnly   bool
+}
+
+type FileRepository interface {
+	CreateFile(ctx context.Context, file *entity.LibraryFile) error
+	GetAccessibleFile(ctx context.Context, fileID, userID uuid.UUID) (*entity.LibraryFile, error)
+	GetAccessibleFileByStoragePath(ctx context.Context, storagePath string, userID uuid.UUID) (*entity.LibraryFile, error)
+	ListFiles(ctx context.Context, params FileListParams) (entity.FileListResult, error)
+	SetFavorite(ctx context.Context, userID, fileID uuid.UUID, starred bool) error
+	StorageUsedBytes(ctx context.Context, userID uuid.UUID) (int64, error)
+	DeleteFile(ctx context.Context, fileID, userID uuid.UUID) (*entity.LibraryFile, error)
+	ShareFile(ctx context.Context, fileID uuid.UUID, opts FileShareOptions) error
+	RevokeFileShare(ctx context.Context, fileID uuid.UUID, opts FileShareOptions) error
+	ListFileShares(ctx context.Context, fileID, userID uuid.UUID) ([]entity.FileShare, error)
+	ResolveMessageFiles(ctx context.Context, fileIDs []uuid.UUID) ([]entity.MessageFile, error)
+}
+
 // UnreadSummary is a single channel's unread state.
 type UnreadSummary struct {
 	ChannelID  uuid.UUID

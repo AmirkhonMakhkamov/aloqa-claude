@@ -339,6 +339,49 @@ func TestSendMessageAllowsGlobalSavedChannelFromWorkspaceRoute(t *testing.T) {
 	}
 }
 
+func TestSendMessageFileIDsTransactionalShareFailurePreservesAppError(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	userID := uuid.New()
+	fileID := uuid.New()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, userID}: {ChannelID: channelID, UserID: userID},
+		},
+	}
+	messages := &fakeMessageRepo{messages: map[uuid.UUID]*entity.Message{}}
+	files := &fakeChatFileRepo{shareErr: cerrors.Forbidden("cannot share file")}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	txManager := &fakeChatTxManager{scope: &fakeChatTxScope{
+		messages: messages,
+		files:    files,
+		channels: channels,
+	}}
+	svc := NewService(channels, messages, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+	svc.SetTransactionManager(txManager)
+
+	_, err := svc.SendMessage(ctx, channelID, userID, SendMessageInput{FileIDs: []uuid.UUID{fileID}})
+	if !hasCode(err, cerrors.CodeForbidden) {
+		t.Fatalf("SendMessage error = %v, want FORBIDDEN", err)
+	}
+	if len(messages.messages) != 0 {
+		t.Fatalf("messages persisted = %d, want none after share failure", len(messages.messages))
+	}
+	if txManager.calls != 1 {
+		t.Fatalf("transaction calls = %d, want 1", txManager.calls)
+	}
+	if len(files.shares) != 1 || files.shares[0].fileID != fileID {
+		t.Fatalf("shares = %+v, want attempted share for %s", files.shares, fileID)
+	}
+}
+
 func TestSendMessageResolvesMentionsForCreatedEvent(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -753,6 +796,54 @@ func TestGuestCanSendAndTrackUnreadWithSharedAccessPolicy(t *testing.T) {
 	}
 	if len(counts) != 0 {
 		t.Fatalf("counts after mark read = %+v, want empty", counts)
+	}
+}
+
+func TestMarkReadPublishesChannelReadEvent(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	userID := uuid.New()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, userID}: {ChannelID: channelID, UserID: userID},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	publisher := &recordingPublisher{}
+	svc := NewService(channels, &fakeMessageRepo{}, workspaces, nil, publisher, nil, nil, nil, nil)
+	svc.SetAccessPolicy(accesspolicy.NewChecker(workspaces, channels, nil, nil))
+
+	if err := svc.MarkRead(ctx, channelID, userID); err != nil {
+		t.Fatalf("MarkRead returned error: %v", err)
+	}
+
+	// MarkRead broadcasts a single channel.read event so other clients update
+	// seen indicators in realtime (ALK-111).
+	if len(publisher.events) != 1 {
+		t.Fatalf("published events = %d, want 1 channel.read", len(publisher.events))
+	}
+	var envelope struct {
+		Type    eventpkg.Type               `json:"type"`
+		Payload eventpkg.ChannelReadPayload `json:"payload"`
+	}
+	if err := json.Unmarshal(publisher.events[0], &envelope); err != nil {
+		t.Fatalf("unmarshal channel.read envelope: %v", err)
+	}
+	if envelope.Type != eventpkg.TypeChannelRead {
+		t.Fatalf("event type = %s, want channel.read", envelope.Type)
+	}
+	if envelope.Payload.ChannelID != channelID || envelope.Payload.UserID != userID {
+		t.Fatalf("payload = %+v, want channel %s / user %s", envelope.Payload, channelID, userID)
+	}
+	if envelope.Payload.LastReadAt.IsZero() {
+		t.Fatalf("payload last_read_at is zero, want a timestamp")
 	}
 }
 
@@ -2861,6 +2952,68 @@ func (r *fakeMessageRepo) BatchUnreadCounts(context.Context, uuid.UUID, uuid.UUI
 }
 func (r *fakeMessageRepo) CountThreadReplies(context.Context, uuid.UUID) (int, error) { return 0, nil }
 
+type fakeChatFileShare struct {
+	fileID uuid.UUID
+	opts   repository.FileShareOptions
+}
+
+type fakeChatFileRepo struct {
+	shareErr error
+	shares   []fakeChatFileShare
+}
+
+func (r *fakeChatFileRepo) CreateFile(context.Context, *entity.LibraryFile) error {
+	return nil
+}
+
+func (r *fakeChatFileRepo) GetAccessibleFile(context.Context, uuid.UUID, uuid.UUID) (*entity.LibraryFile, error) {
+	return nil, cerrors.NotFound("file not found")
+}
+
+func (r *fakeChatFileRepo) GetAccessibleFileByStoragePath(context.Context, string, uuid.UUID) (*entity.LibraryFile, error) {
+	return nil, cerrors.NotFound("file not found")
+}
+
+func (r *fakeChatFileRepo) ListFiles(context.Context, repository.FileListParams) (entity.FileListResult, error) {
+	return entity.FileListResult{}, nil
+}
+
+func (r *fakeChatFileRepo) SetFavorite(context.Context, uuid.UUID, uuid.UUID, bool) error {
+	return nil
+}
+
+func (r *fakeChatFileRepo) StorageUsedBytes(context.Context, uuid.UUID) (int64, error) {
+	return 0, nil
+}
+
+func (r *fakeChatFileRepo) DeleteFile(context.Context, uuid.UUID, uuid.UUID) (*entity.LibraryFile, error) {
+	return nil, cerrors.NotFound("file not found")
+}
+
+func (r *fakeChatFileRepo) ShareFile(_ context.Context, fileID uuid.UUID, opts repository.FileShareOptions) error {
+	r.shares = append(r.shares, fakeChatFileShare{fileID: fileID, opts: opts})
+	if r.shareErr != nil {
+		return r.shareErr
+	}
+	return nil
+}
+
+func (r *fakeChatFileRepo) RevokeFileShare(context.Context, uuid.UUID, repository.FileShareOptions) error {
+	return nil
+}
+
+func (r *fakeChatFileRepo) ListFileShares(context.Context, uuid.UUID, uuid.UUID) ([]entity.FileShare, error) {
+	return nil, nil
+}
+
+func (r *fakeChatFileRepo) ResolveMessageFiles(_ context.Context, fileIDs []uuid.UUID) ([]entity.MessageFile, error) {
+	files := make([]entity.MessageFile, 0, len(fileIDs))
+	for _, fileID := range fileIDs {
+		files = append(files, entity.MessageFile{ID: fileID})
+	}
+	return files, nil
+}
+
 type fakeChannelAccessStateRepo struct {
 	states map[[2]uuid.UUID]*entity.ChannelAccessState
 }
@@ -2898,6 +3051,7 @@ func (m *fakeChatTxManager) WithinTx(ctx context.Context, fn func(context.Contex
 
 type fakeChatTxScope struct {
 	messages repository.MessageRepository
+	files    repository.FileRepository
 	channels repository.ChannelRepository
 	search   searchsvc.Indexer
 	events   []eventpkg.Event
@@ -2906,6 +3060,7 @@ type fakeChatTxScope struct {
 func (s *fakeChatTxScope) Users() repository.UserRepository                       { return nil }
 func (s *fakeChatTxScope) Workspaces() repository.WorkspaceRepository             { return nil }
 func (s *fakeChatTxScope) Messages() repository.MessageRepository                 { return s.messages }
+func (s *fakeChatTxScope) Files() repository.FileRepository                       { return s.files }
 func (s *fakeChatTxScope) Channels() repository.ChannelRepository                 { return s.channels }
 func (s *fakeChatTxScope) ChannelGrants() repository.ChannelAccessGrantRepository { return nil }
 func (s *fakeChatTxScope) Calls() repository.CallRepository                       { return nil }

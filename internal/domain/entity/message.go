@@ -65,11 +65,13 @@ type Message struct {
 	DeletedAt *time.Time      `json:"deleted_at,omitempty"`
 
 	// Aggregated fields (populated by queries, not stored directly).
-	ReplyCount  int          `json:"reply_count,omitempty"`
-	Reactions   []Reaction   `json:"reactions,omitempty"`
-	Mentions    []uuid.UUID  `json:"mentions"`
-	Attachments []Attachment `json:"attachments,omitempty"`
-	User        *User        `json:"user,omitempty"`
+	ReplyCount  int           `json:"reply_count,omitempty"`
+	Reactions   []Reaction    `json:"reactions,omitempty"`
+	Mentions    []uuid.UUID   `json:"mentions"`
+	Attachments []Attachment  `json:"attachments,omitempty"`
+	FileIDs     []uuid.UUID   `json:"file_ids,omitempty" db:"file_ids"`
+	Files       []MessageFile `json:"files,omitempty"`
+	User        *User         `json:"user,omitempty"`
 
 	// Transient echo of the client-supplied id on send. NOT persisted (absent
 	// from the messages columns); set only on the in-memory message before the

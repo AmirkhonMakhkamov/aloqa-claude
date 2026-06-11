@@ -154,6 +154,8 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 		// Platform user account endpoints.
 		r.Route("/api/v1/users", func(r chi.Router) {
 			r.Get("/me", deps.Account.Me)
+			r.Get("/me/files", deps.Files.ListLibrary)
+			r.Get("/me/storage", deps.Files.StorageUsage)
 			r.Patch("/me", deps.Account.UpdateProfile)
 			r.Patch("/me/preferences", deps.Account.UpdatePreferences)
 			r.Post("/me/deactivate", deps.Account.Deactivate)
@@ -171,6 +173,20 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 
 		// File downloads (authenticated).
 		r.Get("/files/*", deps.Files.Download)
+
+		r.Route("/api/v1/files", func(r chi.Router) {
+			r.Post("/upload", deps.Files.UploadLibrary)
+			r.Route("/{fileID}", func(r chi.Router) {
+				r.Get("/", deps.Files.FileURL)
+				r.Delete("/", deps.Files.DeleteLibrary)
+				r.Get("/content", deps.Files.DownloadLibraryContent)
+				r.Put("/favorite", deps.Files.Favorite)
+				r.Delete("/favorite", deps.Files.Unfavorite)
+				r.Post("/shares", deps.Files.Share)
+				r.Delete("/shares", deps.Files.RevokeShare)
+				r.Get("/shares", deps.Files.ListShares)
+			})
+		})
 
 		r.Route("/api/v1/reactions", func(r chi.Router) {
 			r.Delete("/{reactionID}", deps.Messages.RemoveReactionByID)

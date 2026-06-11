@@ -95,6 +95,87 @@ export interface Attachment {
   created_at: ISODate;
 }
 
+export type FileCategory = "image" | "document" | "archive" | "video" | "audio" | "code";
+export type FileUploadLimitCategory = "image" | "document" | "text" | "archive" | "video" | "audio";
+export type FileSharedTargetType = "channel" | "dm";
+
+export interface FileOwner {
+  id: UUID;
+  display_name: string;
+  avatar_url?: string;
+}
+
+export interface FileSharedTarget {
+  type: FileSharedTargetType;
+  target_id: UUID;
+  workspace_id: UUID;
+  display_name: string;
+  avatar_url?: string;
+  member_count?: number;
+}
+
+export interface FileTypeFacet {
+  type: FileCategory;
+  count: number;
+}
+
+export interface FileChatFacet extends FileSharedTarget {
+  count: number;
+}
+
+export interface FileListFacets {
+  types: FileTypeFacet[];
+  chats: FileChatFacet[];
+}
+
+export interface LibraryFile {
+  id: UUID;
+  user_id: UUID;
+  workspace_id: UUID;
+  filename: string;
+  extension: string;
+  mime_type: string;
+  size: number;
+  created_at: ISODate;
+  starred: boolean;
+  preview_url?: string;
+  owner: FileOwner;
+  shared_with: FileSharedTarget[];
+}
+
+export interface FileListResponse {
+  files: LibraryFile[];
+  next_cursor?: string;
+  total_count: number;
+  total_bytes: number;
+  facets: FileListFacets;
+}
+
+export interface FileStorageUsage {
+  used_bytes: number;
+  limit_bytes: number;
+  upload_limits: Record<FileUploadLimitCategory, number>;
+}
+
+export interface FileDownloadURL {
+  url: string;
+  file_id: UUID;
+  filename: string;
+  extension: string;
+  mime_type: string;
+  size: number;
+}
+
+export interface MessageFile {
+  id: UUID;
+  status?: "deleted";
+  filename?: string;
+  extension?: string;
+  mime_type?: string;
+  size?: number;
+  preview_url?: string;
+}
+
 export type MessageType = "text" | "system" | "file";
 
 export interface Message {
@@ -108,6 +189,8 @@ export interface Message {
   reactions?: Reaction[];
   mentions?: UUID[] | null;
   attachments?: Attachment[];
+  file_ids?: UUID[];
+  files?: MessageFile[];
   pinned?: boolean;
   pinned_by?: UUID | null;
   pinned_at?: ISODate | null;

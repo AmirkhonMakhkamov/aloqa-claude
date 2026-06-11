@@ -35,6 +35,7 @@ const (
 	TypeTypingStarted   Type = "typing.started"
 	TypeChannelCreated  Type = "channel.created"
 	TypeChannelUpdated  Type = "channel.updated"
+	TypeChannelRead     Type = "channel.read"
 	TypeMemberJoined    Type = "member.joined"
 	TypeMemberLeft      Type = "member.left"
 	TypePresenceChanged Type = "presence.changed"
@@ -257,6 +258,14 @@ type ChannelPayload struct {
 type MemberPayload struct {
 	ChannelID uuid.UUID `json:"channel_id"`
 	UserID    uuid.UUID `json:"user_id"`
+}
+
+// ChannelReadPayload announces that a user advanced their last-read watermark on
+// a channel. Clients use it to update seen indicators in realtime (ALK-111).
+type ChannelReadPayload struct {
+	ChannelID  uuid.UUID `json:"channel_id"`
+	UserID     uuid.UUID `json:"user_id"`
+	LastReadAt time.Time `json:"last_read_at"`
 }
 
 type PresencePayload struct {

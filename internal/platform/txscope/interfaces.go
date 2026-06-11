@@ -12,6 +12,7 @@ type Scope interface {
 	Users() repository.UserRepository
 	Workspaces() repository.WorkspaceRepository
 	Messages() repository.MessageRepository
+	Files() repository.FileRepository
 	Channels() repository.ChannelRepository
 	ChannelGrants() repository.ChannelAccessGrantRepository
 	Calls() repository.CallRepository

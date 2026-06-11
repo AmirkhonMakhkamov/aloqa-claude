@@ -91,9 +91,13 @@ func (r *MessageRepo) withTx(tx pgx.Tx) *MessageRepo {
 }
 
 func (r *MessageRepo) Create(ctx context.Context, msg *entity.Message) error {
+	fileIDs := msg.FileIDs
+	if fileIDs == nil {
+		fileIDs = []uuid.UUID{}
+	}
 	query := `
-		INSERT INTO messages (id, channel_id, user_id, parent_id, content, type, edited, edited_at, pinned, pinned_by, pinned_at, forwarded_from, saved_from, quoted_message_id, quoted_snapshot, profile_share, call_event, created_at, updated_at, deleted_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`
+		INSERT INTO messages (id, channel_id, user_id, parent_id, content, type, edited, edited_at, pinned, pinned_by, pinned_at, forwarded_from, saved_from, quoted_message_id, quoted_snapshot, profile_share, call_event, file_ids, created_at, updated_at, deleted_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)`
 
 	_, err := r.db.Exec(ctx, query,
 		msg.ID,
@@ -113,6 +117,7 @@ func (r *MessageRepo) Create(ctx context.Context, msg *entity.Message) error {
 		msg.QuotedSnapshot,
 		msg.ProfileShare,
 		msg.CallEvent,
+		fileIDs,
 		msg.CreatedAt,
 		msg.UpdatedAt,
 		msg.DeletedAt,
@@ -129,7 +134,7 @@ func (r *MessageRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Messag
 		SELECT
 			m.id, m.channel_id, m.user_id, m.parent_id, m.content, m.type,
 			m.edited, m.edited_at, m.pinned, m.pinned_by, m.pinned_at,
-			m.forwarded_from, m.saved_from, m.quoted_message_id, m.quoted_snapshot, m.profile_share, m.call_event,
+			m.forwarded_from, m.saved_from, m.quoted_message_id, m.quoted_snapshot, m.profile_share, m.call_event, m.file_ids,
 			m.created_at, m.updated_at, m.deleted_at,
 			u.id, u.email, u.display_name, u.avatar_url, u.avatar_color, u.position, u.department, u.password_hash, u.status,
 			u.deactivated_at, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
@@ -156,7 +161,7 @@ func (r *MessageRepo) GetByID(ctx context.Context, id uuid.UUID) (*entity.Messag
 		&msg.SavedFrom,
 		&msg.QuotedMessageID,
 		&msg.QuotedSnapshot,
-		&msg.ProfileShare, &msg.CallEvent,
+		&msg.ProfileShare, &msg.CallEvent, &msg.FileIDs,
 		&msg.CreatedAt,
 		&msg.UpdatedAt,
 		&msg.DeletedAt,
@@ -200,7 +205,7 @@ func (r *MessageRepo) ListByChannel(ctx context.Context, channelID uuid.UUID, p 
 			SELECT
 				m.id, m.channel_id, m.user_id, m.parent_id, m.content, m.type,
 				m.edited, m.edited_at, m.pinned, m.pinned_by, m.pinned_at,
-				m.forwarded_from, m.saved_from, m.quoted_message_id, m.quoted_snapshot, m.profile_share, m.call_event,
+				m.forwarded_from, m.saved_from, m.quoted_message_id, m.quoted_snapshot, m.profile_share, m.call_event, m.file_ids,
 				m.created_at, m.updated_at, m.deleted_at,
 					u.id, u.email, u.display_name, u.avatar_url, u.avatar_color, u.position, u.department, u.password_hash, u.status,
 				u.deactivated_at, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
@@ -215,7 +220,7 @@ func (r *MessageRepo) ListByChannel(ctx context.Context, channelID uuid.UUID, p 
 			SELECT
 				m.id, m.channel_id, m.user_id, m.parent_id, m.content, m.type,
 				m.edited, m.edited_at, m.pinned, m.pinned_by, m.pinned_at,
-				m.forwarded_from, m.saved_from, m.quoted_message_id, m.quoted_snapshot, m.profile_share, m.call_event,
+				m.forwarded_from, m.saved_from, m.quoted_message_id, m.quoted_snapshot, m.profile_share, m.call_event, m.file_ids,
 				m.created_at, m.updated_at, m.deleted_at,
 					u.id, u.email, u.display_name, u.avatar_url, u.avatar_color, u.position, u.department, u.password_hash, u.status,
 				u.deactivated_at, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
@@ -252,7 +257,7 @@ func (r *MessageRepo) ListByChannel(ctx context.Context, channelID uuid.UUID, p 
 			&msg.SavedFrom,
 			&msg.QuotedMessageID,
 			&msg.QuotedSnapshot,
-			&msg.ProfileShare, &msg.CallEvent,
+			&msg.ProfileShare, &msg.CallEvent, &msg.FileIDs,
 			&msg.CreatedAt,
 			&msg.UpdatedAt,
 			&msg.DeletedAt,
@@ -317,7 +322,7 @@ func (r *MessageRepo) ListThreadReplies(ctx context.Context, parentID uuid.UUID,
 			SELECT
 				m.id, m.channel_id, m.user_id, m.parent_id, m.content, m.type,
 				m.edited, m.edited_at, m.pinned, m.pinned_by, m.pinned_at,
-				m.forwarded_from, m.saved_from, m.quoted_message_id, m.quoted_snapshot, m.profile_share, m.call_event,
+				m.forwarded_from, m.saved_from, m.quoted_message_id, m.quoted_snapshot, m.profile_share, m.call_event, m.file_ids,
 				m.created_at, m.updated_at, m.deleted_at,
 					u.id, u.email, u.display_name, u.avatar_url, u.avatar_color, u.position, u.department, u.password_hash, u.status,
 				u.deactivated_at, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
@@ -332,7 +337,7 @@ func (r *MessageRepo) ListThreadReplies(ctx context.Context, parentID uuid.UUID,
 			SELECT
 				m.id, m.channel_id, m.user_id, m.parent_id, m.content, m.type,
 				m.edited, m.edited_at, m.pinned, m.pinned_by, m.pinned_at,
-				m.forwarded_from, m.saved_from, m.quoted_message_id, m.quoted_snapshot, m.profile_share, m.call_event,
+				m.forwarded_from, m.saved_from, m.quoted_message_id, m.quoted_snapshot, m.profile_share, m.call_event, m.file_ids,
 				m.created_at, m.updated_at, m.deleted_at,
 					u.id, u.email, u.display_name, u.avatar_url, u.avatar_color, u.position, u.department, u.password_hash, u.status,
 				u.deactivated_at, u.saved_messages_mode, u.locale, u.created_at, u.updated_at
@@ -369,7 +374,7 @@ func (r *MessageRepo) ListThreadReplies(ctx context.Context, parentID uuid.UUID,
 			&msg.SavedFrom,
 			&msg.QuotedMessageID,
 			&msg.QuotedSnapshot,
-			&msg.ProfileShare, &msg.CallEvent,
+			&msg.ProfileShare, &msg.CallEvent, &msg.FileIDs,
 			&msg.CreatedAt,
 			&msg.UpdatedAt,
 			&msg.DeletedAt,
@@ -597,7 +602,7 @@ func (r *MessageRepo) ListPinned(ctx context.Context, channelID uuid.UUID) ([]en
 		SELECT
 			m.id, m.channel_id, m.user_id, m.parent_id, m.content, m.type,
 			m.edited, m.edited_at, m.pinned, m.pinned_by, m.pinned_at,
-			m.forwarded_from, m.saved_from, m.quoted_message_id, m.quoted_snapshot, m.profile_share, m.call_event,
+			m.forwarded_from, m.saved_from, m.quoted_message_id, m.quoted_snapshot, m.profile_share, m.call_event, m.file_ids,
 			m.created_at, m.updated_at, m.deleted_at
 		FROM messages m
 		WHERE m.channel_id = $1 AND m.pinned = true AND m.deleted_at IS NULL
@@ -628,7 +633,7 @@ func (r *MessageRepo) ListPinned(ctx context.Context, channelID uuid.UUID) ([]en
 			&msg.SavedFrom,
 			&msg.QuotedMessageID,
 			&msg.QuotedSnapshot,
-			&msg.ProfileShare, &msg.CallEvent,
+			&msg.ProfileShare, &msg.CallEvent, &msg.FileIDs,
 			&msg.CreatedAt,
 			&msg.UpdatedAt,
 			&msg.DeletedAt,

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -259,6 +260,61 @@ func TestPresignDownloadByKeyUsesObjectStoreSignerWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestUploadLibraryReturnsQuotaExceededBeforePersisting(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	userID := uuid.New()
+	store := &memoryStorage{}
+	files := &fakeLibraryFileRepo{usedBytes: defaultUserStorageLimitBytes - 1}
+	members := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+
+	svc := NewService(store, &fakeMessageRepo{}, &fakeChannelRepo{}, members, nil, nil, Config{MaxFileSize: 1024}, nil)
+	svc.SetFileRepository(files)
+
+	_, err := svc.UploadLibrary(ctx, workspaceID, userID, "note.txt", bytes.NewReader([]byte("hello")), 5)
+	if !hasCode(err, cerrors.CodeQuotaExceeded) {
+		t.Fatalf("UploadLibrary error = %v, want QUOTA_EXCEEDED", err)
+	}
+	if len(store.objects) != 0 {
+		t.Fatalf("stored objects = %v, want none after quota failure", store.objects)
+	}
+	if len(files.created) != 0 {
+		t.Fatalf("created records = %d, want none after quota failure", len(files.created))
+	}
+}
+
+func TestFileURLInlineDispositionFallsBackForSVG(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	userID := uuid.New()
+	fileID := uuid.New()
+	files := &fakeLibraryFileRepo{files: map[uuid.UUID]*entity.LibraryFile{
+		fileID: {
+			ID:          fileID,
+			UserID:      userID,
+			WorkspaceID: workspaceID,
+			Filename:    "icon.svg",
+			Extension:   "svg",
+			MimeType:    "image/svg+xml",
+			Size:        100,
+			StoragePath: "library/icon.svg",
+		},
+	}}
+
+	svc := NewService(&memoryStorage{}, &fakeMessageRepo{}, &fakeChannelRepo{}, &fakeWorkspaceRepo{}, nil, nil, Config{}, nil)
+	svc.SetFileRepository(files)
+
+	result, err := svc.FileURL(ctx, fileID, userID, "inline")
+	if err != nil {
+		t.Fatalf("FileURL returned error: %v", err)
+	}
+	if !strings.Contains(result.URL, "disposition=attachment") {
+		t.Fatalf("FileURL URL = %q, want attachment disposition for SVG", result.URL)
+	}
+}
+
 type consumingScanner struct {
 	scanned []byte
 }
@@ -510,3 +566,69 @@ func hasCode(err error, code cerrors.Code) bool {
 }
 
 func (r *fakeMessageRepo) HardDelete(context.Context, uuid.UUID) error { return nil }
+
+type fakeLibraryFileRepo struct {
+	files     map[uuid.UUID]*entity.LibraryFile
+	usedBytes int64
+	created   []*entity.LibraryFile
+}
+
+func (r *fakeLibraryFileRepo) CreateFile(_ context.Context, file *entity.LibraryFile) error {
+	if r.files == nil {
+		r.files = map[uuid.UUID]*entity.LibraryFile{}
+	}
+	copy := *file
+	r.files[file.ID] = &copy
+	r.created = append(r.created, &copy)
+	return nil
+}
+
+func (r *fakeLibraryFileRepo) GetAccessibleFile(_ context.Context, fileID, _ uuid.UUID) (*entity.LibraryFile, error) {
+	if file := r.files[fileID]; file != nil {
+		copy := *file
+		return &copy, nil
+	}
+	return nil, cerrors.NotFound("file not found")
+}
+
+func (r *fakeLibraryFileRepo) GetAccessibleFileByStoragePath(_ context.Context, storagePath string, _ uuid.UUID) (*entity.LibraryFile, error) {
+	for _, file := range r.files {
+		if file.StoragePath == storagePath {
+			copy := *file
+			return &copy, nil
+		}
+	}
+	return nil, cerrors.NotFound("file not found")
+}
+
+func (r *fakeLibraryFileRepo) ListFiles(context.Context, repository.FileListParams) (entity.FileListResult, error) {
+	return entity.FileListResult{}, nil
+}
+
+func (r *fakeLibraryFileRepo) SetFavorite(context.Context, uuid.UUID, uuid.UUID, bool) error {
+	return nil
+}
+
+func (r *fakeLibraryFileRepo) StorageUsedBytes(context.Context, uuid.UUID) (int64, error) {
+	return r.usedBytes, nil
+}
+
+func (r *fakeLibraryFileRepo) DeleteFile(context.Context, uuid.UUID, uuid.UUID) (*entity.LibraryFile, error) {
+	return nil, nil
+}
+
+func (r *fakeLibraryFileRepo) ShareFile(context.Context, uuid.UUID, repository.FileShareOptions) error {
+	return nil
+}
+
+func (r *fakeLibraryFileRepo) RevokeFileShare(context.Context, uuid.UUID, repository.FileShareOptions) error {
+	return nil
+}
+
+func (r *fakeLibraryFileRepo) ListFileShares(context.Context, uuid.UUID, uuid.UUID) ([]entity.FileShare, error) {
+	return nil, nil
+}
+
+func (r *fakeLibraryFileRepo) ResolveMessageFiles(context.Context, []uuid.UUID) ([]entity.MessageFile, error) {
+	return nil, nil
+}

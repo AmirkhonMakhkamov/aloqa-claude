@@ -321,6 +321,71 @@ func TestMessagePostEchoesIdempotencyKeyHeaderWhenNoBodyField(t *testing.T) {
 	}
 }
 
+func TestMessagePostFileIDsSharesBeforeSendAndHydratesFiles(t *testing.T) {
+	f := newMessageHTTPFixture()
+	fileID := uuid.New()
+	f.files.files[fileID] = &entity.LibraryFile{
+		ID:          fileID,
+		UserID:      f.userID,
+		WorkspaceID: f.workspaceID,
+		Filename:    "report.pdf",
+		Extension:   "pdf",
+		MimeType:    "application/pdf",
+		Size:        2048,
+	}
+
+	res := f.serve(
+		http.MethodPost,
+		"/channels/"+f.channelID.String()+"/messages",
+		`{"content":"","file_ids":["`+fileID.String()+`"]}`,
+	)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", res.Code, res.Body.String())
+	}
+	var msg entity.Message
+	if err := json.Unmarshal(res.Body.Bytes(), &msg); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	requireHTTPUUIDs(t, msg.FileIDs, fileID)
+	if len(msg.Files) != 1 || msg.Files[0].ID != fileID || msg.Files[0].Filename != "report.pdf" {
+		t.Fatalf("files = %+v, want hydrated report.pdf", msg.Files)
+	}
+	if len(f.files.shares) != 1 {
+		t.Fatalf("shares = %+v, want one share before send", f.files.shares)
+	}
+	share := f.files.shares[0]
+	if share.fileID != fileID || share.opts.TargetID != f.channelID || share.opts.TargetType != entity.FileShareTargetChannel || share.opts.OwnerOnly {
+		t.Fatalf("share = %+v, want channel share with owner_only=false", share)
+	}
+}
+
+func TestMessagePostFileIDsShareFailureDoesNotPersistMessage(t *testing.T) {
+	f := newMessageHTTPFixture()
+	fileID := uuid.New()
+	f.files.files[fileID] = &entity.LibraryFile{
+		ID:          fileID,
+		UserID:      f.userID,
+		WorkspaceID: f.workspaceID,
+		Filename:    "blocked.pdf",
+		Extension:   "pdf",
+		MimeType:    "application/pdf",
+		Size:        2048,
+	}
+	f.files.shareErr = cerrors.Forbidden("cannot share file")
+
+	res := f.serve(
+		http.MethodPost,
+		"/channels/"+f.channelID.String()+"/messages",
+		`{"content":"","file_ids":["`+fileID.String()+`"]}`,
+	)
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", res.Code, res.Body.String())
+	}
+	if len(f.messages.messages) != 0 {
+		t.Fatalf("messages persisted = %d, want none after share failure", len(f.messages.messages))
+	}
+}
+
 func TestMessagePostIncludesResolvedMentionsInResponseAndEvent(t *testing.T) {
 	f := newMessageHTTPFixture()
 	mentionedID := uuid.New()
@@ -818,6 +883,7 @@ type messageHTTPFixture struct {
 	channels    *messageHTTPChannelRepo
 	workspaces  *fakeHTTPWorkspaceRepo
 	messages    *messageHTTPMessageRepo
+	files       *messageHTTPFileRepo
 	publisher   *messageHTTPPublisher
 	router      *chi.Mux
 }
@@ -841,8 +907,10 @@ func newMessageHTTPFixture() messageHTTPFixture {
 		messages:  map[uuid.UUID]*entity.Message{},
 		reactions: map[uuid.UUID]entity.Reaction{},
 	}
+	files := &messageHTTPFileRepo{files: map[uuid.UUID]*entity.LibraryFile{}}
 	publisher := &messageHTTPPublisher{}
 	svc := chatsvc.NewService(channels, messages, workspaces, nil, publisher, nil, nil, nil, nil)
+	svc.SetFileRepository(files)
 	handler := NewMessageHandler(svc)
 
 	router := chi.NewRouter()
@@ -867,6 +935,7 @@ func newMessageHTTPFixture() messageHTTPFixture {
 		channels:    channels,
 		workspaces:  workspaces,
 		messages:    messages,
+		files:       files,
 		publisher:   publisher,
 		router:      router,
 	}
@@ -1122,6 +1191,117 @@ func (r *messageHTTPMessageRepo) BatchUnreadCounts(context.Context, uuid.UUID, u
 }
 func (r *messageHTTPMessageRepo) CountThreadReplies(context.Context, uuid.UUID) (int, error) {
 	return 0, nil
+}
+
+type messageHTTPFileShareCall struct {
+	fileID uuid.UUID
+	opts   repository.FileShareOptions
+}
+
+type messageHTTPFileRepo struct {
+	files    map[uuid.UUID]*entity.LibraryFile
+	shares   []messageHTTPFileShareCall
+	shareErr error
+}
+
+func (r *messageHTTPFileRepo) CreateFile(_ context.Context, file *entity.LibraryFile) error {
+	if r.files == nil {
+		r.files = map[uuid.UUID]*entity.LibraryFile{}
+	}
+	copy := *file
+	r.files[file.ID] = &copy
+	return nil
+}
+
+func (r *messageHTTPFileRepo) GetAccessibleFile(_ context.Context, fileID, userID uuid.UUID) (*entity.LibraryFile, error) {
+	file := r.files[fileID]
+	if file == nil || file.DeletedAt != nil {
+		return nil, cerrors.NotFound("file not found")
+	}
+	if file.UserID != userID && !messageHTTPFileSharedWithUser(*file, userID) {
+		return nil, cerrors.Forbidden("you do not have access to this file")
+	}
+	copy := *file
+	return &copy, nil
+}
+
+func (r *messageHTTPFileRepo) GetAccessibleFileByStoragePath(_ context.Context, storagePath string, userID uuid.UUID) (*entity.LibraryFile, error) {
+	for _, file := range r.files {
+		if file.StoragePath == storagePath {
+			return r.GetAccessibleFile(context.Background(), file.ID, userID)
+		}
+	}
+	return nil, cerrors.NotFound("file not found")
+}
+
+func (r *messageHTTPFileRepo) ListFiles(context.Context, repository.FileListParams) (entity.FileListResult, error) {
+	return entity.FileListResult{}, nil
+}
+
+func (r *messageHTTPFileRepo) SetFavorite(context.Context, uuid.UUID, uuid.UUID, bool) error {
+	return nil
+}
+
+func (r *messageHTTPFileRepo) StorageUsedBytes(context.Context, uuid.UUID) (int64, error) {
+	return 0, nil
+}
+
+func (r *messageHTTPFileRepo) DeleteFile(context.Context, uuid.UUID, uuid.UUID) (*entity.LibraryFile, error) {
+	return nil, nil
+}
+
+func (r *messageHTTPFileRepo) ShareFile(_ context.Context, fileID uuid.UUID, opts repository.FileShareOptions) error {
+	if r.shareErr != nil {
+		return r.shareErr
+	}
+	file := r.files[fileID]
+	if file == nil || file.DeletedAt != nil {
+		return cerrors.NotFound("file not found")
+	}
+	if opts.OwnerOnly && file.UserID != opts.ActorID {
+		return cerrors.Forbidden("only owner can share this file")
+	}
+	r.shares = append(r.shares, messageHTTPFileShareCall{fileID: fileID, opts: opts})
+	return nil
+}
+
+func (r *messageHTTPFileRepo) RevokeFileShare(context.Context, uuid.UUID, repository.FileShareOptions) error {
+	return nil
+}
+
+func (r *messageHTTPFileRepo) ListFileShares(context.Context, uuid.UUID, uuid.UUID) ([]entity.FileShare, error) {
+	return nil, nil
+}
+
+func (r *messageHTTPFileRepo) ResolveMessageFiles(_ context.Context, fileIDs []uuid.UUID) ([]entity.MessageFile, error) {
+	resolved := make([]entity.MessageFile, 0, len(fileIDs))
+	for _, fileID := range fileIDs {
+		file := r.files[fileID]
+		if file == nil {
+			continue
+		}
+		if file.DeletedAt != nil {
+			resolved = append(resolved, entity.MessageFile{ID: fileID, Status: "deleted"})
+			continue
+		}
+		resolved = append(resolved, entity.MessageFile{
+			ID:        file.ID,
+			Filename:  file.Filename,
+			Extension: file.Extension,
+			MimeType:  file.MimeType,
+			Size:      file.Size,
+		})
+	}
+	return resolved, nil
+}
+
+func messageHTTPFileSharedWithUser(file entity.LibraryFile, userID uuid.UUID) bool {
+	for _, target := range file.SharedWith {
+		if target.TargetID == userID {
+			return true
+		}
+	}
+	return false
 }
 
 func requireHTTPUUIDs(t *testing.T, got []uuid.UUID, want ...uuid.UUID) {

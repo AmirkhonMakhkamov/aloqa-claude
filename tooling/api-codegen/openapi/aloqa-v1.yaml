@@ -203,6 +203,59 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/User' }
 
+  /api/v1/users/me/files:
+    get:
+      summary: List the caller's workspace file library projection
+      tags: [files]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: workspace_id
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/UUID' }
+        - name: q
+          in: query
+          schema: { type: string }
+        - name: sort
+          in: query
+          schema: { type: string, enum: [date, name, size], default: date }
+        - name: dir
+          in: query
+          schema: { type: string, enum: [asc, desc] }
+        - name: scope
+          in: query
+          schema: { type: string, enum: [all, mine, shared, favorites], default: all }
+        - name: chat_id
+          in: query
+          schema: { $ref: '#/components/schemas/UUID' }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Cursor-paginated file library page with facets
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileListResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/users/me/storage:
+    get:
+      summary: Get the caller's file storage usage and upload limits
+      tags: [files]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Storage usage
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileStorageUsage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
   /api/v1/users/me/deactivate:
     post:
       summary: Deactivate the authenticated user's account
@@ -634,6 +687,142 @@ paths:
       security: [{ bearerAuth: [] }]
       responses:
         '204': { description: Removed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # -- File library ---------------------------------------------------------
+  /api/v1/files/upload:
+    post:
+      summary: Upload a file into the caller's Files library
+      tags: [files]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                workspace_id:
+                  $ref: '#/components/schemas/UUID'
+                context_id:
+                  description: Workspace id or chat/channel id used to infer workspace.
+                  $ref: '#/components/schemas/UUID'
+      responses:
+        '201':
+          description: Created library file
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LibraryFile' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413':
+          description: User storage quota exceeded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /api/v1/files/{fileID}:
+    parameters:
+      - $ref: '#/components/parameters/FileID'
+    get:
+      summary: Create a fresh download or inline-preview URL for a library file
+      tags: [files]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: disposition
+          in: query
+          schema: { type: string, enum: [attachment, inline], default: attachment }
+      responses:
+        '200':
+          description: Fresh file URL envelope
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileDownloadURL' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      summary: Delete an owned library file and revoke its shares
+      tags: [files]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/files/{fileID}/favorite:
+    parameters:
+      - $ref: '#/components/parameters/FileID'
+    put:
+      summary: Add a library file to the caller's favorites
+      tags: [files]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Favorited }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      summary: Remove a library file from the caller's favorites
+      tags: [files]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Unfavorited }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/files/{fileID}/shares:
+    parameters:
+      - $ref: '#/components/parameters/FileID'
+    get:
+      summary: List owner-visible file shares
+      tags: [files]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: File shares
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileSharesResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      summary: Share an owned library file to a chat
+      tags: [files]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FileShareRequest' }
+      responses:
+        '204': { description: Share upserted }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      summary: Revoke an owned library file share
+      tags: [files]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FileShareRequest' }
+      responses:
+        '204': { description: Share revoked }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -1488,6 +1677,11 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    FileID:
+      name: fileID
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
     ReactionID:
       name: reactionID
       in: path
@@ -1728,6 +1922,16 @@ components:
           type: array
           nullable: true
           items: { $ref: '#/components/schemas/Attachment' }
+        file_ids:
+          description: Ordered library file references carried by the message.
+          type: array
+          nullable: true
+          items: { $ref: '#/components/schemas/UUID' }
+        files:
+          description: Ordered resolved library files or tombstones for `file_ids`.
+          type: array
+          nullable: true
+          items: { $ref: '#/components/schemas/MessageFile' }
         user:
           allOf:
             - $ref: '#/components/schemas/User'
@@ -1753,6 +1957,11 @@ components:
           allOf:
             - $ref: '#/components/schemas/ProfileShareRequest'
           nullable: true
+        file_ids:
+          description: Library file ids to atomically share into the target chat before message persistence.
+          type: array
+          nullable: true
+          items: { $ref: '#/components/schemas/UUID' }
 
     ProfileShareRequest:
       type: object
@@ -1850,6 +2059,150 @@ components:
         mime_type: { type: string }
         url: { type: string, nullable: true }
         created_at: { $ref: '#/components/schemas/IsoDatetime' }
+
+    FileOwner:
+      type: object
+      required: [id, display_name]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        display_name: { type: string }
+        avatar_url: { type: string, nullable: true }
+
+    FileSharedTarget:
+      type: object
+      required: [type, target_id, workspace_id, display_name]
+      properties:
+        type: { type: string, enum: [channel, dm] }
+        target_id: { $ref: '#/components/schemas/UUID' }
+        workspace_id: { $ref: '#/components/schemas/UUID' }
+        display_name: { type: string }
+        avatar_url: { type: string, nullable: true }
+        member_count: { type: integer, nullable: true }
+
+    FileTypeFacet:
+      type: object
+      required: [type, count]
+      properties:
+        type: { type: string, enum: [image, document, text, archive, video, audio] }
+        count: { type: integer }
+
+    FileChatFacet:
+      allOf:
+        - $ref: '#/components/schemas/FileSharedTarget'
+        - type: object
+          required: [count]
+          properties:
+            count: { type: integer }
+
+    FileListFacets:
+      type: object
+      required: [types, chats]
+      properties:
+        types:
+          type: array
+          items: { $ref: '#/components/schemas/FileTypeFacet' }
+        chats:
+          type: array
+          items: { $ref: '#/components/schemas/FileChatFacet' }
+
+    LibraryFile:
+      type: object
+      required: [id, user_id, workspace_id, filename, extension, mime_type, size, created_at, starred, owner, shared_with]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        user_id: { $ref: '#/components/schemas/UUID' }
+        workspace_id: { $ref: '#/components/schemas/UUID' }
+        filename: { type: string }
+        extension: { type: string }
+        mime_type: { type: string }
+        size: { type: integer, format: int64 }
+        created_at: { $ref: '#/components/schemas/IsoDatetime' }
+        starred: { type: boolean }
+        preview_url: { type: string, nullable: true }
+        owner: { $ref: '#/components/schemas/FileOwner' }
+        shared_with:
+          type: array
+          items: { $ref: '#/components/schemas/FileSharedTarget' }
+
+    FileListResponse:
+      type: object
+      required: [files, total_count, total_bytes, facets]
+      properties:
+        files:
+          type: array
+          items: { $ref: '#/components/schemas/LibraryFile' }
+        next_cursor: { type: string, nullable: true }
+        total_count: { type: integer }
+        total_bytes: { type: integer, format: int64 }
+        facets: { $ref: '#/components/schemas/FileListFacets' }
+
+    FileStorageUsage:
+      type: object
+      required: [used_bytes, limit_bytes, upload_limits]
+      properties:
+        used_bytes: { type: integer, format: int64 }
+        limit_bytes: { type: integer, format: int64 }
+        upload_limits:
+          type: object
+          required: [image, document, text, archive, video, audio]
+          properties:
+            image: { type: integer, format: int64 }
+            document: { type: integer, format: int64 }
+            text: { type: integer, format: int64 }
+            archive: { type: integer, format: int64 }
+            video: { type: integer, format: int64 }
+            audio: { type: integer, format: int64 }
+
+    FileDownloadURL:
+      type: object
+      required: [url, file_id, filename, extension, mime_type, size]
+      properties:
+        url: { type: string }
+        file_id: { $ref: '#/components/schemas/UUID' }
+        filename: { type: string }
+        extension: { type: string }
+        mime_type: { type: string }
+        size: { type: integer, format: int64 }
+
+    FileShareRequest:
+      type: object
+      required: [type, target_id]
+      properties:
+        type: { type: string, enum: [channel, user] }
+        target_id: { $ref: '#/components/schemas/UUID' }
+
+    FileShare:
+      type: object
+      required: [id, file_id, type, target_id, created_at]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        file_id: { $ref: '#/components/schemas/UUID' }
+        type: { type: string, enum: [channel, user] }
+        target_id: { $ref: '#/components/schemas/UUID' }
+        created_at: { $ref: '#/components/schemas/IsoDatetime' }
+
+    FileSharesResponse:
+      type: object
+      required: [shares]
+      properties:
+        shares:
+          type: array
+          items: { $ref: '#/components/schemas/FileShare' }
+
+    MessageFile:
+      type: object
+      required: [id]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        status:
+          type: string
+          enum: [deleted]
+          nullable: true
+        filename: { type: string, nullable: true }
+        extension: { type: string, nullable: true }
+        mime_type: { type: string, nullable: true }
+        size: { type: integer, format: int64, nullable: true }
+        preview_url: { type: string, nullable: true }
 
     PresenceEntry:
       type: object

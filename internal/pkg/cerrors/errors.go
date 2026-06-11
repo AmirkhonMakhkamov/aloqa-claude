@@ -31,6 +31,7 @@ const (
 	CodeInternal           Code = "INTERNAL"
 	CodeConflict           Code = "CONFLICT"
 	CodeRateLimited        Code = "RATE_LIMITED"
+	CodeQuotaExceeded      Code = "QUOTA_EXCEEDED"
 	CodeUnavailable        Code = "UNAVAILABLE"
 	CodeUnprocessable      Code = "UNPROCESSABLE"
 	CodeCallEnded          Code = "CALL_ENDED"
@@ -86,6 +87,8 @@ func (e *AppError) HTTPStatus() int {
 		return http.StatusForbidden
 	case CodeRateLimited:
 		return http.StatusTooManyRequests
+	case CodeQuotaExceeded:
+		return http.StatusRequestEntityTooLarge
 	case CodeUnprocessable:
 		return http.StatusUnprocessableEntity
 	case CodeUnavailable:
@@ -121,6 +124,10 @@ func CallPasswordRequired(msg string) *AppError {
 
 func Forbidden(msg string) *AppError {
 	return &AppError{Code: CodeForbidden, Message: msg}
+}
+
+func QuotaExceeded(msg string) *AppError {
+	return &AppError{Code: CodeQuotaExceeded, Message: msg}
 }
 
 func AccountDeactivated() *AppError {

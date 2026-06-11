@@ -46,6 +46,7 @@ type SearchIndexer interface {
 // Service handles file uploads, downloads, and lifecycle management.
 type Service struct {
 	store    storage.Storage
+	files    repository.FileRepository
 	messages repository.MessageRepository
 	channels repository.ChannelRepository
 	members  repository.WorkspaceRepository
@@ -103,6 +104,10 @@ func NewService(
 
 func (s *Service) SetAccessPolicy(access *accesspolicy.Checker) {
 	s.access = access
+}
+
+func (s *Service) SetFileRepository(files repository.FileRepository) {
+	s.files = files
 }
 
 func (s *Service) SetTransactionManager(manager txscope.Manager) {

@@ -24,6 +24,7 @@ type TxManagerConfig struct {
 	Users               *UserRepo
 	Workspaces          *WorkspaceRepo
 	Messages            *MessageRepo
+	Files               *FileRepo
 	Channels            *ChannelRepo
 	ChannelGrants       *ChannelAccessGrantRepo
 	Calls               *CallRepo
@@ -44,6 +45,7 @@ type TxManager struct {
 	users               *UserRepo
 	workspaces          *WorkspaceRepo
 	messages            *MessageRepo
+	files               *FileRepo
 	channels            *ChannelRepo
 	channelGrants       *ChannelAccessGrantRepo
 	calls               *CallRepo
@@ -63,6 +65,7 @@ type txScope struct {
 	users               repository.UserRepository
 	workspaces          repository.WorkspaceRepository
 	messages            repository.MessageRepository
+	files               repository.FileRepository
 	channels            repository.ChannelRepository
 	channelGrants       repository.ChannelAccessGrantRepository
 	calls               repository.CallRepository
@@ -88,6 +91,7 @@ func NewTxManager(pool *pgxpool.Pool, cfg TxManagerConfig) *TxManager {
 		users:               cfg.Users,
 		workspaces:          cfg.Workspaces,
 		messages:            cfg.Messages,
+		files:               cfg.Files,
 		channels:            cfg.Channels,
 		channelGrants:       cfg.ChannelGrants,
 		calls:               cfg.Calls,
@@ -126,6 +130,9 @@ func (m *TxManager) WithinTx(ctx context.Context, fn func(ctx context.Context, s
 	}
 	if m.messages != nil {
 		scope.messages = m.messages.withTx(tx)
+	}
+	if m.files != nil {
+		scope.files = m.files.withTx(tx)
 	}
 	if m.users != nil {
 		scope.users = m.users.withTx(tx)
@@ -182,6 +189,7 @@ func (s *txScope) Workspaces() repository.WorkspaceRepository {
 	return s.workspaces
 }
 func (s *txScope) Messages() repository.MessageRepository { return s.messages }
+func (s *txScope) Files() repository.FileRepository       { return s.files }
 func (s *txScope) Channels() repository.ChannelRepository { return s.channels }
 func (s *txScope) ChannelGrants() repository.ChannelAccessGrantRepository {
 	return s.channelGrants

@@ -184,6 +184,7 @@ func run() error {
 	workspaceRepo := postgres.NewWorkspaceRepo(pool)
 	channelRepo := postgres.NewChannelRepo(pool)
 	messageRepo := postgres.NewMessageRepo(pool)
+	fileRepo := postgres.NewFileRepo(pool)
 	callRepo := postgres.NewCallRepo(pool)
 	callMessageRepo := postgres.NewCallMessageRepo(pool)
 	breakoutRoomRepo := postgres.NewBreakoutRoomRepo(pool)
@@ -264,6 +265,7 @@ func run() error {
 		Users:               userRepo,
 		Workspaces:          workspaceRepo,
 		Messages:            messageRepo,
+		Files:               fileRepo,
 		Channels:            channelRepo,
 		ChannelGrants:       channelAccessGrantRepo,
 		Calls:               callRepo,
@@ -354,6 +356,7 @@ func run() error {
 	authSvc.SetSessionNotifier(auth.NewPubSubSessionNotifier(ps))
 	authSvc.SetSessionOperationTimeout(cfg.Redis.OperationTimeout)
 	chatSvc := chat.NewService(channelRepo, messageRepo, workspaceRepo, channelAccessGrantRepo, realtimePublisher, guestAccessChecker, collaborationAccessChecker, searchSvc, collaborationSvc)
+	chatSvc.SetFileRepository(fileRepo)
 	chatSvc.SetTransactionManager(txManager)
 	savedSvc := savedsvc.NewService(userRepo, channelRepo, messageRepo, savedRepo, channelAccessPolicy, realtimePublisher)
 	callSvc := call.NewService(callRepo, breakoutRoomRepo, channelRepo, workspaceRepo, realtimePublisher, sfuServer, call.MediaConfig{
@@ -409,6 +412,7 @@ func run() error {
 		AllowedTypes: cfg.Media.AllowedTypes,
 		SignedURLTTL: cfg.Media.SignedURLTTL,
 	}, guestAccessChecker)
+	fileSvc.SetFileRepository(fileRepo)
 	fileSvc.SetTransactionManager(txManager)
 	recordingSvc := recording.NewService(recordingRepo, callRepo, workspaceRepo, fileStore, sfuServer, recordingCapture, recording.Config{
 		Retention:        cfg.Media.RecordingRetention,

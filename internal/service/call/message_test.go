@@ -286,6 +286,7 @@ type fakeCallMessageTxScope struct {
 func (s *fakeCallMessageTxScope) Users() repository.UserRepository                       { return nil }
 func (s *fakeCallMessageTxScope) Workspaces() repository.WorkspaceRepository             { return nil }
 func (s *fakeCallMessageTxScope) Messages() repository.MessageRepository                 { return nil }
+func (s *fakeCallMessageTxScope) Files() repository.FileRepository                       { return nil }
 func (s *fakeCallMessageTxScope) Channels() repository.ChannelRepository                 { return nil }
 func (s *fakeCallMessageTxScope) ChannelGrants() repository.ChannelAccessGrantRepository { return nil }
 func (s *fakeCallMessageTxScope) Calls() repository.CallRepository                       { return nil }

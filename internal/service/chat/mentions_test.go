@@ -123,3 +123,74 @@ func TestListMentionsReturnsEmptySliceForNilRepoResponse(t *testing.T) {
 }
 
 func (r *fakeMentionsRepo) HardDelete(context.Context, uuid.UUID) error { return nil }
+
+// fakePresenceLister drives @here online-scoping in hydrateMessageMentions tests.
+type fakePresenceLister struct{ online []uuid.UUID }
+
+func (f *fakePresenceLister) OnlineMemberIDs(_ context.Context, _ uuid.UUID) ([]uuid.UUID, error) {
+	return f.online, nil
+}
+
+func TestHydrateMessageMentionsScopesHereToOnlineMembers(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	author := uuid.New()
+	onlineMember := uuid.New()
+	offlineMember := uuid.New()
+
+	channels := &fakeChannelRepo{
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, author}:        {ChannelID: channelID, UserID: author},
+			{channelID, onlineMember}:  {ChannelID: channelID, UserID: onlineMember},
+			{channelID, offlineMember}: {ChannelID: channelID, UserID: offlineMember},
+		},
+	}
+	svc := NewService(channels, &fakeMessageRepo{}, &fakeWorkspaceRepo{}, nil, noopPublisher{}, nil, nil, nil, nil)
+	svc.SetPresenceLister(&fakePresenceLister{online: []uuid.UUID{onlineMember}})
+
+	ch := &entity.Channel{ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic}
+	msg := &entity.Message{ChannelID: channelID, UserID: author, Content: "@here standup in 5"}
+
+	if err := svc.hydrateMessageMentions(ctx, msg, ch); err != nil {
+		t.Fatalf("hydrateMessageMentions returned error: %v", err)
+	}
+	// Only the online member (not the offline member, not the author) is pinged.
+	if len(msg.HereRecipients) != 1 || msg.HereRecipients[0] != onlineMember {
+		t.Fatalf("HereRecipients = %v, want [%s]", msg.HereRecipients, onlineMember)
+	}
+	if len(msg.Mentions) != 1 || msg.Mentions[0] != onlineMember {
+		t.Fatalf("Mentions = %v, want [%s]", msg.Mentions, onlineMember)
+	}
+}
+
+func TestHydrateMessageMentionsIgnoresHereSubstring(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	author := uuid.New()
+	onlineMember := uuid.New()
+
+	channels := &fakeChannelRepo{
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, author}:       {ChannelID: channelID, UserID: author},
+			{channelID, onlineMember}: {ChannelID: channelID, UserID: onlineMember},
+		},
+	}
+	svc := NewService(channels, &fakeMessageRepo{}, &fakeWorkspaceRepo{}, nil, noopPublisher{}, nil, nil, nil, nil)
+	svc.SetPresenceLister(&fakePresenceLister{online: []uuid.UUID{onlineMember}})
+
+	ch := &entity.Channel{ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic}
+	// "@hereby" is not the @here token (word boundary), so nobody is pinged.
+	msg := &entity.Message{ChannelID: channelID, UserID: author, Content: "@hereby noted"}
+
+	if err := svc.hydrateMessageMentions(ctx, msg, ch); err != nil {
+		t.Fatalf("hydrateMessageMentions returned error: %v", err)
+	}
+	if len(msg.HereRecipients) != 0 {
+		t.Fatalf("HereRecipients = %v, want empty", msg.HereRecipients)
+	}
+	if len(msg.Mentions) != 0 {
+		t.Fatalf("Mentions = %v, want empty", msg.Mentions)
+	}
+}

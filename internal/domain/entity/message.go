@@ -64,6 +64,11 @@ type Message struct {
 	UpdatedAt time.Time       `json:"updated_at"`
 	DeletedAt *time.Time      `json:"deleted_at,omitempty"`
 
+	// HereRecipients is the snapshot of members who were online when an @here
+	// broadcast was sent. Persisted so the mention feed stays consistent on
+	// reload (presence is transient). Server-side only (ALK broadcast mentions).
+	HereRecipients []uuid.UUID `json:"-" db:"mention_here_recipients"`
+
 	// Aggregated fields (populated by queries, not stored directly).
 	ReplyCount  int           `json:"reply_count,omitempty"`
 	Reactions   []Reaction    `json:"reactions,omitempty"`

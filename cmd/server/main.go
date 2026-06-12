@@ -407,6 +407,8 @@ func run() error {
 		presence.WithOnlineShardCount(cfg.Redis.PresenceShardCount),
 		presence.WithEventPublisher(realtimePublisher),
 	)
+	// @here broadcast mentions are scoped to currently-online members.
+	chatSvc.SetPresenceLister(presenceSvc)
 	fileSvc := file.NewService(fileStore, messageRepo, channelRepo, workspaceRepo, nil, searchSvc, file.Config{
 		MaxFileSize:  cfg.Media.MaxFileSize,
 		AllowedTypes: cfg.Media.AllowedTypes,

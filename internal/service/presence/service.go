@@ -241,6 +241,23 @@ func (s *Service) GetWorkspacePresence(ctx context.Context, workspaceID uuid.UUI
 	return result, nil
 }
 
+// OnlineMemberIDs returns the user IDs that are actively online in the
+// workspace. Used to scope @here broadcast mentions to currently-present
+// members (ALK broadcast mentions). Away/DND/offline are excluded.
+func (s *Service) OnlineMemberIDs(ctx context.Context, workspaceID uuid.UUID) ([]uuid.UUID, error) {
+	presences, err := s.GetWorkspacePresence(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]uuid.UUID, 0, len(presences))
+	for _, p := range presences {
+		if p.Status == StatusOnline {
+			ids = append(ids, p.UserID)
+		}
+	}
+	return ids, nil
+}
+
 // ClearSession removes all presence state associated with a revoked or closed
 // session across every workspace where it was active.
 func (s *Service) ClearSession(ctx context.Context, sessionID string) error {

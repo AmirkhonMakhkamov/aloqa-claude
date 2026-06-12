@@ -1143,6 +1143,78 @@ func TestSendMessageForwardedFromValidationAndPersistence(t *testing.T) {
 	}
 }
 
+// A file/media message (pasted image, voice note) is created before its
+// attachment is uploaded, so the row legitimately starts with empty content.
+// Declaring type=file lets that pass the content-required guard and persists
+// the message as a file type. (ALK-905)
+func TestSendMessageFileTypeAllowsEmptyContent(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	userID := uuid.New()
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, userID}: {ChannelID: channelID, UserID: userID},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	messages := &fakeMessageRepo{messages: map[uuid.UUID]*entity.Message{}}
+	svc := NewService(channels, messages, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+
+	msg, err := svc.SendMessage(ctx, channelID, userID, SendMessageInput{Content: "", Type: "file"})
+	if err != nil {
+		t.Fatalf("SendMessage returned error: %v", err)
+	}
+	if msg.Type != entity.MessageTypeFile {
+		t.Fatalf("type = %q, want %q", msg.Type, entity.MessageTypeFile)
+	}
+	if msg.Content != "" {
+		t.Fatalf("content = %q, want empty", msg.Content)
+	}
+	if len(messages.messages) != 1 {
+		t.Fatalf("created %d messages, want 1", len(messages.messages))
+	}
+}
+
+// Clients may only declare text or file; system messages are server-authored,
+// and any other value is rejected before a row is created.
+func TestSendMessageRejectsClientSuppliedType(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	userID := uuid.New()
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, userID}: {ChannelID: channelID, UserID: userID},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	for _, badType := range []string{"system", "bogus"} {
+		t.Run(badType, func(t *testing.T) {
+			messages := &fakeMessageRepo{messages: map[uuid.UUID]*entity.Message{}}
+			svc := NewService(channels, messages, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+
+			_, err := svc.SendMessage(ctx, channelID, userID, SendMessageInput{Content: "hi", Type: badType})
+			if !hasCode(err, cerrors.CodeInvalidInput) {
+				t.Fatalf("SendMessage error = %v, want invalid input", err)
+			}
+			if len(messages.messages) != 0 {
+				t.Fatalf("created %d messages on invalid type, want 0", len(messages.messages))
+			}
+		})
+	}
+}
+
 func TestSendMessageProfileShareBuildsSnapshotAndValidatesWorkspace(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()

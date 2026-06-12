@@ -325,7 +325,12 @@ type CreateChannelInput struct {
 // SendMessageInput validates message creation parameters. Content validation is
 // conditional in SendMessage because comment-less forwards may be empty.
 type SendMessageInput struct {
-	Content         string
+	Content string
+	// Optional client-declared message kind. Only "file" is honored (an
+	// attachment/media message whose text body may be empty); any other value
+	// falls back to text. System messages are server-authored, never settable
+	// by clients.
+	Type            string
 	ParentID        *uuid.UUID
 	ForwardedFrom   *json.RawMessage
 	QuotedMessageID *uuid.UUID
@@ -1560,6 +1565,22 @@ func canSendProfileShareToChannel(channelType entity.ChannelType) bool {
 	}
 }
 
+// resolveSendMessageType maps an optional client-declared message kind to the
+// stored type. Only "file" is honored (a media/attachment message whose text
+// body may be empty because the attachment is uploaded after the row exists);
+// any unset or "text" value stays text. Clients may not author "system"
+// messages, so any other value is rejected.
+func resolveSendMessageType(raw string) (entity.MessageType, error) {
+	switch raw {
+	case "", string(entity.MessageTypeText):
+		return entity.MessageTypeText, nil
+	case string(entity.MessageTypeFile):
+		return entity.MessageTypeFile, nil
+	default:
+		return "", cerrors.InvalidInput("type must be 'text' or 'file'")
+	}
+}
+
 // SendMessage creates a new message in a channel after verifying membership.
 func (s *Service) SendMessage(
 	ctx context.Context,
@@ -1569,12 +1590,18 @@ func (s *Service) SendMessage(
 	if err := validate.Struct(input); err != nil {
 		return nil, err
 	}
+	msgType, err := resolveSendMessageType(input.Type)
+	if err != nil {
+		return nil, err
+	}
 	contentLen := utf8.RuneCountInString(input.Content)
 	// Empty content is allowed when the message carries forwarded content
 	// (ForwardedFrom) OR a quoted snapshot (Share message flow — the source
 	// message becomes a quote and the author may omit their own text) OR a
-	// profile share card (ALK-708).
-	if (input.ForwardedFrom == nil || len(*input.ForwardedFrom) == 0) && input.QuotedSnapshot == nil && input.ProfileShare == nil && len(input.FileIDs) == 0 && contentLen < 1 {
+	// profile share card (ALK-708) OR file references (FileIDs) OR the client
+	// declares a file/media message (Type == file) whose attachment is uploaded
+	// after the message row is created (pasted images, voice notes — ALK-905).
+	if msgType != entity.MessageTypeFile && (input.ForwardedFrom == nil || len(*input.ForwardedFrom) == 0) && input.QuotedSnapshot == nil && input.ProfileShare == nil && len(input.FileIDs) == 0 && contentLen < 1 {
 		return nil, cerrors.InvalidInput("content is required")
 	}
 	if contentLen > 40000 {
@@ -1650,7 +1677,7 @@ func (s *Service) SendMessage(
 		UserID:          userID,
 		ParentID:        input.ParentID,
 		Content:         input.Content,
-		Type:            entity.MessageTypeText,
+		Type:            msgType,
 		ForwardedFrom:   forwardedFrom,
 		QuotedMessageID: input.QuotedMessageID,
 		QuotedSnapshot:  quotedSnapshot,

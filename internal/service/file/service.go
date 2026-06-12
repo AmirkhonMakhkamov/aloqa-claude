@@ -194,7 +194,7 @@ func (s *Service) Upload(
 	// "photo" (inline) / "file" (download card) / "" (auto: MIME heuristic). Any
 	// other value is rejected (ALK-926).
 	if displayMode != "" && displayMode != "photo" && displayMode != "file" {
-		return nil, cerrors.InvalidInput("display_mode must be 'photo' or 'file'")
+		return nil, cerrors.InvalidInput("display_mode must be 'photo', 'file', or empty")
 	}
 	if err := s.canAccessMessage(ctx, messageID, channelID, userID, accesspolicy.CapabilityParticipate); err != nil {
 		return nil, err

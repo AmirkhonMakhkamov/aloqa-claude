@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -246,15 +247,17 @@ func TestUploadDisplayMode(t *testing.T) {
 		return NewService(store, messages, channels, members, scanner, nil, Config{MaxFileSize: 1024}, nil)
 	}
 
-	t.Run("persists a valid mode", func(t *testing.T) {
-		result, err := newSvc().Upload(ctx, channelID, messageID, userID, "photo.png", bytes.NewReader(body), int64(len(body)), "file")
-		if err != nil {
-			t.Fatalf("Upload returned error: %v", err)
-		}
-		if result.Attachment.DisplayMode != "file" {
-			t.Fatalf("DisplayMode = %q, want %q", result.Attachment.DisplayMode, "file")
-		}
-	})
+	for _, mode := range []string{"", "photo", "file"} {
+		t.Run("persists the valid mode "+strconv.Quote(mode), func(t *testing.T) {
+			result, err := newSvc().Upload(ctx, channelID, messageID, userID, "photo.png", bytes.NewReader(body), int64(len(body)), mode)
+			if err != nil {
+				t.Fatalf("Upload returned error: %v", err)
+			}
+			if result.Attachment.DisplayMode != mode {
+				t.Fatalf("DisplayMode = %q, want %q", result.Attachment.DisplayMode, mode)
+			}
+		})
+	}
 
 	t.Run("rejects an unknown mode", func(t *testing.T) {
 		_, err := newSvc().Upload(ctx, channelID, messageID, userID, "photo.png", bytes.NewReader(body), int64(len(body)), "thumbnail")

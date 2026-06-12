@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"aloqa/internal/domain/entity"
+	wshandler "aloqa/internal/handler/ws"
 	"aloqa/internal/middleware"
 	"aloqa/internal/platform/storage"
 	filesvc "aloqa/internal/service/file"
@@ -85,6 +86,82 @@ func TestDownloadLibraryContentEscapesContentDispositionFilename(t *testing.T) {
 	}
 	if params["filename"] != "quarterly\"X-Injected: yes.pdf" {
 		t.Fatalf("filename param = %q, want sanitized filename", params["filename"])
+	}
+}
+
+func TestDownloadLibraryContentAcceptsSessionCookie(t *testing.T) {
+	userID := uuid.New()
+	workspaceID := uuid.New()
+	fileID := uuid.New()
+	storagePath := "library/2026/06/12/image.png"
+	body := []byte("pngdata")
+
+	svc := filesvc.NewService(
+		&fileHTTPStorage{objects: map[string][]byte{storagePath: body}},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		filesvc.Config{},
+		nil,
+	)
+	svc.SetFileRepository(&messageHTTPFileRepo{files: map[uuid.UUID]*entity.LibraryFile{
+		fileID: {
+			ID:          fileID,
+			UserID:      userID,
+			WorkspaceID: workspaceID,
+			Filename:    "image.png",
+			Extension:   "png",
+			MimeType:    "image/png",
+			Size:        int64(len(body)),
+			StoragePath: storagePath,
+			CreatedAt:   time.Now().UTC(),
+		},
+	}})
+
+	handler := NewFileHandler(svc, 1024)
+	router := NewRouter(RouterDeps{
+		Auth:             &AuthHandler{},
+		Account:          &AccountHandler{},
+		Channels:         &ChannelHandler{},
+		Saved:            &SavedHandler{},
+		Messages:         &MessageHandler{},
+		Calls:            &CallHandler{},
+		Breakout:         &BreakoutHandler{},
+		Files:            handler,
+		Presence:         &PresenceHandler{},
+		Recordings:       &RecordingHandler{},
+		Notifications:    &NotificationHandler{},
+		Search:           &SearchHandler{},
+		Admin:            &AdminHandler{},
+		Guests:           &GuestHandler{},
+		WS:               &wshandler.Handler{},
+		Validator:        fakeTokenValidator{userID: uuid.New()},
+		PersonalResolver: fakePersonalResolver{workspaceID: uuid.New()},
+		SessionResolver:  fakeSessionResolver{bySession: map[string]uuid.UUID{"sess-1": userID}},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/files/"+fileID.String()+"/content?disposition=inline", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "sess-1"})
+	res := httptest.NewRecorder()
+	router.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", res.Code, res.Body.String())
+	}
+	if !bytes.Equal(res.Body.Bytes(), body) {
+		t.Fatalf("body = %q, want %q", res.Body.Bytes(), body)
+	}
+	if got := res.Header().Get("Content-Type"); got != "image/png" {
+		t.Fatalf("Content-Type = %q, want image/png", got)
+	}
+	disposition, _, err := mime.ParseMediaType(res.Header().Get("Content-Disposition"))
+	if err != nil {
+		t.Fatalf("parse Content-Disposition: %v", err)
+	}
+	if disposition != "inline" {
+		t.Fatalf("Content-Disposition = %q, want inline", disposition)
 	}
 }
 

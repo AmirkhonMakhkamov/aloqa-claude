@@ -150,6 +150,7 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 		deps.Files.SetTokenValidator(deps.Validator)
 		deps.Files.SetSessionResolver(deps.SessionResolver)
 		r.Get("/files/*", deps.Files.Download)
+		r.Get("/api/v1/files/{fileID}/content", deps.Files.DownloadLibraryContent)
 	}
 
 	// Authenticated routes.
@@ -184,7 +185,6 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 			r.Route("/{fileID}", func(r chi.Router) {
 				r.Get("/", deps.Files.FileURL)
 				r.Delete("/", deps.Files.DeleteLibrary)
-				r.Get("/content", deps.Files.DownloadLibraryContent)
 				r.Put("/favorite", deps.Files.Favorite)
 				r.Delete("/favorite", deps.Files.Unfavorite)
 				r.Post("/shares", deps.Files.Share)

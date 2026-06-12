@@ -17,6 +17,7 @@ type RouterDeps struct {
 	Account          *AccountHandler
 	Channels         *ChannelHandler
 	Saved            *SavedHandler
+	Drafts           *DraftHandler
 	Messages         *MessageHandler
 	Calls            *CallHandler
 	LiveKit          *LiveKitWebhookHandler
@@ -306,6 +307,11 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 	// chat.Service.ListMentions / postgres.MessageRepo.ListMentions.
 	r.Get("/mentions", deps.Messages.ListMentions)
 
+	// Server-backed message drafts (ALOQA-247): hydration of the caller's drafts.
+	if deps.Drafts != nil {
+		r.Get("/drafts", deps.Drafts.List)
+	}
+
 	// Search.
 	r.Get("/search", deps.Search.Search)
 
@@ -338,6 +344,10 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 			r.Post("/members", deps.Channels.AddMembers)
 			r.Delete("/members/{userID}", deps.Channels.RemoveMember)
 			r.Post("/read", deps.Channels.MarkRead)
+			if deps.Drafts != nil {
+				r.Put("/draft", deps.Drafts.Upsert)
+				r.Delete("/draft", deps.Drafts.Delete)
+			}
 
 			// Messages within a channel.
 			r.Route("/messages", func(r chi.Router) {

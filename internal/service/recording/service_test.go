@@ -12,7 +12,6 @@ import (
 
 	"aloqa/internal/domain/entity"
 	"aloqa/internal/extension"
-	"aloqa/internal/media/sfu"
 	"aloqa/internal/pkg/cerrors"
 	"aloqa/internal/pkg/pagination"
 	"aloqa/internal/platform/storage"
@@ -669,31 +668,6 @@ type fixedProcessor struct {
 
 func (p fixedProcessor) Process(context.Context, entity.Recording) (*ProcessedRecording, error) {
 	return p.artifact, p.err
-}
-
-type fakeMediaRooms struct {
-	rooms map[string]*sfu.Room
-}
-
-func (f fakeMediaRooms) GetRoom(id string) (*sfu.Room, bool) {
-	room, ok := f.rooms[id]
-	return room, ok
-}
-
-func newTestRoom(t *testing.T, roomID string) *sfu.Room {
-	t.Helper()
-
-	server, err := sfu.NewSFU(sfu.Config{})
-	if err != nil {
-		t.Fatalf("NewSFU returned error: %v", err)
-	}
-	t.Cleanup(server.Close)
-
-	room, err := server.CreateRoom(roomID, sfu.RoomOptions{})
-	if err != nil {
-		t.Fatalf("CreateRoom returned error: %v", err)
-	}
-	return room
 }
 
 type fakeRecordingRepo struct {

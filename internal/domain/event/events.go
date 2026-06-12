@@ -217,20 +217,10 @@ func NewMessagePayload(message *entity.Message, channel *entity.Channel) Message
 
 func (p MessagePayload) MarshalJSON() ([]byte, error) {
 	if p.ChannelType == nil {
-		return json.Marshal(messagePayloadJSON{
-			Message:            p.Message,
-			ChannelType:        p.ChannelType,
-			ChannelWorkspaceID: p.ChannelWorkspaceID,
-			SavedFromMessageID: p.SavedFromMessageID,
-		})
+		return json.Marshal(messagePayloadJSON(p))
 	}
 
-	return json.Marshal(selfChannelMessagePayloadJSON{
-		Message:            p.Message,
-		ChannelType:        p.ChannelType,
-		ChannelWorkspaceID: p.ChannelWorkspaceID,
-		SavedFromMessageID: p.SavedFromMessageID,
-	})
+	return json.Marshal(selfChannelMessagePayloadJSON(p))
 }
 
 type ReactionPayload struct {

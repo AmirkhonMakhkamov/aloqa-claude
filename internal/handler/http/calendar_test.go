@@ -68,13 +68,6 @@ func (f calendarHTTPFixture) patch(path, body string) *httptest.ResponseRecorder
 	return res
 }
 
-func (f calendarHTTPFixture) get(path string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodGet, path, nil)
-	res := httptest.NewRecorder()
-	f.router.ServeHTTP(res, req)
-	return res
-}
-
 func (f calendarHTTPFixture) serve(eventID uuid.UUID, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/events/"+eventID.String()+"/occurrences/move", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

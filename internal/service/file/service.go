@@ -189,7 +189,13 @@ func (s *Service) Upload(
 	filename string,
 	reader io.Reader,
 	size int64,
+	displayMode string,
 ) (*UploadResult, error) {
+	// "photo" (inline) / "file" (download card) / "" (auto: MIME heuristic). Any
+	// other value is rejected (ALK-926).
+	if displayMode != "" && displayMode != "photo" && displayMode != "file" {
+		return nil, cerrors.InvalidInput("display_mode must be 'photo', 'file', or empty")
+	}
 	if err := s.canAccessMessage(ctx, messageID, channelID, userID, accesspolicy.CapabilityParticipate); err != nil {
 		return nil, err
 	}
@@ -273,6 +279,7 @@ func (s *Service) Upload(
 		FileName:    filename,
 		FileSize:    written,
 		MimeType:    mimeType,
+		DisplayMode: displayMode,
 		StoragePath: key,
 		URL:         "/files/" + key,
 		CreatedAt:   time.Now(),

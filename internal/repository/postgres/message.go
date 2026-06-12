@@ -716,6 +716,7 @@ func (r *MessageRepo) ListMentions(
 		  AND (
 		    (caller.email_handle <> '' AND m.content ~* ('(^|[^A-Za-z0-9_])@' || caller.email_handle || '([^A-Za-z0-9_.-]|$)'))
 		    OR (caller.display_handle <> '' AND m.content ~* ('(^|[^A-Za-z0-9_])@' || caller.display_handle || '([^A-Za-z0-9_.-]|$)'))
+		    OR (m.content ~* '(^|[^A-Za-z0-9_])@all([^A-Za-z0-9_.-]|$)')
 		  )
 		ORDER BY m.created_at DESC, m.id DESC
 		LIMIT $3`
@@ -794,6 +795,7 @@ func (r *MessageRepo) ResolveMentions(
 		FROM member_handles
 		WHERE (email_handle <> '' AND $3 ~* ('(^|[^A-Za-z0-9_])@' || email_handle || '([^A-Za-z0-9_.-]|$)'))
 		   OR (display_handle <> '' AND $3 ~* ('(^|[^A-Za-z0-9_])@' || display_handle || '([^A-Za-z0-9_.-]|$)'))
+		   OR ($3 ~* '(^|[^A-Za-z0-9_])@all([^A-Za-z0-9_.-]|$)')
 		ORDER BY id`
 
 	rows, err := r.db.Query(ctx, query, channelID, authorID, content)
@@ -865,6 +867,7 @@ func (r *MessageRepo) ResolveMentionsByMessageIDs(
 		FROM member_handles
 		WHERE (email_handle <> '' AND content ~* ('(^|[^A-Za-z0-9_])@' || email_handle || '([^A-Za-z0-9_.-]|$)'))
 		   OR (display_handle <> '' AND content ~* ('(^|[^A-Za-z0-9_])@' || display_handle || '([^A-Za-z0-9_.-]|$)'))
+		   OR (content ~* '(^|[^A-Za-z0-9_])@all([^A-Za-z0-9_.-]|$)')
 		ORDER BY message_id, user_id`
 
 	rows, err := r.db.Query(ctx, query, messageIDs)

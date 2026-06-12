@@ -65,6 +65,21 @@ func TestMessagePostForwardedFromCases(t *testing.T) {
 		}
 	})
 
+	t.Run("empty content with type file accepted", func(t *testing.T) {
+		f := newMessageHTTPFixture()
+		res := f.serve(http.MethodPost, "/channels/"+f.channelID.String()+"/messages", `{"content":"","type":"file"}`)
+		if res.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want 201; body=%s", res.Code, res.Body.String())
+		}
+		var msg entity.Message
+		if err := json.Unmarshal(res.Body.Bytes(), &msg); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if msg.Content != "" || msg.Type != entity.MessageTypeFile {
+			t.Fatalf("message = %+v, want empty content with file type", msg)
+		}
+	})
+
 	t.Run("legacy content omits forwarded_from", func(t *testing.T) {
 		f := newMessageHTTPFixture()
 		res := f.serve(http.MethodPost, "/channels/"+f.channelID.String()+"/messages", `{"content":"hi"}`)

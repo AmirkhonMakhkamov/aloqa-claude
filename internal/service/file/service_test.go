@@ -258,6 +258,47 @@ func TestPresignDownloadByKeyUsesObjectStoreSignerWhenAvailable(t *testing.T) {
 	if len(store.signedKeys) != 1 || store.signedKeys[0] != key {
 		t.Fatalf("signed keys = %v, want [%s]", store.signedKeys, key)
 	}
+	if len(store.signedOpts) != 1 || !store.signedOpts[0].Attachment {
+		t.Fatalf("signed options = %+v, want attachment disposition", store.signedOpts)
+	}
+}
+
+func TestPresignDownloadByKeyUsesInlineDispositionForImages(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	messageID := uuid.New()
+	userID := uuid.New()
+	key := "attachments/2026/04/15/image.png"
+
+	store := &memoryStorage{
+		objects:   map[string][]byte{key: []byte("image")},
+		signedURL: "https://objects.example.com/presigned/image.png",
+	}
+	messages := &fakeMessageRepo{
+		messages: map[uuid.UUID]*entity.Message{
+			messageID: {ID: messageID, ChannelID: channelID, UserID: userID, Content: "image"},
+		},
+		attachmentsByKey: map[string]*entity.Attachment{
+			key: {ID: uuid.New(), MessageID: messageID, FileName: "image.png", FileSize: 5, MimeType: "image/png", StoragePath: key},
+		},
+	}
+	channels := &fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
+		channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
+	}, members: map[[2]uuid.UUID]*entity.ChannelMember{
+		{channelID, userID}: {ChannelID: channelID, UserID: userID, Role: entity.ChannelRoleMember},
+	}}
+	members := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+
+	svc := NewService(store, messages, channels, members, nil, nil, Config{SignedURLTTL: time.Minute}, nil)
+	if _, err := svc.PresignDownloadByKey(ctx, key, userID); err != nil {
+		t.Fatalf("PresignDownloadByKey returned error: %v", err)
+	}
+	if len(store.signedOpts) != 1 || store.signedOpts[0].Attachment {
+		t.Fatalf("signed options = %+v, want inline disposition", store.signedOpts)
+	}
 }
 
 func TestUploadLibraryReturnsQuotaExceededBeforePersisting(t *testing.T) {
@@ -334,6 +375,7 @@ type memoryStorage struct {
 	getErr     error
 	signedURL  string
 	signedKeys []string
+	signedOpts []storage.SignedURLOptions
 }
 
 func (s *memoryStorage) Put(_ context.Context, key string, reader io.Reader, _ int64, _ string) error {
@@ -370,8 +412,9 @@ func (s *memoryStorage) Exists(_ context.Context, key string) (bool, error) {
 	return ok, nil
 }
 
-func (s *memoryStorage) SignedDownloadURL(_ context.Context, key string, _ storage.SignedURLOptions) (string, error) {
+func (s *memoryStorage) SignedDownloadURL(_ context.Context, key string, opts storage.SignedURLOptions) (string, error) {
 	s.signedKeys = append(s.signedKeys, key)
+	s.signedOpts = append(s.signedOpts, opts)
 	if s.signedURL == "" {
 		return "", storage.ErrNotSupported
 	}
@@ -548,6 +591,9 @@ func (r *fakeMessageRepo) GetAttachmentByStoragePath(_ context.Context, storageP
 	return nil, cerrors.NotFound("attachment not found")
 }
 func (r *fakeMessageRepo) ListAttachments(context.Context, uuid.UUID) ([]entity.Attachment, error) {
+	return nil, nil
+}
+func (r *fakeMessageRepo) ListAttachmentsByMessageIDs(context.Context, []uuid.UUID) (map[uuid.UUID][]entity.Attachment, error) {
 	return nil, nil
 }
 func (r *fakeMessageRepo) CountUnread(context.Context, uuid.UUID, uuid.UUID, time.Time) (int, error) {

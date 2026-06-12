@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -93,9 +94,17 @@ type Service struct {
 	access        *accesspolicy.Checker
 	search        SearchIndexer
 	tx            txscope.Manager
+	presence      presenceLister
 	contacts      interface {
 		CanShareChannel(ctx context.Context, sourceWorkspaceID, targetWorkspaceID, sourceUserID, targetUserID uuid.UUID) error
 	}
+}
+
+// presenceLister resolves the currently-online members of a workspace, used to
+// scope @here broadcast mentions. Optional (set via SetPresenceLister); when
+// absent, @here adds no recipients (ALK broadcast mentions).
+type presenceLister interface {
+	OnlineMemberIDs(ctx context.Context, workspaceID uuid.UUID) ([]uuid.UUID, error)
 }
 
 // NewService creates a new chat service.
@@ -127,6 +136,12 @@ func NewService(
 
 func (s *Service) SetAccessPolicy(access *accesspolicy.Checker) {
 	s.access = access
+}
+
+// SetPresenceLister wires the presence source used to scope @here broadcast
+// mentions to currently-online members.
+func (s *Service) SetPresenceLister(presence presenceLister) {
+	s.presence = presence
 }
 
 func requireChannelWorkspaceID(ch *entity.Channel) (uuid.UUID, error) {
@@ -1216,7 +1231,85 @@ func (s *Service) hydrateMessageMentions(ctx context.Context, msg *entity.Messag
 		return cerrors.Internal("failed to resolve message mentions", err)
 	}
 	msg.Mentions = mentions
+
+	// @here is scoped to members online at send time. Presence is transient, so
+	// the recipient set is snapshotted on the message and merged into Mentions
+	// (the realtime/feed mention contract) (ALK broadcast mentions).
+	hereRecipients, err := s.resolveHereRecipients(ctx, msg, ch)
+	if err != nil {
+		return err
+	}
+	if len(hereRecipients) > 0 {
+		msg.HereRecipients = hereRecipients
+		msg.Mentions = mergeUniqueUUIDs(msg.Mentions, hereRecipients)
+	}
 	return nil
+}
+
+var hereMentionPattern = regexp.MustCompile(`(?i)(^|[^A-Za-z0-9_])@here([^A-Za-z0-9_.-]|$)`)
+
+// resolveHereRecipients returns the channel members (excluding the author) who
+// were online when an @here broadcast was sent. Best-effort: a presence lookup
+// failure logs and yields no recipients rather than failing the send. Returns
+// nil when there is no @here token or no presence source.
+func (s *Service) resolveHereRecipients(
+	ctx context.Context,
+	msg *entity.Message,
+	ch *entity.Channel,
+) ([]uuid.UUID, error) {
+	if s.presence == nil || ch == nil || ch.WorkspaceID == nil {
+		return nil, nil
+	}
+	if !hereMentionPattern.MatchString(msg.Content) {
+		return nil, nil
+	}
+
+	online, err := s.presence.OnlineMemberIDs(ctx, *ch.WorkspaceID)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to list online members for @here", "channel_id", msg.ChannelID, "error", err)
+		return nil, nil
+	}
+	if len(online) == 0 {
+		return nil, nil
+	}
+	onlineSet := make(map[uuid.UUID]struct{}, len(online))
+	for _, id := range online {
+		onlineSet[id] = struct{}{}
+	}
+
+	members, err := s.channels.ListMembers(ctx, msg.ChannelID)
+	if err != nil {
+		return nil, cerrors.Internal("failed to list channel members for @here", err)
+	}
+
+	recipients := make([]uuid.UUID, 0, len(members))
+	for _, member := range members {
+		if member.UserID == msg.UserID {
+			continue
+		}
+		if _, ok := onlineSet[member.UserID]; ok {
+			recipients = append(recipients, member.UserID)
+		}
+	}
+	return recipients, nil
+}
+
+// mergeUniqueUUIDs appends extras to base, skipping IDs already present, and
+// preserves order.
+func mergeUniqueUUIDs(base, extras []uuid.UUID) []uuid.UUID {
+	seen := make(map[uuid.UUID]struct{}, len(base)+len(extras))
+	for _, id := range base {
+		seen[id] = struct{}{}
+	}
+	result := base
+	for _, id := range extras {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	return result
 }
 
 // AddChannelMembers adds workspace members to a channel when the actor can manage membership.
@@ -1641,7 +1734,13 @@ func (s *Service) GetMessage(ctx context.Context, messageID, userID uuid.UUID) (
 	if err := s.hydrateMessageMentionsForRead(ctx, items); err != nil {
 		return nil, err
 	}
+	if err := s.hydrateMessageAttachments(ctx, items); err != nil {
+		return nil, err
+	}
 	if err := s.hydrateMessageFiles(ctx, items); err != nil {
+		return nil, err
+	}
+	if err := s.hydrateMessageAttachments(ctx, items); err != nil {
 		return nil, err
 	}
 	*msg = items[0]
@@ -1671,7 +1770,13 @@ func (s *Service) GetMessages(ctx context.Context, channelID, userID uuid.UUID, 
 	if err := s.hydrateMessageMentionsForRead(ctx, page.Items); err != nil {
 		return pagination.Page[entity.Message]{}, err
 	}
+	if err := s.hydrateMessageAttachments(ctx, page.Items); err != nil {
+		return pagination.Page[entity.Message]{}, err
+	}
 	if err := s.hydrateMessageFiles(ctx, page.Items); err != nil {
+		return pagination.Page[entity.Message]{}, err
+	}
+	if err := s.hydrateMessageAttachments(ctx, page.Items); err != nil {
 		return pagination.Page[entity.Message]{}, err
 	}
 	redactDeletedMessages(page.Items)
@@ -1697,7 +1802,13 @@ func (s *Service) GetPinnedMessages(ctx context.Context, channelID, userID uuid.
 	if err := s.hydrateMessageMentionsForRead(ctx, items); err != nil {
 		return nil, err
 	}
+	if err := s.hydrateMessageAttachments(ctx, items); err != nil {
+		return nil, err
+	}
 	if err := s.hydrateMessageFiles(ctx, items); err != nil {
+		return nil, err
+	}
+	if err := s.hydrateMessageAttachments(ctx, items); err != nil {
 		return nil, err
 	}
 	return items, nil
@@ -1725,7 +1836,13 @@ func (s *Service) GetThreadReplies(ctx context.Context, parentID, userID uuid.UU
 	if err := s.hydrateMessageMentionsForRead(ctx, page.Items); err != nil {
 		return pagination.Page[entity.Message]{}, err
 	}
+	if err := s.hydrateMessageAttachments(ctx, page.Items); err != nil {
+		return pagination.Page[entity.Message]{}, err
+	}
 	if err := s.hydrateMessageFiles(ctx, page.Items); err != nil {
+		return pagination.Page[entity.Message]{}, err
+	}
+	if err := s.hydrateMessageAttachments(ctx, page.Items); err != nil {
 		return pagination.Page[entity.Message]{}, err
 	}
 	redactDeletedMessages(page.Items)
@@ -1750,8 +1867,7 @@ func (s *Service) EditMessage(ctx context.Context, messageID, userID uuid.UUID, 
 	msg.EditedAt = &now
 	msg.UpdatedAt = now
 
-	workspaceID := uuid.Nil
-	workspaceID = channelWorkspaceIDOrNil(ch)
+	workspaceID := channelWorkspaceIDOrNil(ch)
 	if err := s.hydrateMessageMentions(ctx, msg, ch); err != nil {
 		return nil, err
 	}
@@ -1928,8 +2044,7 @@ func (s *Service) DeleteMessage(ctx context.Context, messageID, userID uuid.UUID
 		return err
 	}
 
-	workspaceID := uuid.Nil
-	workspaceID = channelWorkspaceIDOrNil(ch)
+	workspaceID := channelWorkspaceIDOrNil(ch)
 	if s.tx != nil {
 		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
 			if scope.Messages() == nil {
@@ -2217,8 +2332,7 @@ func (s *Service) PinMessage(ctx context.Context, messageID, userID uuid.UUID) e
 	}
 
 	ch, _ := s.channels.GetByID(ctx, msg.ChannelID)
-	workspaceID := uuid.Nil
-	workspaceID = channelWorkspaceIDOrNil(ch)
+	workspaceID := channelWorkspaceIDOrNil(ch)
 	s.publishEvent(ctx, event.TypeMessagePinned, workspaceID, msg.ChannelID, userID, event.PinPayload{
 		MessageID: messageID,
 		ChannelID: msg.ChannelID,
@@ -2259,8 +2373,7 @@ func (s *Service) UnpinMessage(ctx context.Context, messageID, userID uuid.UUID)
 	}
 
 	ch, _ := s.channels.GetByID(ctx, msg.ChannelID)
-	workspaceID := uuid.Nil
-	workspaceID = channelWorkspaceIDOrNil(ch)
+	workspaceID := channelWorkspaceIDOrNil(ch)
 	s.publishEvent(ctx, event.TypeMessageUnpinned, workspaceID, msg.ChannelID, userID, event.PinPayload{
 		MessageID: messageID,
 		ChannelID: msg.ChannelID,
@@ -2957,6 +3070,36 @@ func (s *Service) hydrateMessageReactions(ctx context.Context, items []entity.Me
 		}
 
 		items[i].Reactions = reactionsByMessageID[items[i].ID]
+	}
+	return nil
+}
+
+func (s *Service) hydrateMessageAttachments(ctx context.Context, items []entity.Message) error {
+	messageIDs := make([]uuid.UUID, 0, len(items))
+	for i := range items {
+		if items[i].DeletedAt != nil {
+			items[i].Attachments = nil
+			continue
+		}
+
+		messageIDs = append(messageIDs, items[i].ID)
+	}
+	if len(messageIDs) == 0 {
+		return nil
+	}
+
+	attachmentsByMessageID, err := s.messages.ListAttachmentsByMessageIDs(ctx, messageIDs)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to list message attachments", "message_count", len(messageIDs), "error", err)
+		return cerrors.Internal("failed to list message attachments", err)
+	}
+
+	for i := range items {
+		if items[i].DeletedAt != nil {
+			continue
+		}
+
+		items[i].Attachments = attachmentsByMessageID[items[i].ID]
 	}
 	return nil
 }

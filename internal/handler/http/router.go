@@ -17,6 +17,7 @@ type RouterDeps struct {
 	Account          *AccountHandler
 	Channels         *ChannelHandler
 	Saved            *SavedHandler
+	Drafts           *DraftHandler
 	Messages         *MessageHandler
 	Calls            *CallHandler
 	LiveKit          *LiveKitWebhookHandler
@@ -144,6 +145,15 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 		r.Post("/api/v1/perf/rum", deps.Perf.IngestRUM)
 	}
 
+	// Browser image/document loads cannot attach an Authorization header, so
+	// /files/* resolves auth inside the handler via Bearer or aloqa_session.
+	if deps.Files != nil {
+		deps.Files.SetTokenValidator(deps.Validator)
+		deps.Files.SetSessionResolver(deps.SessionResolver)
+		r.Get("/files/*", deps.Files.Download)
+		r.Get("/api/v1/files/{fileID}/content", deps.Files.DownloadLibraryContent)
+	}
+
 	// Authenticated routes.
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Auth(deps.Validator))
@@ -171,15 +181,11 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 		// WebSocket endpoint.
 		r.Get("/ws", deps.WS.ServeHTTP)
 
-		// File downloads (authenticated).
-		r.Get("/files/*", deps.Files.Download)
-
 		r.Route("/api/v1/files", func(r chi.Router) {
 			r.Post("/upload", deps.Files.UploadLibrary)
 			r.Route("/{fileID}", func(r chi.Router) {
 				r.Get("/", deps.Files.FileURL)
 				r.Delete("/", deps.Files.DeleteLibrary)
-				r.Get("/content", deps.Files.DownloadLibraryContent)
 				r.Put("/favorite", deps.Files.Favorite)
 				r.Delete("/favorite", deps.Files.Unfavorite)
 				r.Post("/shares", deps.Files.Share)
@@ -301,6 +307,11 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 	// chat.Service.ListMentions / postgres.MessageRepo.ListMentions.
 	r.Get("/mentions", deps.Messages.ListMentions)
 
+	// Server-backed message drafts (ALOQA-247): hydration of the caller's drafts.
+	if deps.Drafts != nil {
+		r.Get("/drafts", deps.Drafts.List)
+	}
+
 	// Search.
 	r.Get("/search", deps.Search.Search)
 
@@ -333,6 +344,10 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 			r.Post("/members", deps.Channels.AddMembers)
 			r.Delete("/members/{userID}", deps.Channels.RemoveMember)
 			r.Post("/read", deps.Channels.MarkRead)
+			if deps.Drafts != nil {
+				r.Put("/draft", deps.Drafts.Upsert)
+				r.Delete("/draft", deps.Drafts.Delete)
+			}
 
 			// Messages within a channel.
 			r.Route("/messages", func(r chi.Router) {

@@ -95,9 +95,13 @@ func (r *MessageRepo) Create(ctx context.Context, msg *entity.Message) error {
 	if fileIDs == nil {
 		fileIDs = []uuid.UUID{}
 	}
+	hereRecipients := msg.HereRecipients
+	if hereRecipients == nil {
+		hereRecipients = []uuid.UUID{}
+	}
 	query := `
-		INSERT INTO messages (id, channel_id, user_id, parent_id, content, type, edited, edited_at, pinned, pinned_by, pinned_at, forwarded_from, saved_from, quoted_message_id, quoted_snapshot, profile_share, call_event, file_ids, created_at, updated_at, deleted_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)`
+		INSERT INTO messages (id, channel_id, user_id, parent_id, content, type, edited, edited_at, pinned, pinned_by, pinned_at, forwarded_from, saved_from, quoted_message_id, quoted_snapshot, profile_share, call_event, file_ids, mention_here_recipients, created_at, updated_at, deleted_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)`
 
 	_, err := r.db.Exec(ctx, query,
 		msg.ID,
@@ -118,6 +122,7 @@ func (r *MessageRepo) Create(ctx context.Context, msg *entity.Message) error {
 		msg.ProfileShare,
 		msg.CallEvent,
 		fileIDs,
+		hereRecipients,
 		msg.CreatedAt,
 		msg.UpdatedAt,
 		msg.DeletedAt,
@@ -716,6 +721,8 @@ func (r *MessageRepo) ListMentions(
 		  AND (
 		    (caller.email_handle <> '' AND m.content ~* ('(^|[^A-Za-z0-9_])@' || caller.email_handle || '([^A-Za-z0-9_.-]|$)'))
 		    OR (caller.display_handle <> '' AND m.content ~* ('(^|[^A-Za-z0-9_])@' || caller.display_handle || '([^A-Za-z0-9_.-]|$)'))
+		    OR (m.content ~* '(^|[^A-Za-z0-9_])@all([^A-Za-z0-9_.-]|$)')
+		    OR (caller.id = ANY(m.mention_here_recipients))
 		  )
 		ORDER BY m.created_at DESC, m.id DESC
 		LIMIT $3`
@@ -794,6 +801,7 @@ func (r *MessageRepo) ResolveMentions(
 		FROM member_handles
 		WHERE (email_handle <> '' AND $3 ~* ('(^|[^A-Za-z0-9_])@' || email_handle || '([^A-Za-z0-9_.-]|$)'))
 		   OR (display_handle <> '' AND $3 ~* ('(^|[^A-Za-z0-9_])@' || display_handle || '([^A-Za-z0-9_.-]|$)'))
+		   OR ($3 ~* '(^|[^A-Za-z0-9_])@all([^A-Za-z0-9_.-]|$)')
 		ORDER BY id`
 
 	rows, err := r.db.Query(ctx, query, channelID, authorID, content)
@@ -832,16 +840,17 @@ func (r *MessageRepo) ResolveMentionsByMessageIDs(
 
 	query := `
 		WITH target_messages AS (
-			SELECT id, channel_id, user_id, content
+			SELECT id, channel_id, user_id, content, mention_here_recipients
 			FROM messages
 			WHERE id = ANY($1)
 			  AND deleted_at IS NULL
-			  AND POSITION('@' IN content) > 0
+			  AND (POSITION('@' IN content) > 0 OR mention_here_recipients <> '{}')
 		),
 		member_handles AS (
 			SELECT m.id AS message_id,
 				u.id AS user_id,
 				m.content,
+				m.mention_here_recipients AS here_recipients,
 				regexp_replace(
 					LOWER(SPLIT_PART(u.email, '@', 1)),
 					'([.+*?()\[\]{}|\\^$])',
@@ -865,6 +874,8 @@ func (r *MessageRepo) ResolveMentionsByMessageIDs(
 		FROM member_handles
 		WHERE (email_handle <> '' AND content ~* ('(^|[^A-Za-z0-9_])@' || email_handle || '([^A-Za-z0-9_.-]|$)'))
 		   OR (display_handle <> '' AND content ~* ('(^|[^A-Za-z0-9_])@' || display_handle || '([^A-Za-z0-9_.-]|$)'))
+		   OR (content ~* '(^|[^A-Za-z0-9_])@all([^A-Za-z0-9_.-]|$)')
+		   OR (user_id = ANY(here_recipients))
 		ORDER BY message_id, user_id`
 
 	rows, err := r.db.Query(ctx, query, messageIDs)
@@ -1157,6 +1168,47 @@ func (r *MessageRepo) ListAttachments(ctx context.Context, messageID uuid.UUID) 
 	}
 
 	return attachments, nil
+}
+
+func (r *MessageRepo) ListAttachmentsByMessageIDs(ctx context.Context, messageIDs []uuid.UUID) (map[uuid.UUID][]entity.Attachment, error) {
+	attachmentsByMessageID := make(map[uuid.UUID][]entity.Attachment, len(messageIDs))
+	if len(messageIDs) == 0 {
+		return attachmentsByMessageID, nil
+	}
+
+	query := `
+		SELECT id, message_id, file_name, file_size, mime_type, storage_path, created_at
+		FROM attachments
+		WHERE message_id = ANY($1)
+		ORDER BY message_id, created_at`
+
+	rows, err := r.db.Query(ctx, query, messageIDs)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list attachments by message ids: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var a entity.Attachment
+		if err := rows.Scan(
+			&a.ID,
+			&a.MessageID,
+			&a.FileName,
+			&a.FileSize,
+			&a.MimeType,
+			&a.StoragePath,
+			&a.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("postgres: list attachments by message ids scan: %w", err)
+		}
+		a.URL = "/files/" + a.StoragePath
+		attachmentsByMessageID[a.MessageID] = append(attachmentsByMessageID[a.MessageID], a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list attachments by message ids rows: %w", err)
+	}
+
+	return attachmentsByMessageID, nil
 }
 
 func (r *MessageRepo) CountUnread(ctx context.Context, channelID, userID uuid.UUID, since time.Time) (int, error) {

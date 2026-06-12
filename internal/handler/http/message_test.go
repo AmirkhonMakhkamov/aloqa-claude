@@ -231,6 +231,54 @@ func TestMessagePostProfileShareAcceptsHydratedClientPayload(t *testing.T) {
 	}
 }
 
+func TestMessageListHydratesAttachments(t *testing.T) {
+	f := newMessageHTTPFixture()
+	messageID := uuid.New()
+	key := "attachments/2026/06/12/image.png"
+	createdAt := time.Now().UTC()
+	f.messages.messages[messageID] = &entity.Message{
+		ID:        messageID,
+		ChannelID: f.channelID,
+		UserID:    f.userID,
+		Content:   "image",
+		Type:      entity.MessageTypeText,
+		CreatedAt: createdAt,
+		UpdatedAt: createdAt,
+	}
+	f.messages.attachmentsByKey = map[string]*entity.Attachment{
+		key: {
+			ID:          uuid.New(),
+			MessageID:   messageID,
+			FileName:    "image.png",
+			FileSize:    7,
+			MimeType:    "image/png",
+			StoragePath: key,
+			URL:         "/files/" + key,
+			CreatedAt:   createdAt,
+		},
+	}
+
+	res := f.serve(http.MethodGet, "/channels/"+f.channelID.String()+"/messages?limit=10", "")
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", res.Code, res.Body.String())
+	}
+	var page pagination.Page[entity.Message]
+	if err := json.Unmarshal(res.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("items = %d, want 1", len(page.Items))
+	}
+	attachments := page.Items[0].Attachments
+	if len(attachments) != 1 {
+		t.Fatalf("attachments = %d, want 1", len(attachments))
+	}
+	if attachments[0].URL != "/files/"+key || attachments[0].MimeType != "image/png" {
+		t.Fatalf("attachment = %+v, want image URL and mime type", attachments[0])
+	}
+}
+
 func TestMessagePostProfileShareRejectsInvalidUserID(t *testing.T) {
 	f := newMessageHTTPFixture()
 	f.channels.channels[f.channelID].Type = entity.ChannelTypeDM
@@ -1006,6 +1054,7 @@ func (r *messageHTTPChannelRepo) GetDMChannel(context.Context, uuid.UUID, uuid.U
 type messageHTTPMessageRepo struct {
 	messages             map[uuid.UUID]*entity.Message
 	reactions            map[uuid.UUID]entity.Reaction
+	attachmentsByKey     map[string]*entity.Attachment
 	resolveMentionsFunc  func(context.Context, uuid.UUID, uuid.UUID, string) ([]uuid.UUID, error)
 	resolveMentionsCalls []messageHTTPResolveMentionsCall
 }
@@ -1173,15 +1222,48 @@ func (r *messageHTTPMessageRepo) ListReactionsByMessageIDs(_ context.Context, me
 	}
 	return reactionsByMessageID, nil
 }
-func (r *messageHTTPMessageRepo) CreateAttachment(context.Context, *entity.Attachment) error {
+func (r *messageHTTPMessageRepo) CreateAttachment(_ context.Context, attachment *entity.Attachment) error {
+	if r.attachmentsByKey == nil {
+		r.attachmentsByKey = map[string]*entity.Attachment{}
+	}
+	copy := *attachment
+	r.attachmentsByKey[attachment.StoragePath] = &copy
 	return nil
 }
 func (r *messageHTTPMessageRepo) DeleteAttachment(context.Context, uuid.UUID) error { return nil }
-func (r *messageHTTPMessageRepo) GetAttachmentByStoragePath(context.Context, string) (*entity.Attachment, error) {
+func (r *messageHTTPMessageRepo) GetAttachmentByStoragePath(_ context.Context, storagePath string) (*entity.Attachment, error) {
+	if attachment := r.attachmentsByKey[storagePath]; attachment != nil {
+		copy := *attachment
+		return &copy, nil
+	}
 	return nil, cerrors.NotFound("attachment not found")
 }
-func (r *messageHTTPMessageRepo) ListAttachments(context.Context, uuid.UUID) ([]entity.Attachment, error) {
-	return nil, nil
+func (r *messageHTTPMessageRepo) ListAttachments(_ context.Context, messageID uuid.UUID) ([]entity.Attachment, error) {
+	attachments := make([]entity.Attachment, 0)
+	for _, attachment := range r.attachmentsByKey {
+		if attachment != nil && attachment.MessageID == messageID {
+			attachments = append(attachments, *attachment)
+		}
+	}
+	return attachments, nil
+}
+func (r *messageHTTPMessageRepo) ListAttachmentsByMessageIDs(_ context.Context, messageIDs []uuid.UUID) (map[uuid.UUID][]entity.Attachment, error) {
+	messageIDSet := make(map[uuid.UUID]struct{}, len(messageIDs))
+	for _, messageID := range messageIDs {
+		messageIDSet[messageID] = struct{}{}
+	}
+
+	attachmentsByMessageID := make(map[uuid.UUID][]entity.Attachment, len(messageIDs))
+	for _, attachment := range r.attachmentsByKey {
+		if attachment == nil {
+			continue
+		}
+		if _, ok := messageIDSet[attachment.MessageID]; !ok {
+			continue
+		}
+		attachmentsByMessageID[attachment.MessageID] = append(attachmentsByMessageID[attachment.MessageID], *attachment)
+	}
+	return attachmentsByMessageID, nil
 }
 func (r *messageHTTPMessageRepo) CountUnread(context.Context, uuid.UUID, uuid.UUID, time.Time) (int, error) {
 	return 0, nil

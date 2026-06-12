@@ -936,6 +936,32 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
 
 
+  /api/v1/files/{fileID}/content:
+    parameters:
+      - $ref: '#/components/parameters/FileID'
+    get:
+      summary: Download library file bytes
+      tags: [files]
+      security:
+        - bearerAuth: []
+        - sessionIdCookie: []
+      parameters:
+        - name: disposition
+          in: query
+          schema: { type: string, enum: [attachment, inline], default: attachment }
+      responses:
+        '200':
+          description: File content
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+
   /api/v1/files/{fileID}/favorite:
     parameters:
       - $ref: '#/components/parameters/FileID'

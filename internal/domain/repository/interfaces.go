@@ -111,6 +111,7 @@ type MessageRepository interface {
 	DeleteAttachment(ctx context.Context, id uuid.UUID) error
 	GetAttachmentByStoragePath(ctx context.Context, storagePath string) (*entity.Attachment, error)
 	ListAttachments(ctx context.Context, messageID uuid.UUID) ([]entity.Attachment, error)
+	ListAttachmentsByMessageIDs(ctx context.Context, messageIDs []uuid.UUID) (map[uuid.UUID][]entity.Attachment, error)
 
 	// CountUnread returns the number of messages in a channel created after
 	// the given timestamp, excluding messages from the specified user.

@@ -2724,6 +2724,9 @@ type fakeMessageRepo struct {
 	resolveMentionsByMessageIDsCalls   int
 	lastResolveMentionsByMessageIDsArg []uuid.UUID
 	mentionsByMessageID                map[uuid.UUID][]uuid.UUID
+	attachments                        map[uuid.UUID]entity.Attachment
+	listAttachmentsByMessageIDsCalls   int
+	lastListAttachmentsByMessageIDsArg []uuid.UUID
 }
 
 type resolveMentionsCall struct {
@@ -2934,6 +2937,23 @@ func (r *fakeMessageRepo) GetAttachmentByStoragePath(context.Context, string) (*
 }
 func (r *fakeMessageRepo) ListAttachments(context.Context, uuid.UUID) ([]entity.Attachment, error) {
 	return nil, nil
+}
+func (r *fakeMessageRepo) ListAttachmentsByMessageIDs(_ context.Context, messageIDs []uuid.UUID) (map[uuid.UUID][]entity.Attachment, error) {
+	r.listAttachmentsByMessageIDsCalls++
+	r.lastListAttachmentsByMessageIDsArg = append([]uuid.UUID(nil), messageIDs...)
+
+	messageIDSet := make(map[uuid.UUID]struct{}, len(messageIDs))
+	for _, id := range messageIDs {
+		messageIDSet[id] = struct{}{}
+	}
+
+	attachmentsByMessageID := make(map[uuid.UUID][]entity.Attachment, len(messageIDs))
+	for _, a := range r.attachments {
+		if _, ok := messageIDSet[a.MessageID]; ok {
+			attachmentsByMessageID[a.MessageID] = append(attachmentsByMessageID[a.MessageID], a)
+		}
+	}
+	return attachmentsByMessageID, nil
 }
 func (r *fakeMessageRepo) CountUnread(_ context.Context, channelID, userID uuid.UUID, since time.Time) (int, error) {
 	count := 0

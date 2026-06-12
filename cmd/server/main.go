@@ -38,6 +38,7 @@ import (
 	"aloqa/internal/service/chat"
 	"aloqa/internal/service/collaboration"
 	demosvc "aloqa/internal/service/demo"
+	draftsvc "aloqa/internal/service/draft"
 	"aloqa/internal/service/file"
 	"aloqa/internal/service/guest"
 	"aloqa/internal/service/mediaops"
@@ -198,6 +199,7 @@ func run() error {
 	workspaceCollaborationRepo := postgres.NewWorkspaceCollaborationRepo(pool)
 	realtimeRepo := postgres.NewRealtimeRepo(pool)
 	savedRepo := postgres.NewSavedRepo(pool)
+	draftRepo := postgres.NewDraftRepo(pool)
 	mediaRepo := postgres.NewMediaRepo(pool)
 	calendarRepo := postgres.NewCalendarRepo(pool)
 	perfRepo := postgres.NewPerfRepo(pool)
@@ -359,6 +361,7 @@ func run() error {
 	chatSvc.SetFileRepository(fileRepo)
 	chatSvc.SetTransactionManager(txManager)
 	savedSvc := savedsvc.NewService(userRepo, channelRepo, messageRepo, savedRepo, channelAccessPolicy, realtimePublisher)
+	draftSvc := draftsvc.NewService(draftRepo)
 	callSvc := call.NewService(callRepo, breakoutRoomRepo, channelRepo, workspaceRepo, realtimePublisher, sfuServer, call.MediaConfig{
 		TokenSecret:              []byte(cfg.JWT.Secret),
 		TokenTTL:                 cfg.WebRTC.MediaTokenTTL,
@@ -407,6 +410,8 @@ func run() error {
 		presence.WithOnlineShardCount(cfg.Redis.PresenceShardCount),
 		presence.WithEventPublisher(realtimePublisher),
 	)
+	// @here broadcast mentions are scoped to currently-online members.
+	chatSvc.SetPresenceLister(presenceSvc)
 	fileSvc := file.NewService(fileStore, messageRepo, channelRepo, workspaceRepo, nil, searchSvc, file.Config{
 		MaxFileSize:  cfg.Media.MaxFileSize,
 		AllowedTypes: cfg.Media.AllowedTypes,
@@ -533,6 +538,7 @@ func run() error {
 	accountHandler := httphandler.NewAccountHandler(authSvc)
 	channelHandler := httphandler.NewChannelHandler(chatSvc)
 	savedHandler := httphandler.NewSavedHandler(savedSvc)
+	draftHandler := httphandler.NewDraftHandler(draftSvc)
 	messageHandler := httphandler.NewMessageHandler(chatSvc)
 	callHandler := httphandler.NewCallHandler(callSvc, guestSvc)
 	livekitWebhookHandler := httphandler.NewLiveKitWebhookHandler(
@@ -562,6 +568,7 @@ func run() error {
 		Account:          accountHandler,
 		Channels:         channelHandler,
 		Saved:            savedHandler,
+		Drafts:           draftHandler,
 		Messages:         messageHandler,
 		Calls:            callHandler,
 		LiveKit:          livekitWebhookHandler,

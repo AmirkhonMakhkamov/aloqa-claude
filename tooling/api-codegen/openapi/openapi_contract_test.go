@@ -54,6 +54,7 @@ func TestOpenAPICoversFrontendContractRoutes(t *testing.T) {
 		{"get", "/api/v1/users/me/files"},
 		{"get", "/api/v1/users/me/storage"},
 		{"post", "/api/v1/files/upload"},
+		{"get", "/api/v1/files/{fileID}/content"},
 		{"delete", "/api/v1/files/{fileID}"},
 		{"post", "/api/v1/files/{fileID}/shares"},
 		{"get", "/api/v1/personal/channels/{channelID}/messages/{messageID}/thread"},

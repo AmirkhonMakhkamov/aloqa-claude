@@ -258,6 +258,13 @@ func (h *FileHandler) DownloadLibraryContent(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	userID := middleware.UserIDFromContext(r.Context())
+	if userID == uuid.Nil {
+		userID, err = h.downloadUserID(r)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+	}
 	reader, file, err := h.svc.DownloadLibraryFile(r.Context(), fileID, userID)
 	if err != nil {
 		writeErr(w, err)

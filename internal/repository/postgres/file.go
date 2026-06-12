@@ -779,9 +779,12 @@ func isInlinePreviewAllowed(mimeType string, extension string) bool {
 	return lowerMime == "application/pdf" || lowerExt == "pdf"
 }
 
+// fileURL builds the URL a client can load the file BYTES from. It must point
+// at the /content endpoint: the bare /api/v1/files/{id} route returns JSON
+// metadata, which breaks <img>/<video> consumers of preview_url.
 func fileURL(fileID uuid.UUID, disposition string) string {
 	if disposition == "" {
-		return "/api/v1/files/" + fileID.String()
+		return "/api/v1/files/" + fileID.String() + "/content"
 	}
-	return "/api/v1/files/" + fileID.String() + "?disposition=" + disposition
+	return "/api/v1/files/" + fileID.String() + "/content?disposition=" + disposition
 }

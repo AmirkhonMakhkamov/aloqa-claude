@@ -153,7 +153,7 @@ func (s *Service) SetObserver(observer interface {
 }
 
 // StartRecording begins recording a call. Only host/co-host can start.
-func (s *Service) StartRecording(ctx context.Context, workspaceID, callID, userID uuid.UUID, strategy entity.RecordingStrategy) (*entity.Recording, error) {
+func (s *Service) StartRecording(ctx context.Context, workspaceID, callID, userID uuid.UUID, _ entity.RecordingStrategy) (*entity.Recording, error) {
 	call, err := s.calls.GetByID(ctx, callID)
 	if err != nil {
 		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
@@ -172,7 +172,7 @@ func (s *Service) StartRecording(ctx context.Context, workspaceID, callID, userI
 		return nil, cerrors.Forbidden("recording is disabled for this call")
 	}
 	// Recording is a single LiveKit room-composite egress → one MP4.
-	strategy = entity.RecordingStrategyComposite
+	strategy := entity.RecordingStrategyComposite
 	if s.egress == nil {
 		return nil, cerrors.Unavailable("recording is not available")
 	}

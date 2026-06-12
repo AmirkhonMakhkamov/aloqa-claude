@@ -45,12 +45,6 @@ func publishSources(canMic, canCam, canShare bool) []livekitpb.TrackSource {
 	return sources
 }
 
-// screenShareSources is the legacy camera+microphone(+screen) gate, preserved as
-// a thin wrapper for callers that only vary the screen grant.
-func screenShareSources(canShare bool) []livekitpb.TrackSource {
-	return publishSources(true, true, canShare)
-}
-
 // canShareScreen reports whether a participant may publish a screen-share track:
 // hosts/co-hosts always may; everyone else needs an explicit per-participant grant.
 // (This is the ALK-697 per-participant grant only; the ALK-812 meeting-level
@@ -300,12 +294,6 @@ func (s *Service) RemoveLiveKitParticipant(ctx context.Context, callID, userID u
 		return nil
 	}
 	return s.livekitRooms.RemoveParticipant(ctx, callID, userID)
-}
-
-func (s *Service) ensureLiveKitRoomBestEffort(ctx context.Context, call *entity.Call) {
-	if err := s.EnsureLiveKitRoom(ctx, call); err != nil {
-		slog.WarnContext(ctx, "failed to ensure livekit room", "call_id", call.ID, "error", err)
-	}
 }
 
 func (s *Service) deleteLiveKitRoomBestEffort(ctx context.Context, callID uuid.UUID) {

@@ -4,6 +4,7 @@ import (
 	"hash/fnv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // AvatarColorPalette holds 26 perceptually distinct colours, one per Latin
@@ -48,16 +49,13 @@ func AvatarColorForDisplayName(displayName string) string {
 		return AvatarColorPalette[0]
 	}
 
-	for _, firstRune := range trimmedName {
-		upperRune := unicode.ToUpper(firstRune)
-		if upperRune >= 'A' && upperRune <= 'Z' {
-			return AvatarColorPalette[upperRune-'A']
-		}
-
-		hash := fnv.New32a()
-		_, _ = hash.Write([]byte(trimmedName))
-		return AvatarColorPalette[hash.Sum32()%uint32(len(AvatarColorPalette))]
+	firstRune, _ := utf8.DecodeRuneInString(trimmedName)
+	upperRune := unicode.ToUpper(firstRune)
+	if upperRune >= 'A' && upperRune <= 'Z' {
+		return AvatarColorPalette[upperRune-'A']
 	}
 
-	return AvatarColorPalette[0]
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(trimmedName))
+	return AvatarColorPalette[hash.Sum32()%uint32(len(AvatarColorPalette))]
 }

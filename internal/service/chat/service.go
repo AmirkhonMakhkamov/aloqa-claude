@@ -1867,8 +1867,7 @@ func (s *Service) EditMessage(ctx context.Context, messageID, userID uuid.UUID, 
 	msg.EditedAt = &now
 	msg.UpdatedAt = now
 
-	workspaceID := uuid.Nil
-	workspaceID = channelWorkspaceIDOrNil(ch)
+	workspaceID := channelWorkspaceIDOrNil(ch)
 	if err := s.hydrateMessageMentions(ctx, msg, ch); err != nil {
 		return nil, err
 	}
@@ -2045,8 +2044,7 @@ func (s *Service) DeleteMessage(ctx context.Context, messageID, userID uuid.UUID
 		return err
 	}
 
-	workspaceID := uuid.Nil
-	workspaceID = channelWorkspaceIDOrNil(ch)
+	workspaceID := channelWorkspaceIDOrNil(ch)
 	if s.tx != nil {
 		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
 			if scope.Messages() == nil {
@@ -2334,8 +2332,7 @@ func (s *Service) PinMessage(ctx context.Context, messageID, userID uuid.UUID) e
 	}
 
 	ch, _ := s.channels.GetByID(ctx, msg.ChannelID)
-	workspaceID := uuid.Nil
-	workspaceID = channelWorkspaceIDOrNil(ch)
+	workspaceID := channelWorkspaceIDOrNil(ch)
 	s.publishEvent(ctx, event.TypeMessagePinned, workspaceID, msg.ChannelID, userID, event.PinPayload{
 		MessageID: messageID,
 		ChannelID: msg.ChannelID,
@@ -2376,8 +2373,7 @@ func (s *Service) UnpinMessage(ctx context.Context, messageID, userID uuid.UUID)
 	}
 
 	ch, _ := s.channels.GetByID(ctx, msg.ChannelID)
-	workspaceID := uuid.Nil
-	workspaceID = channelWorkspaceIDOrNil(ch)
+	workspaceID := channelWorkspaceIDOrNil(ch)
 	s.publishEvent(ctx, event.TypeMessageUnpinned, workspaceID, msg.ChannelID, userID, event.PinPayload{
 		MessageID: messageID,
 		ChannelID: msg.ChannelID,

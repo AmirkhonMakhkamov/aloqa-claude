@@ -455,7 +455,8 @@ func (h *FileHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	userID := middleware.UserIDFromContext(r.Context())
-	result, err := h.svc.Upload(r.Context(), channelID, messageID, userID, header.Filename, f, header.Size)
+	displayMode := r.FormValue("display_mode")
+	result, err := h.svc.Upload(r.Context(), channelID, messageID, userID, header.Filename, f, header.Size, displayMode)
 	if err != nil {
 		writeErr(w, err)
 		return

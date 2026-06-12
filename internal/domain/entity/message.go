@@ -99,6 +99,10 @@ type Attachment struct {
 	FileName    string    `json:"file_name"`
 	FileSize    int64     `json:"file_size"`
 	MimeType    string    `json:"mime_type"`
+	// DisplayMode is "photo" (inline image), "file" (download card), or "" (auto:
+	// fall back to the MIME heuristic). Lets the sender choose how an image renders
+	// (ALK-926).
+	DisplayMode string    `json:"display_mode,omitempty"`
 	StoragePath string    `json:"-"`
 	URL         string    `json:"url,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`

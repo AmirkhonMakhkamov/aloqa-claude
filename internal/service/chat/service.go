@@ -1641,6 +1641,9 @@ func (s *Service) GetMessage(ctx context.Context, messageID, userID uuid.UUID) (
 	if err := s.hydrateMessageMentionsForRead(ctx, items); err != nil {
 		return nil, err
 	}
+	if err := s.hydrateMessageAttachments(ctx, items); err != nil {
+		return nil, err
+	}
 	if err := s.hydrateMessageFiles(ctx, items); err != nil {
 		return nil, err
 	}
@@ -1674,6 +1677,9 @@ func (s *Service) GetMessages(ctx context.Context, channelID, userID uuid.UUID, 
 	if err := s.hydrateMessageMentionsForRead(ctx, page.Items); err != nil {
 		return pagination.Page[entity.Message]{}, err
 	}
+	if err := s.hydrateMessageAttachments(ctx, page.Items); err != nil {
+		return pagination.Page[entity.Message]{}, err
+	}
 	if err := s.hydrateMessageFiles(ctx, page.Items); err != nil {
 		return pagination.Page[entity.Message]{}, err
 	}
@@ -1701,6 +1707,9 @@ func (s *Service) GetPinnedMessages(ctx context.Context, channelID, userID uuid.
 		return nil, err
 	}
 	if err := s.hydrateMessageMentionsForRead(ctx, items); err != nil {
+		return nil, err
+	}
+	if err := s.hydrateMessageAttachments(ctx, items); err != nil {
 		return nil, err
 	}
 	if err := s.hydrateMessageFiles(ctx, items); err != nil {
@@ -1732,6 +1741,9 @@ func (s *Service) GetThreadReplies(ctx context.Context, parentID, userID uuid.UU
 		return pagination.Page[entity.Message]{}, err
 	}
 	if err := s.hydrateMessageMentionsForRead(ctx, page.Items); err != nil {
+		return pagination.Page[entity.Message]{}, err
+	}
+	if err := s.hydrateMessageAttachments(ctx, page.Items); err != nil {
 		return pagination.Page[entity.Message]{}, err
 	}
 	if err := s.hydrateMessageFiles(ctx, page.Items); err != nil {

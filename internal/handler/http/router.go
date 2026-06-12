@@ -144,6 +144,14 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 		r.Post("/api/v1/perf/rum", deps.Perf.IngestRUM)
 	}
 
+	// Browser image/document loads cannot attach an Authorization header, so
+	// /files/* resolves auth inside the handler via Bearer or aloqa_session.
+	if deps.Files != nil {
+		deps.Files.SetTokenValidator(deps.Validator)
+		deps.Files.SetSessionResolver(deps.SessionResolver)
+		r.Get("/files/*", deps.Files.Download)
+	}
+
 	// Authenticated routes.
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Auth(deps.Validator))
@@ -170,9 +178,6 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 
 		// WebSocket endpoint.
 		r.Get("/ws", deps.WS.ServeHTTP)
-
-		// File downloads (authenticated).
-		r.Get("/files/*", deps.Files.Download)
 
 		r.Route("/api/v1/files", func(r chi.Router) {
 			r.Post("/upload", deps.Files.UploadLibrary)

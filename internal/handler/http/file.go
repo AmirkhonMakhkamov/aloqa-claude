@@ -61,6 +61,17 @@ func libraryDisposition(requested string, file *entity.LibraryFile) string {
 	return "attachment"
 }
 
+func attachmentDisposition(mimeType string) string {
+	mimeType = strings.ToLower(mimeType)
+	if mimeType == "image/svg+xml" {
+		return "attachment"
+	}
+	if strings.HasPrefix(mimeType, "image/") {
+		return "inline"
+	}
+	return "attachment"
+}
+
 func contentDispositionHeader(disposition, filename string) string {
 	if disposition != "inline" {
 		disposition = "attachment"
@@ -90,13 +101,55 @@ func contentDispositionFilename(filename string) string {
 
 // FileHandler handles file upload and download HTTP endpoints.
 type FileHandler struct {
-	svc         *file.Service
-	maxFileSize int64
+	svc             *file.Service
+	maxFileSize     int64
+	tokenValidator  middleware.TokenValidator
+	sessionResolver SessionUserResolver
 }
 
 // NewFileHandler creates a new FileHandler.
 func NewFileHandler(svc *file.Service, maxFileSize int64) *FileHandler {
 	return &FileHandler{svc: svc, maxFileSize: maxFileSize}
+}
+
+func (h *FileHandler) SetTokenValidator(validator middleware.TokenValidator) {
+	h.tokenValidator = validator
+}
+
+func (h *FileHandler) SetSessionResolver(resolver SessionUserResolver) {
+	h.sessionResolver = resolver
+}
+
+func (h *FileHandler) downloadUserID(r *http.Request) (uuid.UUID, error) {
+	if header := r.Header.Get("Authorization"); header != "" {
+		if h.tokenValidator == nil {
+			return uuid.Nil, cerrors.Unauthorized("file download authorization is not configured")
+		}
+		token, ok := strings.CutPrefix(header, "Bearer ")
+		if !ok || token == "" {
+			return uuid.Nil, cerrors.Unauthorized("invalid authorization format")
+		}
+		userID, _, err := h.tokenValidator.ValidateToken(token)
+		if err != nil {
+			return uuid.Nil, cerrors.Unauthorized("invalid or expired token")
+		}
+		return userID, nil
+	}
+
+	if h.sessionResolver != nil {
+		cookie, err := r.Cookie(sessionCookieName)
+		if err == nil && cookie.Value != "" {
+			userID, err := h.sessionResolver.UserIDForSession(r.Context(), cookie.Value)
+			if err != nil {
+				return uuid.Nil, cerrors.Unauthorized("session validation failed")
+			}
+			if userID != uuid.Nil {
+				return userID, nil
+			}
+		}
+	}
+
+	return uuid.Nil, cerrors.Unauthorized("missing authorization header")
 }
 
 func (h *FileHandler) ListLibrary(w http.ResponseWriter, r *http.Request) {
@@ -413,7 +466,11 @@ func (h *FileHandler) Download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := middleware.UserIDFromContext(r.Context())
+	userID, err := h.downloadUserID(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
 	if signedURL, err := h.svc.PresignDownloadByKey(r.Context(), key, userID); err != nil {
 		writeErr(w, err)
 		return
@@ -439,7 +496,7 @@ func (h *FileHandler) Download(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Disposition", contentDispositionHeader("attachment", key))
+	w.Header().Set("Content-Disposition", contentDispositionHeader(attachmentDisposition(contentType), key))
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size, 10))
 	w.Header().Set("Cache-Control", "private, max-age=86400")
 	w.Header().Set("X-Content-Type-Options", "nosniff")

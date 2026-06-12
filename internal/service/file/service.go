@@ -377,7 +377,7 @@ func (s *Service) PresignDownloadByKey(ctx context.Context, key string, userID u
 		Filename:    attachment.FileName,
 		ContentType: attachment.MimeType,
 		ExpiresIn:   s.signedURLTTL,
-		Attachment:  true,
+		Attachment:  attachmentDownloadDisposition(attachment.MimeType) == "attachment",
 	})
 	if err != nil {
 		if errors.Is(err, storage.ErrNotSupported) {
@@ -386,6 +386,17 @@ func (s *Service) PresignDownloadByKey(ctx context.Context, key string, userID u
 		return "", cerrors.Internal("failed to sign file download", err)
 	}
 	return url, nil
+}
+
+func attachmentDownloadDisposition(mimeType string) string {
+	mimeType = strings.ToLower(mimeType)
+	if mimeType == "image/svg+xml" {
+		return "attachment"
+	}
+	if strings.HasPrefix(mimeType, "image/") {
+		return "inline"
+	}
+	return "attachment"
 }
 
 // Delete removes a file from storage and its attachment record.

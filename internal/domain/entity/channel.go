@@ -50,6 +50,11 @@ type Channel struct {
 	// of a channel without an extra round-trip. Kept omitempty so ordinary
 	// non-DM channel responses keep their existing shape.
 	Members []uuid.UUID `json:"members,omitempty"`
+	// MembersCount is the number of members in the channel, populated only by the
+	// workspace channel lists (ListByUser / ListByWorkspace) so clients can show
+	// "N members" without a per-channel round-trip. Other responses leave it nil
+	// and omitempty keeps their shape unchanged.
+	MembersCount *int `json:"members_count,omitempty"`
 }
 
 // MentionSuggestion is a channel member surfaced as an @mention autocomplete

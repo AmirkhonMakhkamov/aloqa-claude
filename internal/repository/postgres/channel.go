@@ -101,7 +101,8 @@ func (r *ChannelRepo) ListByWorkspace(ctx context.Context, workspaceID uuid.UUID
 
 	if p.Cursor != uuid.Nil {
 		query := `
-			SELECT id, workspace_id, name, topic, type, created_by, owner_user_id, archived, created_at, updated_at
+			SELECT id, workspace_id, name, topic, type, created_by, owner_user_id, archived, created_at, updated_at,
+			       (SELECT COUNT(*) FROM channel_members cm WHERE cm.channel_id = channels.id) AS members_count
 			FROM channels
 			WHERE workspace_id = $1 AND id < $2 AND type NOT IN ('saved', 'saved_global')
 			ORDER BY id DESC
@@ -109,7 +110,8 @@ func (r *ChannelRepo) ListByWorkspace(ctx context.Context, workspaceID uuid.UUID
 		rows, err = r.db.Query(ctx, query, workspaceID, p.Cursor, p.Limit+1)
 	} else {
 		query := `
-			SELECT id, workspace_id, name, topic, type, created_by, owner_user_id, archived, created_at, updated_at
+			SELECT id, workspace_id, name, topic, type, created_by, owner_user_id, archived, created_at, updated_at,
+			       (SELECT COUNT(*) FROM channel_members cm WHERE cm.channel_id = channels.id) AS members_count
 			FROM channels
 			WHERE workspace_id = $1 AND type NOT IN ('saved', 'saved_global')
 			ORDER BY id DESC
@@ -135,6 +137,7 @@ func (r *ChannelRepo) ListByWorkspace(ctx context.Context, workspaceID uuid.UUID
 			&ch.Archived,
 			&ch.CreatedAt,
 			&ch.UpdatedAt,
+			&ch.MembersCount,
 		); err != nil {
 			return nil, fmt.Errorf("postgres: list channels by workspace scan: %w", err)
 		}
@@ -158,7 +161,8 @@ func (r *ChannelRepo) ListByUser(ctx context.Context, workspaceID, userID uuid.U
 	// sidebar after abandoning); the recipient only sees it once a real
 	// message lands. Non-DM channels are unaffected.
 	query := `
-		SELECT c.id, c.workspace_id, c.name, c.topic, c.type, c.created_by, c.owner_user_id, c.archived, c.created_at, c.updated_at
+		SELECT c.id, c.workspace_id, c.name, c.topic, c.type, c.created_by, c.owner_user_id, c.archived, c.created_at, c.updated_at,
+		       (SELECT COUNT(*) FROM channel_members cm2 WHERE cm2.channel_id = c.id) AS members_count
 		FROM channels c
 		INNER JOIN channel_members cm ON cm.channel_id = c.id
 		WHERE c.workspace_id = $1
@@ -197,6 +201,7 @@ func (r *ChannelRepo) ListByUser(ctx context.Context, workspaceID, userID uuid.U
 			&ch.Archived,
 			&ch.CreatedAt,
 			&ch.UpdatedAt,
+			&ch.MembersCount,
 		); err != nil {
 			return nil, fmt.Errorf("postgres: list channels by user scan: %w", err)
 		}

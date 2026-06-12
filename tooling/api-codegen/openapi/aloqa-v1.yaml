@@ -7097,6 +7097,9 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/UUID'
+        members_count:
+          type: integer
+          nullable: true
     CreateChannelRequest:
       type: object
       required:

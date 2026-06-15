@@ -1078,8 +1078,8 @@ func (r *MessageRepo) ListReactionsByMessageIDs(ctx context.Context, messageIDs 
 
 func (r *MessageRepo) CreateAttachment(ctx context.Context, a *entity.Attachment) error {
 	query := `
-		INSERT INTO attachments (id, message_id, file_name, file_size, mime_type, display_mode, storage_path, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
+		INSERT INTO attachments (id, message_id, file_name, file_size, mime_type, display_mode, duration_ms, waveform_peaks, storage_path, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
 
 	_, err := r.db.Exec(ctx, query,
 		a.ID,
@@ -1088,6 +1088,8 @@ func (r *MessageRepo) CreateAttachment(ctx context.Context, a *entity.Attachment
 		a.FileSize,
 		a.MimeType,
 		a.DisplayMode,
+		a.DurationMs,
+		a.WaveformPeaks,
 		a.StoragePath,
 		a.CreatedAt,
 	)
@@ -1111,7 +1113,7 @@ func (r *MessageRepo) DeleteAttachment(ctx context.Context, id uuid.UUID) error 
 
 func (r *MessageRepo) GetAttachmentByStoragePath(ctx context.Context, storagePath string) (*entity.Attachment, error) {
 	query := `
-		SELECT id, message_id, file_name, file_size, mime_type, display_mode, storage_path, created_at
+		SELECT id, message_id, file_name, file_size, mime_type, display_mode, duration_ms, waveform_peaks, storage_path, created_at
 		FROM attachments
 		WHERE storage_path = $1`
 
@@ -1123,6 +1125,8 @@ func (r *MessageRepo) GetAttachmentByStoragePath(ctx context.Context, storagePat
 		&a.FileSize,
 		&a.MimeType,
 		&a.DisplayMode,
+		&a.DurationMs,
+		&a.WaveformPeaks,
 		&a.StoragePath,
 		&a.CreatedAt,
 	); err != nil {
@@ -1137,7 +1141,7 @@ func (r *MessageRepo) GetAttachmentByStoragePath(ctx context.Context, storagePat
 
 func (r *MessageRepo) ListAttachments(ctx context.Context, messageID uuid.UUID) ([]entity.Attachment, error) {
 	query := `
-		SELECT id, message_id, file_name, file_size, mime_type, display_mode, storage_path, created_at
+		SELECT id, message_id, file_name, file_size, mime_type, display_mode, duration_ms, waveform_peaks, storage_path, created_at
 		FROM attachments
 		WHERE message_id = $1
 		ORDER BY created_at`
@@ -1158,6 +1162,8 @@ func (r *MessageRepo) ListAttachments(ctx context.Context, messageID uuid.UUID) 
 			&a.FileSize,
 			&a.MimeType,
 			&a.DisplayMode,
+			&a.DurationMs,
+			&a.WaveformPeaks,
 			&a.StoragePath,
 			&a.CreatedAt,
 		); err != nil {
@@ -1180,7 +1186,7 @@ func (r *MessageRepo) ListAttachmentsByMessageIDs(ctx context.Context, messageID
 	}
 
 	query := `
-		SELECT id, message_id, file_name, file_size, mime_type, display_mode, storage_path, created_at
+		SELECT id, message_id, file_name, file_size, mime_type, display_mode, duration_ms, waveform_peaks, storage_path, created_at
 		FROM attachments
 		WHERE message_id = ANY($1)
 		ORDER BY message_id, created_at`
@@ -1200,6 +1206,8 @@ func (r *MessageRepo) ListAttachmentsByMessageIDs(ctx context.Context, messageID
 			&a.FileSize,
 			&a.MimeType,
 			&a.DisplayMode,
+			&a.DurationMs,
+			&a.WaveformPeaks,
 			&a.StoragePath,
 			&a.CreatedAt,
 		); err != nil {

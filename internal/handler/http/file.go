@@ -66,7 +66,7 @@ func attachmentDisposition(mimeType string) string {
 	if mimeType == "image/svg+xml" {
 		return "attachment"
 	}
-	if strings.HasPrefix(mimeType, "image/") {
+	if strings.HasPrefix(mimeType, "image/") || strings.HasPrefix(mimeType, "audio/") {
 		return "inline"
 	}
 	return "attachment"
@@ -445,8 +445,8 @@ func (h *FileHandler) Upload(w http.ResponseWriter, r *http.Request) {
 
 	// Reject a bad render hint before reading the file body (ALK-926).
 	displayMode := r.FormValue("display_mode")
-	if displayMode != "" && displayMode != "photo" && displayMode != "file" {
-		writeErr(w, cerrors.InvalidInput("display_mode must be 'photo', 'file', or empty"))
+	if displayMode != "" && displayMode != "photo" && displayMode != "file" && displayMode != "audio" {
+		writeErr(w, cerrors.InvalidInput("display_mode must be 'photo', 'file', 'audio', or empty"))
 		return
 	}
 

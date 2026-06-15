@@ -247,7 +247,7 @@ func TestUploadDisplayMode(t *testing.T) {
 		return NewService(store, messages, channels, members, scanner, nil, Config{MaxFileSize: 1024}, nil)
 	}
 
-	for _, mode := range []string{"", "photo", "file"} {
+	for _, mode := range []string{"", "photo", "file", "audio"} {
 		t.Run("persists the valid mode "+strconv.Quote(mode), func(t *testing.T) {
 			result, err := newSvc().Upload(ctx, channelID, messageID, userID, "photo.png", bytes.NewReader(body), int64(len(body)), mode)
 			if err != nil {
@@ -258,6 +258,16 @@ func TestUploadDisplayMode(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("audio display_mode forces an audio MIME for a .webm voice note", func(t *testing.T) {
+		result, err := newSvc().Upload(ctx, channelID, messageID, userID, "voice.webm", bytes.NewReader(body), int64(len(body)), "audio")
+		if err != nil {
+			t.Fatalf("Upload returned error: %v", err)
+		}
+		if result.Attachment.MimeType != "audio/webm" {
+			t.Fatalf("MimeType = %q, want audio/webm", result.Attachment.MimeType)
+		}
+	})
 
 	t.Run("rejects an unknown mode", func(t *testing.T) {
 		_, err := newSvc().Upload(ctx, channelID, messageID, userID, "photo.png", bytes.NewReader(body), int64(len(body)), "thumbnail")

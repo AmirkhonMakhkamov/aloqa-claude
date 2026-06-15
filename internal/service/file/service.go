@@ -1,14 +1,20 @@
 package file
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"mime"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -191,10 +197,10 @@ func (s *Service) Upload(
 	size int64,
 	displayMode string,
 ) (*UploadResult, error) {
-	// "photo" (inline) / "file" (download card) / "" (auto: MIME heuristic). Any
-	// other value is rejected (ALK-926).
-	if displayMode != "" && displayMode != "photo" && displayMode != "file" {
-		return nil, cerrors.InvalidInput("display_mode must be 'photo', 'file', or empty")
+	// "photo" (inline) / "file" (download card) / "audio" (voice/waveform) /
+	// "" (auto: MIME heuristic). Any other value is rejected (ALK-926).
+	if displayMode != "" && displayMode != "photo" && displayMode != "file" && displayMode != "audio" {
+		return nil, cerrors.InvalidInput("display_mode must be 'photo', 'file', 'audio', or empty")
 	}
 	if err := s.canAccessMessage(ctx, messageID, channelID, userID, accesspolicy.CapabilityParticipate); err != nil {
 		return nil, err
@@ -212,6 +218,13 @@ func (s *Service) Upload(
 	mimeType := mime.TypeByExtension(ext)
 	if mimeType == "" {
 		mimeType = "application/octet-stream"
+	}
+
+	// A voice note signals display_mode='audio'. Go's stdlib maps .webm to
+	// video/webm (and may miss other audio containers), so force a correct
+	// audio/* type from the extension to keep voice notes classified as audio.
+	if displayMode == "audio" {
+		mimeType = audioMimeForExt(ext)
 	}
 
 	// Validate MIME type.
@@ -266,23 +279,69 @@ func (s *Service) Upload(
 	}
 	key := storage.GenerateKey("attachments", cleanExt)
 
+	// Voice notes from MediaRecorder ship a streaming container with no duration,
+	// which makes the browser report Infinity and unreliably decode them. Remux
+	// (no re-encode) so the stored clip carries a real duration and is reliably
+	// seekable, then probe the duration and waveform server-side so the client
+	// never has to decode the file. Best-effort: fall back to the original and
+	// nil metadata on any failure so uploads never break.
+	storeReader := io.Reader(tmp)
+	storeSize := written
+	var durationMs *int32
+	var waveformPeaks []float32
+	if displayMode == "audio" {
+		// Isolate ffmpeg/ffprobe from the HTTP request deadline (WriteTimeout) so a
+		// slow remux can't be killed mid-write and persist a corrupt file.
+		audioCtx, cancelAudio := context.WithTimeout(context.Background(), audioProcessingTimeout)
+		defer cancelAudio()
+
+		audioPath := tmpName
+		if remuxedPath, remuxedSize, ok := remuxAudioDuration(audioCtx, tmpName, ext); ok {
+			if s.maxFileSize > 0 && remuxedSize > s.maxFileSize {
+				removeQuietly(ctx, remuxedPath)
+			} else {
+				remuxedFile, openErr := os.Open(remuxedPath)
+				if openErr == nil {
+					defer func() {
+						if cerr := remuxedFile.Close(); cerr != nil {
+							slog.WarnContext(ctx, "failed to close remuxed upload file", "error", cerr)
+						}
+						removeQuietly(ctx, remuxedPath)
+					}()
+					storeReader = remuxedFile
+					storeSize = remuxedSize
+					audioPath = remuxedPath
+				} else {
+					removeQuietly(ctx, remuxedPath)
+				}
+			}
+		}
+
+		if probed, ok := probeAudioDurationMs(audioCtx, audioPath); ok {
+			durationMs = &probed
+		}
+		waveformPeaks = extractWaveformPeaks(audioCtx, audioPath)
+	}
+
 	// Store the file.
-	if err := s.store.Put(ctx, key, tmp, written, mimeType); err != nil {
+	if err := s.store.Put(ctx, key, storeReader, storeSize, mimeType); err != nil {
 		slog.ErrorContext(ctx, "failed to store file", "key", key, "error", err)
 		return nil, cerrors.Internal("failed to store file", err)
 	}
 
 	// Create the attachment record.
 	attachment := &entity.Attachment{
-		ID:          id.New(),
-		MessageID:   messageID,
-		FileName:    filename,
-		FileSize:    written,
-		MimeType:    mimeType,
-		DisplayMode: displayMode,
-		StoragePath: key,
-		URL:         "/files/" + key,
-		CreatedAt:   time.Now(),
+		ID:            id.New(),
+		MessageID:     messageID,
+		FileName:      filename,
+		FileSize:      storeSize,
+		MimeType:      mimeType,
+		DisplayMode:   displayMode,
+		DurationMs:    durationMs,
+		WaveformPeaks: waveformPeaks,
+		StoragePath:   key,
+		URL:           "/files/" + key,
+		CreatedAt:     time.Now(),
 	}
 
 	if s.tx != nil {
@@ -325,7 +384,8 @@ func (s *Service) Upload(
 		"attachment_id", attachment.ID,
 		"message_id", messageID,
 		"filename", filename,
-		"size", size,
+		"declared_size", size,
+		"stored_size", storeSize,
 		"mime_type", mimeType,
 	)
 
@@ -400,10 +460,192 @@ func attachmentDownloadDisposition(mimeType string) string {
 	if mimeType == "image/svg+xml" {
 		return "attachment"
 	}
-	if strings.HasPrefix(mimeType, "image/") {
+	// Audio is served inline so voice notes stream through an <audio> element
+	// instead of triggering a file download.
+	if strings.HasPrefix(mimeType, "image/") || strings.HasPrefix(mimeType, "audio/") {
 		return "inline"
 	}
 	return "attachment"
+}
+
+// audioProcessingTimeout caps server-side ffmpeg/ffprobe work per upload. It is
+// applied on a background context so it is independent of the HTTP request
+// deadline (WriteTimeout), which would otherwise kill ffmpeg mid-write.
+const audioProcessingTimeout = 30 * time.Second
+
+// waveformBarCount is how many amplitude bars the server precomputes for a voice
+// note's waveform.
+const waveformBarCount = 64
+
+// removeQuietly deletes a temp file, logging (not failing) if removal errors.
+func removeQuietly(ctx context.Context, path string) {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		slog.WarnContext(ctx, "failed to remove temporary audio file", "path", path, "error", err)
+	}
+}
+
+// probeAudioDurationMs reads the exact duration of an audio file via ffprobe.
+// Best-effort: returns ok=false if ffprobe is missing or the probe fails.
+func probeAudioDurationMs(ctx context.Context, path string) (int32, bool) {
+	ffprobeBin, err := exec.LookPath("ffprobe")
+	if err != nil {
+		return 0, false
+	}
+
+	out, err := exec.CommandContext(ctx, ffprobeBin,
+		"-v", "quiet", "-print_format", "json", "-show_format", path,
+	).Output()
+	if err != nil {
+		return 0, false
+	}
+
+	var parsed struct {
+		Format struct {
+			Duration string `json:"duration"`
+		} `json:"format"`
+	}
+	if jsonErr := json.Unmarshal(out, &parsed); jsonErr != nil {
+		return 0, false
+	}
+
+	seconds, parseErr := strconv.ParseFloat(parsed.Format.Duration, 64)
+	if parseErr != nil || seconds <= 0 || math.IsInf(seconds, 0) || math.IsNaN(seconds) {
+		return 0, false
+	}
+
+	return int32(seconds * 1000), true
+}
+
+// extractWaveformPeaks decodes the audio to mono 8 kHz PCM via ffmpeg and
+// downsamples it into `waveformBarCount` normalized amplitude bars (0..1) for
+// the client to draw without decoding the file. Best-effort: returns nil if
+// ffmpeg is missing or extraction fails.
+func extractWaveformPeaks(ctx context.Context, path string) []float32 {
+	ffmpegBin, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return nil
+	}
+
+	cmd := exec.CommandContext(ctx, ffmpegBin,
+		"-v", "error", "-i", path, "-ac", "1", "-ar", "8000", "-f", "s16le", "-",
+	)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if runErr := cmd.Run(); runErr != nil {
+		return nil
+	}
+
+	return downsampleWaveform(stdout.Bytes(), waveformBarCount)
+}
+
+// downsampleWaveform buckets raw little-endian s16 mono PCM into `bars` peak
+// amplitudes normalized against the loudest bucket.
+func downsampleWaveform(pcm []byte, bars int) []float32 {
+	sampleCount := len(pcm) / 2
+	if sampleCount == 0 || bars <= 0 {
+		return nil
+	}
+
+	peaks := make([]float32, bars)
+	bucketSize := sampleCount / bars
+	if bucketSize == 0 {
+		bucketSize = 1
+	}
+
+	var loudest float32
+	for bar := 0; bar < bars; bar++ {
+		start := bar * bucketSize
+		if start >= sampleCount {
+			break
+		}
+		end := start + bucketSize
+		if end > sampleCount || bar == bars-1 {
+			end = sampleCount
+		}
+
+		var maxAmp float32
+		for i := start; i < end; i++ {
+			raw := int16(binary.LittleEndian.Uint16(pcm[i*2:]))
+			amp := float32(raw)
+			if amp < 0 {
+				amp = -amp
+			}
+			if amp > maxAmp {
+				maxAmp = amp
+			}
+		}
+		peaks[bar] = maxAmp
+		if maxAmp > loudest {
+			loudest = maxAmp
+		}
+	}
+
+	if loudest == 0 {
+		return peaks
+	}
+	for i := range peaks {
+		peaks[i] /= loudest
+	}
+	return peaks
+}
+
+// remuxAudioDuration rewrites a voice-note container so it carries a real
+// duration (MediaRecorder webm/ogg omit it). Uses `-c copy` (no re-encode, so
+// it is cheap and lossless) and returns the path + size of the rewritten file.
+// Best-effort: returns ok=false if ffmpeg is missing or the remux fails, and
+// the caller stores the original upload unchanged.
+func remuxAudioDuration(ctx context.Context, inputPath, ext string) (string, int64, bool) {
+	ffmpegBin, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		slog.WarnContext(ctx, "ffmpeg not found; storing voice note without server-side duration/waveform")
+		return "", 0, false
+	}
+
+	cleanExt := strings.TrimPrefix(strings.ToLower(ext), ".")
+	if cleanExt == "" {
+		cleanExt = "webm"
+	}
+	outPath := inputPath + ".remux." + cleanExt
+
+	cmd := exec.CommandContext(ctx, ffmpegBin, "-v", "error", "-i", inputPath, "-c", "copy", "-y", outPath)
+	if runErr := cmd.Run(); runErr != nil {
+		if rmErr := os.Remove(outPath); rmErr != nil && !os.IsNotExist(rmErr) {
+			slog.WarnContext(ctx, "failed to remove failed remux output", "path", outPath, "error", rmErr)
+		}
+		return "", 0, false
+	}
+
+	info, statErr := os.Stat(outPath)
+	if statErr != nil || info.Size() == 0 {
+		if rmErr := os.Remove(outPath); rmErr != nil && !os.IsNotExist(rmErr) {
+			slog.WarnContext(ctx, "failed to remove invalid remux output", "path", outPath, "error", rmErr)
+		}
+		return "", 0, false
+	}
+
+	return outPath, info.Size(), true
+}
+
+// audioMimeForExt returns a correct audio/* MIME type for common audio
+// container extensions. Go's mime package maps .webm to video/webm, which
+// misclassifies audio-only voice recordings.
+func audioMimeForExt(ext string) string {
+	switch strings.ToLower(strings.TrimPrefix(ext, ".")) {
+	case "webm":
+		return "audio/webm"
+	case "ogg", "oga", "opus":
+		return "audio/ogg"
+	case "m4a", "mp4":
+		return "audio/mp4"
+	case "mp3", "mpeg":
+		return "audio/mpeg"
+	case "wav":
+		return "audio/wav"
+	case "aac":
+		return "audio/aac"
+	default:
+		return "audio/webm"
+	}
 }
 
 // Delete removes a file from storage and its attachment record.

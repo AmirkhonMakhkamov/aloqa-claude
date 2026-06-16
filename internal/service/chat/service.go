@@ -36,6 +36,10 @@ type messageMoveRepository interface {
 	Move(ctx context.Context, msg *entity.Message) error
 }
 
+type dmRequestStatusRepository interface {
+	UpdateDMRequestStatus(ctx context.Context, channelID, userID uuid.UUID, status entity.DMRequestStatus) error
+}
+
 type CollaborationAccessAuthorizer interface {
 	AuthorizeChannel(ctx context.Context, channelID, userID uuid.UUID) (collabaccess.Decision, error)
 }
@@ -734,15 +738,6 @@ func (s *Service) ListChannels(ctx context.Context, workspaceID, userID uuid.UUI
 		channels = result
 	}
 
-	// Lazy DM visibility: enforce at the service layer so both the
-	// access-policy path (CapabilityView via accesspolicy.ListChannels →
-	// channels.ListByWorkspace, which does not carry the filter) and the
-	// no-access-policy fallback (channels.ListByUser, which already filters
-	// in SQL) converge on the same visibility contract. Duplicate work on
-	// the fallback path is a no-op because all empty-recipient DMs were
-	// already removed before they reached us.
-	channels = s.filterAbandonedRecipientDMs(ctx, userID, channels)
-
 	// Archived visibility: hide archived channels from the main list (ALK-617).
 	// They are surfaced exclusively via ListArchivedChannels so the sidebar
 	// only renders live channels.
@@ -962,10 +957,9 @@ func (s *Service) directoryChannelAction(ctx context.Context, ch entity.Channel,
 	return DirectoryChannelActionRequest, nil
 }
 
-// filterAbandonedRecipientDMs drops DM channels where the caller is not the
-// creator and no message has ever been sent. Empty DMs the caller created
-// stay visible so they can come back to a recipient they searched for; non-DM
-// channels are unaffected.
+// filterAbandonedRecipientDMs is kept for legacy callers that still need the
+// pre-request-tab behavior. ListChannels now relies on explicit per-member DM
+// request status instead.
 func (s *Service) filterAbandonedRecipientDMs(ctx context.Context, userID uuid.UUID, channels []entity.Channel) []entity.Channel {
 	if len(channels) == 0 || s.messages == nil {
 		return channels
@@ -2465,6 +2459,9 @@ func (s *Service) GetOrCreateDM(ctx context.Context, workspaceID, userA, userB u
 				return nil, err
 			}
 		}
+		if err := s.stampDMRequestStatus(ctx, ch, userA); err != nil {
+			return nil, err
+		}
 		if err := s.hydrateDMMembers(ctx, ch); err != nil {
 			return nil, err
 		}
@@ -2484,24 +2481,28 @@ func (s *Service) GetOrCreateDM(ctx context.Context, workspaceID, userA, userB u
 
 	members := []*entity.ChannelMember{
 		{
-			ID:         id.New(),
-			ChannelID:  ch.ID,
-			UserID:     userA,
-			Role:       entity.ChannelRoleMember,
-			LastReadAt: now,
-			JoinedAt:   now,
+			ID:              id.New(),
+			ChannelID:       ch.ID,
+			UserID:          userA,
+			Role:            entity.ChannelRoleMember,
+			LastReadAt:      now,
+			JoinedAt:        now,
+			DMRequestStatus: entity.DMRequestStatusAccepted,
 		},
 		{
-			ID:         id.New(),
-			ChannelID:  ch.ID,
-			UserID:     userB,
-			Role:       entity.ChannelRoleMember,
-			LastReadAt: now,
-			JoinedAt:   now,
+			ID:              id.New(),
+			ChannelID:       ch.ID,
+			UserID:          userB,
+			Role:            entity.ChannelRoleMember,
+			LastReadAt:      now,
+			JoinedAt:        now,
+			DMRequestStatus: entity.DMRequestStatusPending,
 		},
 	}
 
 	ch.Members = []uuid.UUID{userA, userB}
+	status := entity.DMRequestStatusAccepted
+	ch.DMRequestStatus = &status
 
 	if s.tx != nil {
 		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
@@ -2521,14 +2522,6 @@ func (s *Service) GetOrCreateDM(ctx context.Context, workspaceID, userA, userB u
 					return err
 				}
 			}
-			// Lazy DM visibility for the recipient: no channel.created
-			// broadcast on the workspace subject. The creator already has the
-			// channel via the API response (useOpenDm.onSuccess invalidates
-			// their sidebar); the recipient discovers the DM only when the
-			// first message.created event arrives on the workspace subject,
-			// triggering a sidebar refresh on their side. An empty just-
-			// opened DM stays invisible to the recipient until something is
-			// actually said in it.
 			return s.enqueueChannelSearchTx(ctx, scope, ch)
 		}); err != nil {
 			slog.ErrorContext(ctx, "failed to create DM channel transaction", "error", err)
@@ -2556,10 +2549,97 @@ func (s *Service) GetOrCreateDM(ctx context.Context, workspaceID, userA, userB u
 		s.enqueueSearch(ctx, "index channel", func() error {
 			return s.search.IndexChannel(ctx, workspaceID, ch.ID, ch.Name, derefTopicOrEmpty(ch.Topic), ch.CreatedAt, ch.UpdatedAt)
 		})
-		// Lazy DM visibility: see the matching comment in the tx path above.
 	}
 	slog.InfoContext(ctx, "DM channel created", "channel_id", ch.ID, "user_a", userA, "user_b", userB)
 	return ch, nil
+}
+
+func (s *Service) AcceptDMRequest(ctx context.Context, workspaceID, channelID, userID uuid.UUID) (*entity.Channel, error) {
+	return s.updateDMRequestStatus(ctx, workspaceID, channelID, userID, entity.DMRequestStatusAccepted)
+}
+
+func (s *Service) BlockDMRequest(ctx context.Context, workspaceID, channelID, userID uuid.UUID) (*entity.Channel, error) {
+	return s.updateDMRequestStatus(ctx, workspaceID, channelID, userID, entity.DMRequestStatusBlocked)
+}
+
+func (s *Service) updateDMRequestStatus(
+	ctx context.Context,
+	workspaceID, channelID, userID uuid.UUID,
+	status entity.DMRequestStatus,
+) (*entity.Channel, error) {
+	decision, err := s.authorizeChannel(ctx, channelID, userID, accesspolicy.CapabilityView)
+	if err != nil {
+		return nil, err
+	}
+	if decision == nil || decision.Channel == nil || decision.ChannelMember == nil {
+		return nil, cerrors.NotFound("dm request not found")
+	}
+	if decision.Channel.Type != entity.ChannelTypeDM {
+		return nil, cerrors.Forbidden("only DM requests can be managed")
+	}
+	channelWorkspaceID, err := requireChannelWorkspaceID(decision.Channel)
+	if err != nil {
+		return nil, err
+	}
+	if channelWorkspaceID != workspaceID {
+		return nil, cerrors.NotFound("channel not found")
+	}
+
+	updater, ok := s.channels.(dmRequestStatusRepository)
+	if !ok {
+		return nil, cerrors.Unavailable("DM request status persistence is unavailable")
+	}
+
+	current := normalizeDMRequestStatus(decision.ChannelMember.DMRequestStatus)
+	if current != status {
+		if err := updater.UpdateDMRequestStatus(ctx, channelID, userID, status); err != nil {
+			if appErr, ok := cerrors.AsAppError(err); ok {
+				return nil, appErr
+			}
+			slog.ErrorContext(ctx, "failed to update DM request status", "channel_id", channelID, "user_id", userID, "status", status, "error", err)
+			return nil, cerrors.Internal("failed to update DM request status", err)
+		}
+	}
+
+	channel := *decision.Channel
+	channel.DMRequestStatus = dmRequestStatusPtr(status)
+	if err := s.hydrateDMMembers(ctx, &channel); err != nil {
+		return nil, err
+	}
+	payload := event.ChannelPayload{Channel: &channel}
+	s.publishEvent(ctx, event.TypeChannelUpdated, workspaceID, channelID, userID, payload)
+	s.publishToUserEvents(ctx, event.TypeChannelUpdated, workspaceID, channelID, userID, payload)
+	return &channel, nil
+}
+
+func (s *Service) stampDMRequestStatus(ctx context.Context, ch *entity.Channel, userID uuid.UUID) error {
+	if ch == nil || ch.Type != entity.ChannelTypeDM {
+		return nil
+	}
+	member, err := s.channels.GetMember(ctx, ch.ID, userID)
+	if err != nil {
+		if appErr, ok := cerrors.AsAppError(err); ok && appErr.Code == cerrors.CodeNotFound {
+			return nil
+		}
+		slog.ErrorContext(ctx, "failed to load DM request status", "channel_id", ch.ID, "user_id", userID, "error", err)
+		return cerrors.Internal("failed to load DM request status", err)
+	}
+	ch.DMRequestStatus = dmRequestStatusPtr(normalizeDMRequestStatus(member.DMRequestStatus))
+	return nil
+}
+
+func normalizeDMRequestStatus(status entity.DMRequestStatus) entity.DMRequestStatus {
+	switch status {
+	case entity.DMRequestStatusPending, entity.DMRequestStatusBlocked:
+		return status
+	default:
+		return entity.DMRequestStatusAccepted
+	}
+}
+
+func dmRequestStatusPtr(status entity.DMRequestStatus) *entity.DMRequestStatus {
+	normalized := normalizeDMRequestStatus(status)
+	return &normalized
 }
 
 // --- Event helpers ---

@@ -76,6 +76,71 @@ func TestGetOrCreateDMRequiresBothWorkspaceMembers(t *testing.T) {
 	}
 }
 
+func TestDMRequestLifecycle(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	initiatorID := uuid.New()
+	recipientID := uuid.New()
+
+	channels := &fakeChannelRepo{}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, initiatorID}: {WorkspaceID: workspaceID, UserID: initiatorID, Role: entity.WorkspaceRoleMember},
+		{workspaceID, recipientID}: {WorkspaceID: workspaceID, UserID: recipientID, Role: entity.WorkspaceRoleMember},
+	}}
+	svc := NewService(channels, nil, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+
+	channel, err := svc.GetOrCreateDM(ctx, workspaceID, initiatorID, recipientID, nil)
+	if err != nil {
+		t.Fatalf("GetOrCreateDM returned error: %v", err)
+	}
+	if channel.DMRequestStatus == nil || *channel.DMRequestStatus != entity.DMRequestStatusAccepted {
+		t.Fatalf("creator dm_request_status = %v, want accepted", channel.DMRequestStatus)
+	}
+	if member := channels.members[[2]uuid.UUID{channel.ID, initiatorID}]; member == nil || member.DMRequestStatus != entity.DMRequestStatusAccepted {
+		t.Fatalf("initiator membership = %+v, want accepted", member)
+	}
+	if member := channels.members[[2]uuid.UUID{channel.ID, recipientID}]; member == nil || member.DMRequestStatus != entity.DMRequestStatusPending {
+		t.Fatalf("recipient membership = %+v, want pending", member)
+	}
+
+	requests, err := svc.ListChannels(ctx, workspaceID, recipientID)
+	if err != nil {
+		t.Fatalf("ListChannels pending returned error: %v", err)
+	}
+	if len(requests) != 1 || requests[0].ID != channel.ID {
+		t.Fatalf("recipient channels = %+v, want pending DM request", requests)
+	}
+	if requests[0].DMRequestStatus == nil || *requests[0].DMRequestStatus != entity.DMRequestStatusPending {
+		t.Fatalf("recipient list dm_request_status = %v, want pending", requests[0].DMRequestStatus)
+	}
+
+	accepted, err := svc.AcceptDMRequest(ctx, workspaceID, channel.ID, recipientID)
+	if err != nil {
+		t.Fatalf("AcceptDMRequest returned error: %v", err)
+	}
+	if accepted.DMRequestStatus == nil || *accepted.DMRequestStatus != entity.DMRequestStatusAccepted {
+		t.Fatalf("accepted dm_request_status = %v, want accepted", accepted.DMRequestStatus)
+	}
+	if member := channels.members[[2]uuid.UUID{channel.ID, recipientID}]; member == nil || member.DMRequestStatus != entity.DMRequestStatusAccepted {
+		t.Fatalf("recipient membership after accept = %+v, want accepted", member)
+	}
+
+	blocked, err := svc.BlockDMRequest(ctx, workspaceID, channel.ID, recipientID)
+	if err != nil {
+		t.Fatalf("BlockDMRequest returned error: %v", err)
+	}
+	if blocked.DMRequestStatus == nil || *blocked.DMRequestStatus != entity.DMRequestStatusBlocked {
+		t.Fatalf("blocked dm_request_status = %v, want blocked", blocked.DMRequestStatus)
+	}
+	afterBlock, err := svc.ListChannels(ctx, workspaceID, recipientID)
+	if err != nil {
+		t.Fatalf("ListChannels blocked returned error: %v", err)
+	}
+	if len(afterBlock) != 0 {
+		t.Fatalf("recipient channels after block = %+v, want hidden", afterBlock)
+	}
+}
+
 func TestCreateChannelAddsSelectedWorkspaceMembers(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
@@ -1952,7 +2017,7 @@ func TestDeleteMessageWithTxEnqueuesCascadeQuoteUpdatedEvents(t *testing.T) {
 	}
 }
 
-func TestListChannelsHidesRecipientDMWithOnlyDeletedMessages(t *testing.T) {
+func TestListChannelsSurfacesPendingRecipientDMWithOnlyDeletedMessages(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()
 	channelID := uuid.New()
@@ -1971,8 +2036,16 @@ func TestListChannelsHidesRecipientDMWithOnlyDeletedMessages(t *testing.T) {
 			},
 		},
 		members: map[[2]uuid.UUID]*entity.ChannelMember{
-			{channelID, creatorID}:   {ChannelID: channelID, UserID: creatorID},
-			{channelID, recipientID}: {ChannelID: channelID, UserID: recipientID},
+			{channelID, creatorID}: {
+				ChannelID:       channelID,
+				UserID:          creatorID,
+				DMRequestStatus: entity.DMRequestStatusAccepted,
+			},
+			{channelID, recipientID}: {
+				ChannelID:       channelID,
+				UserID:          recipientID,
+				DMRequestStatus: entity.DMRequestStatusPending,
+			},
 		},
 	}
 	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
@@ -1997,8 +2070,11 @@ func TestListChannelsHidesRecipientDMWithOnlyDeletedMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListChannels returned error: %v", err)
 	}
-	if len(got) != 0 {
-		t.Fatalf("channels = %+v, want recipient-side deleted-only DM hidden", got)
+	if len(got) != 1 || got[0].ID != channelID {
+		t.Fatalf("channels = %+v, want pending recipient DM surfaced", got)
+	}
+	if got[0].DMRequestStatus == nil || *got[0].DMRequestStatus != entity.DMRequestStatusPending {
+		t.Fatalf("dm_request_status = %v, want pending", got[0].DMRequestStatus)
 	}
 }
 
@@ -2726,8 +2802,16 @@ func (r *fakeChannelRepo) ListByUser(_ context.Context, workspaceID, userID uuid
 		if key[1] != userID {
 			continue
 		}
+		member := r.members[key]
+		if member != nil && member.DMRequestStatus == entity.DMRequestStatusBlocked {
+			continue
+		}
 		if ch := r.channels[key[0]]; ch != nil && ch.WorkspaceID != nil && *ch.WorkspaceID == workspaceID {
-			channels = append(channels, *ch)
+			copy := *ch
+			if copy.Type == entity.ChannelTypeDM && member != nil {
+				copy.DMRequestStatus = dmRequestStatusPtr(member.DMRequestStatus)
+			}
+			channels = append(channels, copy)
 		}
 	}
 	return channels, nil
@@ -2747,6 +2831,9 @@ func (r *fakeChannelRepo) Archive(context.Context, uuid.UUID) error { return nil
 func (r *fakeChannelRepo) AddMember(_ context.Context, member *entity.ChannelMember) error {
 	if r.members == nil {
 		r.members = map[[2]uuid.UUID]*entity.ChannelMember{}
+	}
+	if member.DMRequestStatus == "" {
+		member.DMRequestStatus = entity.DMRequestStatusAccepted
 	}
 	r.members[[2]uuid.UUID{member.ChannelID, member.UserID}] = member
 	return nil
@@ -2780,6 +2867,13 @@ func (r *fakeChannelRepo) UpdateLastRead(_ context.Context, channelID, userID uu
 		return nil
 	}
 	return nil
+}
+func (r *fakeChannelRepo) UpdateDMRequestStatus(_ context.Context, channelID, userID uuid.UUID, status entity.DMRequestStatus) error {
+	if member := r.members[[2]uuid.UUID{channelID, userID}]; member != nil {
+		member.DMRequestStatus = status
+		return nil
+	}
+	return cerrors.NotFound("channel member not found")
 }
 func (r *fakeChannelRepo) GetDMChannel(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*entity.Channel, error) {
 	return nil, cerrors.NotFound("dm channel not found")

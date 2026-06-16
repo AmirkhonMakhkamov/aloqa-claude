@@ -2503,6 +2503,9 @@ func (s *Service) GetOrCreateDM(ctx context.Context, workspaceID, userA, userB u
 	ch.Members = []uuid.UUID{userA, userB}
 	status := entity.DMRequestStatusAccepted
 	ch.DMRequestStatus = &status
+	recipientChannel := *ch
+	recipientChannel.DMRequestStatus = dmRequestStatusPtr(entity.DMRequestStatusPending)
+	recipientPayload := channelPayloadWithMembers(&recipientChannel, ch.Members)
 
 	if s.tx != nil {
 		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
@@ -2522,7 +2525,10 @@ func (s *Service) GetOrCreateDM(ctx context.Context, workspaceID, userA, userB u
 					return err
 				}
 			}
-			return s.enqueueChannelSearchTx(ctx, scope, ch)
+			if err := s.enqueueChannelSearchTx(ctx, scope, ch); err != nil {
+				return err
+			}
+			return s.enqueueEventTx(ctx, scope, event.TypeChannelCreated, workspaceUserEventsSubject(workspaceID, userB), workspaceID, ch.ID, userA, recipientPayload)
 		}); err != nil {
 			slog.ErrorContext(ctx, "failed to create DM channel transaction", "error", err)
 			return nil, cerrors.Internal("failed to create DM channel", err)
@@ -2549,6 +2555,7 @@ func (s *Service) GetOrCreateDM(ctx context.Context, workspaceID, userA, userB u
 		s.enqueueSearch(ctx, "index channel", func() error {
 			return s.search.IndexChannel(ctx, workspaceID, ch.ID, ch.Name, derefTopicOrEmpty(ch.Topic), ch.CreatedAt, ch.UpdatedAt)
 		})
+		s.doPublish(ctx, event.TypeChannelCreated, workspaceUserEventsSubject(workspaceID, userB), workspaceID, ch.ID, userA, recipientPayload)
 	}
 	slog.InfoContext(ctx, "DM channel created", "channel_id", ch.ID, "user_a", userA, "user_b", userB)
 	return ch, nil

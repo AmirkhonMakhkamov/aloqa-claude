@@ -141,6 +141,116 @@ func TestDMRequestLifecycle(t *testing.T) {
 	}
 }
 
+func TestGetOrCreateDMPublishesRecipientChannelCreatedForPendingRequest(t *testing.T) {
+	assertPendingPayload := func(t *testing.T, payload eventpkg.ChannelPayload, channelID, initiatorID, recipientID uuid.UUID) {
+		t.Helper()
+		if payload.Channel == nil {
+			t.Fatalf("channel.created payload missing channel")
+		}
+		if payload.Channel.ID != channelID {
+			t.Fatalf("payload channel ID = %s, want %s", payload.Channel.ID, channelID)
+		}
+		if payload.Channel.DMRequestStatus == nil || *payload.Channel.DMRequestStatus != entity.DMRequestStatusPending {
+			t.Fatalf("payload dm_request_status = %v, want pending", payload.Channel.DMRequestStatus)
+		}
+		if !hasUUID(payload.Channel.Members, initiatorID) || !hasUUID(payload.Channel.Members, recipientID) {
+			t.Fatalf("payload members = %v, want initiator and recipient", payload.Channel.Members)
+		}
+	}
+
+	t.Run("publishes without transaction", func(t *testing.T) {
+		ctx := context.Background()
+		workspaceID := uuid.New()
+		initiatorID := uuid.New()
+		recipientID := uuid.New()
+
+		channels := &fakeChannelRepo{}
+		workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+			{workspaceID, initiatorID}: {WorkspaceID: workspaceID, UserID: initiatorID, Role: entity.WorkspaceRoleMember},
+			{workspaceID, recipientID}: {WorkspaceID: workspaceID, UserID: recipientID, Role: entity.WorkspaceRoleMember},
+		}}
+		publisher := &recordingSubjectPublisher{}
+		svc := NewService(channels, nil, workspaces, nil, publisher, nil, nil, nil, nil)
+
+		channel, err := svc.GetOrCreateDM(ctx, workspaceID, initiatorID, recipientID, nil)
+		if err != nil {
+			t.Fatalf("GetOrCreateDM returned error: %v", err)
+		}
+		if channel.DMRequestStatus == nil || *channel.DMRequestStatus != entity.DMRequestStatusAccepted {
+			t.Fatalf("returned dm_request_status = %v, want accepted", channel.DMRequestStatus)
+		}
+		if publisher.hasEvent("aloqa.ws."+workspaceID.String(), eventpkg.TypeChannelCreated) {
+			t.Fatalf("DM channel.created leaked to workspace subject; subjects=%v", publisher.subjects())
+		}
+		if publisher.hasEvent(workspaceUserEventsSubject(workspaceID, initiatorID), eventpkg.TypeChannelCreated) {
+			t.Fatalf("DM channel.created was published to initiator subject; subjects=%v", publisher.subjects())
+		}
+
+		payload, ok := publisher.channelCreatedPayload(workspaceUserEventsSubject(workspaceID, recipientID))
+		if !ok {
+			t.Fatalf("channel.created was not published to recipient subject; subjects=%v", publisher.subjects())
+		}
+		assertPendingPayload(t, payload, channel.ID, initiatorID, recipientID)
+	})
+
+	t.Run("enqueues inside transaction", func(t *testing.T) {
+		ctx := context.Background()
+		workspaceID := uuid.New()
+		initiatorID := uuid.New()
+		recipientID := uuid.New()
+
+		channels := &fakeChannelRepo{}
+		workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+			{workspaceID, initiatorID}: {WorkspaceID: workspaceID, UserID: initiatorID, Role: entity.WorkspaceRoleMember},
+			{workspaceID, recipientID}: {WorkspaceID: workspaceID, UserID: recipientID, Role: entity.WorkspaceRoleMember},
+		}}
+		txScope := &fakeChatTxScope{channels: channels}
+		txManager := &fakeChatTxManager{scope: txScope}
+		svc := NewService(channels, nil, workspaces, nil, noopPublisher{}, nil, nil, nil, nil)
+		svc.SetTransactionManager(txManager)
+
+		channel, err := svc.GetOrCreateDM(ctx, workspaceID, initiatorID, recipientID, nil)
+		if err != nil {
+			t.Fatalf("GetOrCreateDM returned error: %v", err)
+		}
+		if channel.DMRequestStatus == nil || *channel.DMRequestStatus != entity.DMRequestStatusAccepted {
+			t.Fatalf("returned dm_request_status = %v, want accepted", channel.DMRequestStatus)
+		}
+		if txManager.calls != 1 {
+			t.Fatalf("transaction calls = %d, want 1", txManager.calls)
+		}
+
+		recipientSubject := workspaceUserEventsSubject(workspaceID, recipientID)
+		var found *eventpkg.Event
+		for i := range txScope.events {
+			evt := &txScope.events[i]
+			if evt.Type != eventpkg.TypeChannelCreated {
+				continue
+			}
+			if evt.Subject == "aloqa.ws."+workspaceID.String() {
+				t.Fatalf("DM channel.created leaked to workspace subject; events=%+v", txScope.events)
+			}
+			if evt.Subject == workspaceUserEventsSubject(workspaceID, initiatorID) {
+				t.Fatalf("DM channel.created was enqueued to initiator subject; events=%+v", txScope.events)
+			}
+			if evt.Subject == recipientSubject {
+				found = evt
+			}
+		}
+		if found == nil {
+			t.Fatalf("channel.created was not enqueued to recipient subject; events=%+v", txScope.events)
+		}
+		if found.WorkspaceID != workspaceID || found.ChannelID != channel.ID || found.UserID != initiatorID {
+			t.Fatalf("event routing metadata = %+v, want workspace=%s channel=%s user=%s", found, workspaceID, channel.ID, initiatorID)
+		}
+		payload, ok := found.Payload.(eventpkg.ChannelPayload)
+		if !ok {
+			t.Fatalf("event payload = %#v, want ChannelPayload", found.Payload)
+		}
+		assertPendingPayload(t, payload, channel.ID, initiatorID, recipientID)
+	})
+}
+
 func TestCreateChannelAddsSelectedWorkspaceMembers(t *testing.T) {
 	ctx := context.Background()
 	workspaceID := uuid.New()

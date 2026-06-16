@@ -66,7 +66,7 @@ func attachmentDisposition(mimeType string) string {
 	if mimeType == "image/svg+xml" {
 		return "attachment"
 	}
-	if strings.HasPrefix(mimeType, "image/") {
+	if strings.HasPrefix(mimeType, "image/") || strings.HasPrefix(mimeType, "audio/") {
 		return "inline"
 	}
 	return "attachment"
@@ -443,6 +443,13 @@ func (h *FileHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reject a bad render hint before reading the file body (ALK-926).
+	displayMode := r.FormValue("display_mode")
+	if displayMode != "" && displayMode != "photo" && displayMode != "file" && displayMode != "audio" {
+		writeErr(w, cerrors.InvalidInput("display_mode must be 'photo', 'file', 'audio', or empty"))
+		return
+	}
+
 	f, header, err := r.FormFile("file")
 	if err != nil {
 		writeErr(w, cerrors.InvalidInput("missing file field"))
@@ -455,7 +462,7 @@ func (h *FileHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	userID := middleware.UserIDFromContext(r.Context())
-	result, err := h.svc.Upload(r.Context(), channelID, messageID, userID, header.Filename, f, header.Size)
+	result, err := h.svc.Upload(r.Context(), channelID, messageID, userID, header.Filename, f, header.Size, displayMode)
 	if err != nil {
 		writeErr(w, err)
 		return

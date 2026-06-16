@@ -27,6 +27,7 @@ func NewMessageHandler(svc *chat.Service) *MessageHandler {
 
 type sendMessageRequest struct {
 	Content         string                    `json:"content"`
+	Type            string                    `json:"type,omitempty"`
 	ParentID        *string                   `json:"parent_id,omitempty"`
 	ForwardedFrom   *json.RawMessage          `json:"forwarded_from,omitempty"`
 	QuotedMessageID *string                   `json:"quoted_message_id,omitempty"`
@@ -117,6 +118,7 @@ func (h *MessageHandler) Send(w http.ResponseWriter, r *http.Request) {
 
 	msg, err := h.svc.SendMessage(r.Context(), channelID, userID, chat.SendMessageInput{
 		Content:         req.Content,
+		Type:            req.Type,
 		ParentID:        parentID,
 		ForwardedFrom:   req.ForwardedFrom,
 		QuotedMessageID: quotedMessageID,

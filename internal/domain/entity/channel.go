@@ -29,17 +29,26 @@ const (
 	ChannelRoleMember ChannelRole = "member"
 )
 
+type DMRequestStatus string
+
+const (
+	DMRequestStatusAccepted DMRequestStatus = "accepted"
+	DMRequestStatusPending  DMRequestStatus = "pending"
+	DMRequestStatusBlocked  DMRequestStatus = "blocked"
+)
+
 type Channel struct {
-	ID          uuid.UUID   `json:"id"`
-	WorkspaceID *uuid.UUID  `json:"workspace_id"`
-	Name        string      `json:"name"`
-	Topic       *string     `json:"topic,omitempty"`
-	Type        ChannelType `json:"type"`
-	CreatedBy   uuid.UUID   `json:"created_by"`
-	OwnerUserID *uuid.UUID  `json:"owner_user_id,omitempty"`
-	Archived    bool        `json:"archived"`
-	CreatedAt   time.Time   `json:"created_at"`
-	UpdatedAt   time.Time   `json:"updated_at"`
+	ID              uuid.UUID        `json:"id"`
+	WorkspaceID     *uuid.UUID       `json:"workspace_id"`
+	Name            string           `json:"name"`
+	Topic           *string          `json:"topic,omitempty"`
+	Type            ChannelType      `json:"type"`
+	CreatedBy       uuid.UUID        `json:"created_by"`
+	OwnerUserID     *uuid.UUID       `json:"owner_user_id,omitempty"`
+	Archived        bool             `json:"archived"`
+	CreatedAt       time.Time        `json:"created_at"`
+	UpdatedAt       time.Time        `json:"updated_at"`
+	DMRequestStatus *DMRequestStatus `json:"dm_request_status,omitempty"`
 	// LastActivityAt is the created_at of the most recent non-deleted message in
 	// the channel, used by the client to order the sidebar by last activity
 	// (ALK-837). Populated only by the per-user channel list (ListByUser); other
@@ -50,6 +59,11 @@ type Channel struct {
 	// of a channel without an extra round-trip. Kept omitempty so ordinary
 	// non-DM channel responses keep their existing shape.
 	Members []uuid.UUID `json:"members,omitempty"`
+	// MembersCount is the number of members in the channel, populated only by the
+	// workspace channel lists (ListByUser / ListByWorkspace) so clients can show
+	// "N members" without a per-channel round-trip. Other responses leave it nil
+	// and omitempty keeps their shape unchanged.
+	MembersCount *int `json:"members_count,omitempty"`
 }
 
 // MentionSuggestion is a channel member surfaced as an @mention autocomplete
@@ -83,4 +97,7 @@ type ChannelMember struct {
 	MutedUntil *time.Time  `json:"muted_until,omitempty"`
 	LastReadAt time.Time   `json:"last_read_at"`
 	JoinedAt   time.Time   `json:"joined_at"`
+	// DMRequestStatus is meaningful only for 1-on-1 DM membership. Non-DM
+	// channel members use the default accepted state.
+	DMRequestStatus DMRequestStatus `json:"dm_request_status,omitempty"`
 }

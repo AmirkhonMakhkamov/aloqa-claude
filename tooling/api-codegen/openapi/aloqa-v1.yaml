@@ -411,6 +411,56 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Channel'
+  /api/v1/workspaces/{workspaceID}/channels/{channelID}/dm-request/accept:
+    parameters:
+      - name: workspaceID
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: channelID
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      summary: Accept an incoming DM request
+      tags:
+        - channels
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Accepted DM channel
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Channel'
+  /api/v1/workspaces/{workspaceID}/channels/{channelID}/dm-request/block:
+    parameters:
+      - name: workspaceID
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: channelID
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      summary: Block an incoming DM request
+      tags:
+        - channels
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Blocked DM channel
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Channel'
   /api/v1/workspaces/{workspaceID}/channels/unread:
     parameters:
       - name: workspaceID
@@ -5196,6 +5246,46 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/CreateDmRequest'
+  /api/v1/personal/channels/{channelID}/dm-request/accept:
+    parameters:
+      - name: channelID
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      summary: Accept an incoming personal DM request
+      tags:
+        - channels
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Accepted DM channel
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Channel'
+  /api/v1/personal/channels/{channelID}/dm-request/block:
+    parameters:
+      - name: channelID
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      summary: Block an incoming personal DM request
+      tags:
+        - channels
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Blocked DM channel
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Channel'
   /api/v1/personal/channels/{channelID}/join:
     parameters:
       - name: channelID
@@ -7089,6 +7179,13 @@ components:
           $ref: '#/components/schemas/IsoDatetime'
         updated_at:
           $ref: '#/components/schemas/IsoDatetime'
+        dm_request_status:
+          type: string
+          nullable: true
+          enum:
+            - accepted
+            - pending
+            - blocked
         last_activity_at:
           allOf:
             - $ref: '#/components/schemas/IsoDatetime'
@@ -7097,6 +7194,9 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/UUID'
+        members_count:
+          type: integer
+          nullable: true
     CreateChannelRequest:
       type: object
       required:
@@ -7146,6 +7246,12 @@ components:
           $ref: '#/components/schemas/IsoDatetime'
         joined_at:
           $ref: '#/components/schemas/IsoDatetime'
+        dm_request_status:
+          type: string
+          enum:
+            - accepted
+            - pending
+            - blocked
     AddChannelMembersRequest:
       type: object
       required:

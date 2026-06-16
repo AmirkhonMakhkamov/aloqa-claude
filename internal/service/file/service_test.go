@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -47,7 +48,7 @@ func TestUploadScannerDoesNotConsumeStoredBody(t *testing.T) {
 	}}
 
 	svc := NewService(store, messages, channels, members, scanner, nil, Config{MaxFileSize: 1024}, nil)
-	result, err := svc.Upload(ctx, channelID, messageID, userID, "note.txt", bytes.NewReader(body), int64(len(body)))
+	result, err := svc.Upload(ctx, channelID, messageID, userID, "note.txt", bytes.NewReader(body), int64(len(body)), "")
 	if err != nil {
 		t.Fatalf("Upload returned error: %v", err)
 	}
@@ -209,13 +210,71 @@ func TestCollaboratorUploadUsesSharedAccessPolicy(t *testing.T) {
 		decision: collabaccess.Decision{Managed: true, Allowed: true},
 	}))
 
-	result, err := svc.Upload(ctx, channelID, messageID, collaboratorID, "shared.txt", bytes.NewReader(body), int64(len(body)))
+	result, err := svc.Upload(ctx, channelID, messageID, collaboratorID, "shared.txt", bytes.NewReader(body), int64(len(body)), "")
 	if err != nil {
 		t.Fatalf("Upload returned error: %v", err)
 	}
 	if len(store.objects[result.Attachment.StoragePath]) == 0 {
 		t.Fatalf("expected collaborator upload to be stored")
 	}
+}
+
+func TestUploadDisplayMode(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	messageID := uuid.New()
+	userID := uuid.New()
+	body := []byte("image-bytes")
+
+	newSvc := func() *Service {
+		store := &memoryStorage{}
+		scanner := &consumingScanner{}
+		messages := &fakeMessageRepo{
+			messages: map[uuid.UUID]*entity.Message{
+				messageID: {ID: messageID, ChannelID: channelID, UserID: userID, Content: "file"},
+			},
+			attachmentsByKey: map[string]*entity.Attachment{},
+		}
+		channels := &fakeChannelRepo{channels: map[uuid.UUID]*entity.Channel{
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
+		}, members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, userID}: {ChannelID: channelID, UserID: userID, Role: entity.ChannelRoleMember},
+		}}
+		members := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+			{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+		}}
+		return NewService(store, messages, channels, members, scanner, nil, Config{MaxFileSize: 1024}, nil)
+	}
+
+	for _, mode := range []string{"", "photo", "file", "audio"} {
+		t.Run("persists the valid mode "+strconv.Quote(mode), func(t *testing.T) {
+			result, err := newSvc().Upload(ctx, channelID, messageID, userID, "photo.png", bytes.NewReader(body), int64(len(body)), mode)
+			if err != nil {
+				t.Fatalf("Upload returned error: %v", err)
+			}
+			if result.Attachment.DisplayMode != mode {
+				t.Fatalf("DisplayMode = %q, want %q", result.Attachment.DisplayMode, mode)
+			}
+		})
+	}
+
+	t.Run("audio display_mode forces an audio MIME for a .webm voice note", func(t *testing.T) {
+		result, err := newSvc().Upload(ctx, channelID, messageID, userID, "voice.webm", bytes.NewReader(body), int64(len(body)), "audio")
+		if err != nil {
+			t.Fatalf("Upload returned error: %v", err)
+		}
+		if result.Attachment.MimeType != "audio/webm" {
+			t.Fatalf("MimeType = %q, want audio/webm", result.Attachment.MimeType)
+		}
+	})
+
+	t.Run("rejects an unknown mode", func(t *testing.T) {
+		_, err := newSvc().Upload(ctx, channelID, messageID, userID, "photo.png", bytes.NewReader(body), int64(len(body)), "thumbnail")
+		if err == nil {
+			t.Fatalf("expected an error for an invalid display_mode")
+		}
+	})
 }
 
 func TestPresignDownloadByKeyUsesObjectStoreSignerWhenAvailable(t *testing.T) {

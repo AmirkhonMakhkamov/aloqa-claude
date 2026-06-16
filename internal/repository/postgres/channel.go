@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -101,7 +102,8 @@ func (r *ChannelRepo) ListByWorkspace(ctx context.Context, workspaceID uuid.UUID
 
 	if p.Cursor != uuid.Nil {
 		query := `
-			SELECT id, workspace_id, name, topic, type, created_by, owner_user_id, archived, created_at, updated_at
+			SELECT id, workspace_id, name, topic, type, created_by, owner_user_id, archived, created_at, updated_at,
+			       (SELECT COUNT(*) FROM channel_members cm WHERE cm.channel_id = channels.id) AS members_count
 			FROM channels
 			WHERE workspace_id = $1 AND id < $2 AND type NOT IN ('saved', 'saved_global')
 			ORDER BY id DESC
@@ -109,7 +111,8 @@ func (r *ChannelRepo) ListByWorkspace(ctx context.Context, workspaceID uuid.UUID
 		rows, err = r.db.Query(ctx, query, workspaceID, p.Cursor, p.Limit+1)
 	} else {
 		query := `
-			SELECT id, workspace_id, name, topic, type, created_by, owner_user_id, archived, created_at, updated_at
+			SELECT id, workspace_id, name, topic, type, created_by, owner_user_id, archived, created_at, updated_at,
+			       (SELECT COUNT(*) FROM channel_members cm WHERE cm.channel_id = channels.id) AS members_count
 			FROM channels
 			WHERE workspace_id = $1 AND type NOT IN ('saved', 'saved_global')
 			ORDER BY id DESC
@@ -135,6 +138,7 @@ func (r *ChannelRepo) ListByWorkspace(ctx context.Context, workspaceID uuid.UUID
 			&ch.Archived,
 			&ch.CreatedAt,
 			&ch.UpdatedAt,
+			&ch.MembersCount,
 		); err != nil {
 			return nil, fmt.Errorf("postgres: list channels by workspace scan: %w", err)
 		}
@@ -152,29 +156,16 @@ func (r *ChannelRepo) ListByWorkspace(ctx context.Context, workspaceID uuid.UUID
 }
 
 func (r *ChannelRepo) ListByUser(ctx context.Context, workspaceID, userID uuid.UUID) ([]entity.Channel, error) {
-	// Lazy DM visibility: hide DMs from a member if they did not initiate the
-	// conversation AND no non-deleted message has been posted yet. The creator
-	// always sees the channel (so they can come back to it from their own
-	// sidebar after abandoning); the recipient only sees it once a real
-	// message lands. Non-DM channels are unaffected.
 	query := `
-		SELECT c.id, c.workspace_id, c.name, c.topic, c.type, c.created_by, c.owner_user_id, c.archived, c.created_at, c.updated_at
+		SELECT c.id, c.workspace_id, c.name, c.topic, c.type, c.created_by, c.owner_user_id, c.archived, c.created_at, c.updated_at,
+		       (SELECT COUNT(*) FROM channel_members cm2 WHERE cm2.channel_id = c.id) AS members_count,
+		       CASE WHEN c.type = 'dm' THEN cm.dm_request_status ELSE NULL END AS dm_request_status
 		FROM channels c
 		INNER JOIN channel_members cm ON cm.channel_id = c.id
 		WHERE c.workspace_id = $1
 		  AND cm.user_id = $2
+		  AND cm.dm_request_status <> 'blocked'
 		  AND c.type NOT IN ('saved', 'saved_global')
-		  AND (
-		    c.type <> 'dm'
-		    OR c.created_by = $2
-		    OR EXISTS (
-		      SELECT 1
-		      FROM messages m
-		      WHERE m.channel_id = c.id
-		        AND m.deleted_at IS NULL
-		      LIMIT 1
-		    )
-		  )
 		ORDER BY c.name`
 
 	rows, err := r.db.Query(ctx, query, workspaceID, userID)
@@ -186,6 +177,7 @@ func (r *ChannelRepo) ListByUser(ctx context.Context, workspaceID, userID uuid.U
 	var channels []entity.Channel
 	for rows.Next() {
 		var ch entity.Channel
+		var dmRequestStatus sql.NullString
 		if err := rows.Scan(
 			&ch.ID,
 			&ch.WorkspaceID,
@@ -197,8 +189,14 @@ func (r *ChannelRepo) ListByUser(ctx context.Context, workspaceID, userID uuid.U
 			&ch.Archived,
 			&ch.CreatedAt,
 			&ch.UpdatedAt,
+			&ch.MembersCount,
+			&dmRequestStatus,
 		); err != nil {
 			return nil, fmt.Errorf("postgres: list channels by user scan: %w", err)
+		}
+		if dmRequestStatus.Valid {
+			status := entity.DMRequestStatus(dmRequestStatus.String)
+			ch.DMRequestStatus = &status
 		}
 		channels = append(channels, ch)
 	}
@@ -321,9 +319,10 @@ func (r *ChannelRepo) ListArchivedByUser(ctx context.Context, workspaceID, userI
 // --- Channel Member methods ---
 
 func (r *ChannelRepo) AddMember(ctx context.Context, m *entity.ChannelMember) error {
+	dmRequestStatus := normalizeDMRequestStatus(m.DMRequestStatus)
 	query := `
-		INSERT INTO channel_members (id, channel_id, user_id, role, muted_until, last_read_at, joined_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`
+		INSERT INTO channel_members (id, channel_id, user_id, role, muted_until, last_read_at, joined_at, dm_request_status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
 
 	_, err := r.db.Exec(ctx, query,
 		m.ID,
@@ -333,6 +332,7 @@ func (r *ChannelRepo) AddMember(ctx context.Context, m *entity.ChannelMember) er
 		m.MutedUntil,
 		m.LastReadAt,
 		m.JoinedAt,
+		dmRequestStatus,
 	)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -347,7 +347,7 @@ func (r *ChannelRepo) AddMember(ctx context.Context, m *entity.ChannelMember) er
 
 func (r *ChannelRepo) GetMember(ctx context.Context, channelID, userID uuid.UUID) (*entity.ChannelMember, error) {
 	query := `
-		SELECT id, channel_id, user_id, role, muted_until, last_read_at, joined_at
+		SELECT id, channel_id, user_id, role, muted_until, last_read_at, joined_at, dm_request_status
 		FROM channel_members
 		WHERE channel_id = $1 AND user_id = $2`
 
@@ -360,6 +360,7 @@ func (r *ChannelRepo) GetMember(ctx context.Context, channelID, userID uuid.UUID
 		&m.MutedUntil,
 		&m.LastReadAt,
 		&m.JoinedAt,
+		&m.DMRequestStatus,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -373,7 +374,7 @@ func (r *ChannelRepo) GetMember(ctx context.Context, channelID, userID uuid.UUID
 
 func (r *ChannelRepo) ListMembers(ctx context.Context, channelID uuid.UUID) ([]entity.ChannelMember, error) {
 	query := `
-		SELECT id, channel_id, user_id, role, muted_until, last_read_at, joined_at
+		SELECT id, channel_id, user_id, role, muted_until, last_read_at, joined_at, dm_request_status
 		FROM channel_members
 		WHERE channel_id = $1
 		ORDER BY joined_at`
@@ -395,6 +396,7 @@ func (r *ChannelRepo) ListMembers(ctx context.Context, channelID uuid.UUID) ([]e
 			&m.MutedUntil,
 			&m.LastReadAt,
 			&m.JoinedAt,
+			&m.DMRequestStatus,
 		); err != nil {
 			return nil, fmt.Errorf("postgres: list channel members scan: %w", err)
 		}
@@ -472,6 +474,24 @@ func (r *ChannelRepo) RemoveMember(ctx context.Context, channelID, userID uuid.U
 	return nil
 }
 
+func (r *ChannelRepo) UpdateDMRequestStatus(ctx context.Context, channelID, userID uuid.UUID, status entity.DMRequestStatus) error {
+	status = normalizeDMRequestStatus(status)
+	query := `
+		UPDATE channel_members
+		SET dm_request_status = $3
+		WHERE channel_id = $1 AND user_id = $2`
+
+	tag, err := r.db.Exec(ctx, query, channelID, userID, status)
+	if err != nil {
+		return fmt.Errorf("postgres: update DM request status: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return cerrors.NotFound("channel member not found")
+	}
+
+	return nil
+}
+
 func (r *ChannelRepo) UpdateLastRead(ctx context.Context, channelID, userID uuid.UUID) error {
 	query := `
 		UPDATE channel_members
@@ -519,6 +539,15 @@ func (r *ChannelRepo) GetDMChannel(ctx context.Context, workspaceID, userA, user
 	}
 
 	return ch, nil
+}
+
+func normalizeDMRequestStatus(status entity.DMRequestStatus) entity.DMRequestStatus {
+	switch status {
+	case entity.DMRequestStatusPending, entity.DMRequestStatusBlocked:
+		return status
+	default:
+		return entity.DMRequestStatusAccepted
+	}
 }
 
 // ListCommonChannels returns every non-archived channel in the workspace

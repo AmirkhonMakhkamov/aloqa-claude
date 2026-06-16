@@ -337,6 +337,8 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 		r.Route("/{channelID}", func(r chi.Router) {
 			r.Get("/", deps.Channels.Get)
 			r.Put("/", deps.Channels.Update)
+			r.Post("/dm-request/accept", deps.Channels.AcceptDMRequest)
+			r.Post("/dm-request/block", deps.Channels.BlockDMRequest)
 			r.Post("/join", deps.Channels.Join)
 			r.Post("/leave", deps.Channels.Leave)
 			r.Get("/members", deps.Channels.ListMembers)

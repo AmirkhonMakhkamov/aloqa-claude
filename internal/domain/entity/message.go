@@ -99,7 +99,19 @@ type Attachment struct {
 	FileName    string    `json:"file_name"`
 	FileSize    int64     `json:"file_size"`
 	MimeType    string    `json:"mime_type"`
-	StoragePath string    `json:"-"`
-	URL         string    `json:"url,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
+	// DisplayMode is "photo" (inline image), "file" (download card), "audio"
+	// (voice note / waveform player), or "" (auto: fall back to the MIME
+	// heuristic). Lets the sender choose how the attachment renders (ALK-926).
+	DisplayMode string `json:"display_mode,omitempty"`
+	// DurationMs is the playback length in milliseconds for audio notes, computed
+	// server-side (ffprobe). Nil for non-audio or when ffmpeg is unavailable, in
+	// which case the client falls back to decoding the file itself.
+	DurationMs *int32 `json:"duration_ms,omitempty"`
+	// WaveformPeaks holds normalized amplitude bars (0..1) for an audio note,
+	// precomputed server-side so the client never decodes the whole file just to
+	// draw a waveform. Nil for non-audio or when extraction fails.
+	WaveformPeaks []float32 `json:"waveform_peaks,omitempty"`
+	StoragePath   string    `json:"-"`
+	URL           string    `json:"url,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
 }

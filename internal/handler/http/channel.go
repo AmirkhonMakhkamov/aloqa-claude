@@ -340,3 +340,39 @@ func (h *ChannelHandler) CreateDM(w http.ResponseWriter, r *http.Request) {
 
 	writeOK(w, ch)
 }
+
+func (h *ChannelHandler) AcceptDMRequest(w http.ResponseWriter, r *http.Request) {
+	channelID, err := id.Parse(chi.URLParam(r, "channelID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	wsID := middleware.WorkspaceIDFromContext(r.Context())
+	userID := middleware.UserIDFromContext(r.Context())
+	ch, err := h.svc.AcceptDMRequest(r.Context(), wsID, channelID, userID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, ch)
+}
+
+func (h *ChannelHandler) BlockDMRequest(w http.ResponseWriter, r *http.Request) {
+	channelID, err := id.Parse(chi.URLParam(r, "channelID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	wsID := middleware.WorkspaceIDFromContext(r.Context())
+	userID := middleware.UserIDFromContext(r.Context())
+	ch, err := h.svc.BlockDMRequest(r.Context(), wsID, channelID, userID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	writeOK(w, ch)
+}

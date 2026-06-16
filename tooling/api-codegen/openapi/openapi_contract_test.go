@@ -57,6 +57,10 @@ func TestOpenAPICoversFrontendContractRoutes(t *testing.T) {
 		{"get", "/api/v1/files/{fileID}/content"},
 		{"delete", "/api/v1/files/{fileID}"},
 		{"post", "/api/v1/files/{fileID}/shares"},
+		{"post", "/api/v1/workspaces/{workspaceID}/channels/{channelID}/dm-request/accept"},
+		{"post", "/api/v1/workspaces/{workspaceID}/channels/{channelID}/dm-request/block"},
+		{"post", "/api/v1/personal/channels/{channelID}/dm-request/accept"},
+		{"post", "/api/v1/personal/channels/{channelID}/dm-request/block"},
 		{"get", "/api/v1/personal/channels/{channelID}/messages/{messageID}/thread"},
 		{"get", "/api/v1/workspaces/{workspaceID}/channels/{channelID}/mentions"},
 		{"get", "/api/v1/workspaces/{workspaceID}/calls/{callID}/recordings/{recordingID}/artifacts/{artifactID}/download"},
@@ -81,6 +85,20 @@ func TestOpenAPIDoesNotExposeRemovedCustomSFUSignaling(t *testing.T) {
 		if _, ok := doc.Paths[path]; ok {
 			t.Fatalf("OpenAPI spec must not expose removed or frontend-only path %s", path)
 		}
+	}
+}
+
+func TestOpenAPIDMRequestStatusContract(t *testing.T) {
+	doc := loadSpec(t)
+
+	channelProps := requiredProperties(t, doc, "Channel")
+	if _, ok := channelProps["dm_request_status"]; !ok {
+		t.Fatal("Channel schema is missing dm_request_status")
+	}
+
+	memberProps := requiredProperties(t, doc, "ChannelMember")
+	if _, ok := memberProps["dm_request_status"]; !ok {
+		t.Fatal("ChannelMember schema is missing dm_request_status")
 	}
 }
 

@@ -91,6 +91,48 @@ func TestSelfChannelWorkspacePolicy(t *testing.T) {
 	})
 }
 
+// TestArchivedChannelManageCapabilityBypass locks in the ALK-1050 fix: an
+// archived channel is hidden from view/participate but must still resolve under
+// the management capability so the unarchive flow can reach it.
+func TestArchivedChannelManageCapabilityBypass(t *testing.T) {
+	workspaceID := uuid.New()
+	memberID := uuid.New()
+	channelID := uuid.New()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {
+				ID:          channelID,
+				WorkspaceID: &workspaceID,
+				Type:        entity.ChannelTypePublic,
+				Archived:    true,
+			},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{
+		members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+			{workspaceID, memberID}: {WorkspaceID: workspaceID, UserID: memberID},
+		},
+	}
+	checker := NewChecker(workspaces, channels, nil, nil)
+	ctx := context.WithValue(context.Background(), middleware.WorkspaceIDKey, workspaceID)
+
+	t.Run("view of an archived channel is forbidden", func(t *testing.T) {
+		_, err := checker.Channel(ctx, channelID, memberID, CapabilityView)
+		requireCode(t, err, cerrors.CodeForbidden)
+	})
+
+	t.Run("manage of an archived channel resolves it", func(t *testing.T) {
+		decision, err := checker.Channel(ctx, channelID, memberID, CapabilityManage)
+		if err != nil {
+			t.Fatalf("Channel returned error: %v", err)
+		}
+		if decision.Channel == nil || decision.Channel.ID != channelID {
+			t.Fatalf("decision channel = %+v, want %s", decision.Channel, channelID)
+		}
+	})
+}
+
 func TestListChannelsReadsAllPaginatedWorkspaceChannels(t *testing.T) {
 	workspaceID := uuid.New()
 	userID := uuid.New()

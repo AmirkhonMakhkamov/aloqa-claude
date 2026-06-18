@@ -27,6 +27,12 @@ type Capability string
 const (
 	CapabilityView        Capability = "view"
 	CapabilityParticipate Capability = "participate"
+	// CapabilityManage is required for channel-management operations (e.g.
+	// unarchive). Unlike View/Participate it is allowed to resolve an archived
+	// channel, so the unarchive flow can reach a channel that the archived
+	// guard otherwise hides. Role enforcement (owner/admin) still happens in
+	// the calling service (ALK-1050).
+	CapabilityManage Capability = "manage"
 )
 
 type GuestAccess interface {
@@ -101,7 +107,10 @@ func (c *Checker) Channel(ctx context.Context, channelID, userID uuid.UUID, capa
 		}
 		return nil, cerrors.Internal("failed to get channel", err)
 	}
-	if ch.Archived {
+	// Archived channels are hidden from view/participate, but management
+	// operations (unarchive) must still resolve them — otherwise the unarchive
+	// request is rejected before it can clear the flag (ALK-1050).
+	if ch.Archived && capability != CapabilityManage {
 		return nil, cerrors.Forbidden("channel is archived")
 	}
 	pathWorkspaceID := middleware.WorkspaceIDFromContext(ctx)

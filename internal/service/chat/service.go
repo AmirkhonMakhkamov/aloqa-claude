@@ -565,10 +565,15 @@ func (s *Service) UpdateChannel(ctx context.Context, channelID, userID uuid.UUID
 	// a currently-archived channel) must be allowed through the archived guard
 	// below so users can recover channels from the Archived list view.
 	// Name/topic edits remain forbidden until the channel is unarchived first.
-	ch, err := s.GetAccessibleChannel(ctx, channelID, userID)
+	// Resolve with the management capability so an archived channel can still
+	// be fetched here: the view/participate access guard hides archived
+	// channels, which would 403 the unarchive request before the bypass below
+	// runs. Owner/admin role is still enforced further down (ALK-1050).
+	decision, err := s.authorizeChannel(ctx, channelID, userID, accesspolicy.CapabilityManage)
 	if err != nil {
 		return nil, err
 	}
+	ch := decision.Channel
 	isUnarchive := archived != nil && !*archived && ch.Archived
 
 	if !isUnarchive {

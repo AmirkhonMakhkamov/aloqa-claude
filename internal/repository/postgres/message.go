@@ -438,6 +438,27 @@ func (r *MessageRepo) Update(ctx context.Context, msg *entity.Message) error {
 	return nil
 }
 
+// UpdateFileIDs replaces a message's file_ids set without touching content or
+// flipping the `edited` flag — detaching one attachment is not a content edit
+// (ALK-1114).
+func (r *MessageRepo) UpdateFileIDs(ctx context.Context, id uuid.UUID, fileIDs []uuid.UUID) error {
+	if fileIDs == nil {
+		fileIDs = []uuid.UUID{}
+	}
+	now := time.Now().UTC()
+	tag, err := r.db.Exec(ctx, `
+		UPDATE messages
+		SET file_ids = $2, updated_at = $3
+		WHERE id = $1 AND deleted_at IS NULL`, id, fileIDs, now)
+	if err != nil {
+		return fmt.Errorf("postgres: update message file ids: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return cerrors.NotFound("message not found")
+	}
+	return nil
+}
+
 func (r *MessageRepo) Move(ctx context.Context, msg *entity.Message) error {
 	now := time.Now().UTC()
 	query := `

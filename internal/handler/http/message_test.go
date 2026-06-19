@@ -1119,6 +1119,9 @@ func (r *messageHTTPMessageRepo) HasActiveMessage(context.Context, uuid.UUID) (b
 	return false, nil
 }
 func (r *messageHTTPMessageRepo) Update(context.Context, *entity.Message) error { return nil }
+func (r *messageHTTPMessageRepo) UpdateFileIDs(context.Context, uuid.UUID, []uuid.UUID) error {
+	return nil
+}
 func (r *messageHTTPMessageRepo) SoftDelete(_ context.Context, id uuid.UUID) error {
 	msg := r.messages[id]
 	if msg == nil {

@@ -338,6 +338,36 @@ func (h *MessageHandler) Edit(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, msg)
 }
 
+// RemoveFile detaches a single attachment from a message (ALK-1114). Returns the
+// updated message, or 204 when removing the last attachment also removed the
+// (otherwise empty) message.
+func (h *MessageHandler) RemoveFile(w http.ResponseWriter, r *http.Request) {
+	messageID, err := id.Parse(chi.URLParam(r, "messageID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	fileID, err := id.Parse(chi.URLParam(r, "fileID"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	userID := middleware.UserIDFromContext(r.Context())
+
+	msg, err := h.svc.RemoveMessageFile(r.Context(), messageID, fileID, userID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if msg == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	writeOK(w, msg)
+}
+
 func (h *MessageHandler) Move(w http.ResponseWriter, r *http.Request) {
 	sourceChannelID, err := id.Parse(chi.URLParam(r, "channelID"))
 	if err != nil {

@@ -599,7 +599,10 @@ func (r *fakeMessageRepo) HasActiveMessage(context.Context, uuid.UUID) (bool, er
 	return false, nil
 }
 func (r *fakeMessageRepo) Update(context.Context, *entity.Message) error { return nil }
-func (r *fakeMessageRepo) SoftDelete(context.Context, uuid.UUID) error   { return nil }
+func (r *fakeMessageRepo) UpdateFileIDs(context.Context, uuid.UUID, []uuid.UUID) error {
+	return nil
+}
+func (r *fakeMessageRepo) SoftDelete(context.Context, uuid.UUID) error { return nil }
 func (r *fakeMessageRepo) SoftDeleteWithCascade(context.Context, uuid.UUID) ([]uuid.UUID, error) {
 	return nil, nil
 }

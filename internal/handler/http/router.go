@@ -370,6 +370,8 @@ func mountSharedScopedRoutes(r chi.Router, deps RouterDeps) {
 
 					// File attachments.
 					r.Post("/attachments", deps.Files.Upload)
+					// Detach a single file reference from the message (ALK-1114).
+					r.Delete("/files/{fileID}", deps.Messages.RemoveFile)
 				})
 			})
 		})

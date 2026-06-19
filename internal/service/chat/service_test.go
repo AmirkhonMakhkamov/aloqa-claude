@@ -2989,6 +2989,96 @@ func (r *fakeChannelRepo) GetDMChannel(context.Context, uuid.UUID, uuid.UUID, uu
 	return nil, cerrors.NotFound("dm channel not found")
 }
 
+func TestRemoveMessageFileKeepsSiblings(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	userID := uuid.New()
+	messageID := uuid.New()
+	f1, f2, f3 := uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, userID}: {ChannelID: channelID, UserID: userID},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, userID}: {WorkspaceID: workspaceID, UserID: userID, Role: entity.WorkspaceRoleMember},
+	}}
+	messages := &fakeMessageRepo{
+		messages: map[uuid.UUID]*entity.Message{
+			messageID: {
+				ID:        messageID,
+				ChannelID: channelID,
+				UserID:    userID,
+				Type:      entity.MessageTypeFile,
+				FileIDs:   []uuid.UUID{f1, f2, f3},
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
+		},
+	}
+	publisher := &recordingPublisher{}
+	svc := NewService(channels, messages, workspaces, nil, publisher, nil, nil, nil, nil)
+	svc.SetFileRepository(&fakeChatFileRepo{})
+
+	updated, err := svc.RemoveMessageFile(ctx, messageID, f2, userID)
+	if err != nil {
+		t.Fatalf("RemoveMessageFile returned error: %v", err)
+	}
+	if updated == nil {
+		t.Fatal("expected updated message, got nil")
+	}
+	if got := updated.FileIDs; len(got) != 2 || got[0] != f1 || got[1] != f3 {
+		t.Fatalf("FileIDs = %v, want [%s %s]", got, f1, f3)
+	}
+	if got := messages.messages[messageID].FileIDs; len(got) != 2 {
+		t.Fatalf("persisted FileIDs = %v, want 2 remaining", got)
+	}
+	if len(publisher.events) == 0 {
+		t.Fatal("expected a message.updated event after removing one file")
+	}
+}
+
+func TestRemoveMessageFileRejectsNonAuthor(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := uuid.New()
+	channelID := uuid.New()
+	ownerID := uuid.New()
+	otherID := uuid.New()
+	messageID := uuid.New()
+	f1 := uuid.New()
+
+	channels := &fakeChannelRepo{
+		channels: map[uuid.UUID]*entity.Channel{
+			channelID: {ID: channelID, WorkspaceID: &workspaceID, Type: entity.ChannelTypePublic},
+		},
+		members: map[[2]uuid.UUID]*entity.ChannelMember{
+			{channelID, ownerID}: {ChannelID: channelID, UserID: ownerID},
+			{channelID, otherID}: {ChannelID: channelID, UserID: otherID},
+		},
+	}
+	workspaces := &fakeWorkspaceRepo{members: map[[2]uuid.UUID]*entity.WorkspaceMember{
+		{workspaceID, ownerID}: {WorkspaceID: workspaceID, UserID: ownerID, Role: entity.WorkspaceRoleMember},
+		{workspaceID, otherID}: {WorkspaceID: workspaceID, UserID: otherID, Role: entity.WorkspaceRoleMember},
+	}}
+	messages := &fakeMessageRepo{
+		messages: map[uuid.UUID]*entity.Message{
+			messageID: {ID: messageID, ChannelID: channelID, UserID: ownerID, Type: entity.MessageTypeFile, FileIDs: []uuid.UUID{f1}},
+		},
+	}
+	svc := NewService(channels, messages, workspaces, nil, &recordingPublisher{}, nil, nil, nil, nil)
+	svc.SetFileRepository(&fakeChatFileRepo{})
+
+	if _, err := svc.RemoveMessageFile(ctx, messageID, f1, otherID); err == nil {
+		t.Fatal("expected forbidden error when a non-author removes a file")
+	}
+}
+
 type fakeMessageRepo struct {
 	messages                           map[uuid.UUID]*entity.Message
 	reactions                          map[uuid.UUID]entity.Reaction
@@ -3087,6 +3177,14 @@ func (r *fakeMessageRepo) LastActivityByChannels(_ context.Context, channelIDs [
 	return activity, nil
 }
 func (r *fakeMessageRepo) Update(context.Context, *entity.Message) error { return nil }
+func (r *fakeMessageRepo) UpdateFileIDs(_ context.Context, id uuid.UUID, fileIDs []uuid.UUID) error {
+	if r.messages != nil {
+		if msg, ok := r.messages[id]; ok {
+			msg.FileIDs = fileIDs
+		}
+	}
+	return nil
+}
 func (r *fakeMessageRepo) Move(_ context.Context, msg *entity.Message) error {
 	if stored := r.messages[msg.ID]; stored != nil {
 		*stored = *msg

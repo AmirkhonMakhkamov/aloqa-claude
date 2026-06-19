@@ -1,6 +1,7 @@
 package http
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"mime"
@@ -199,7 +200,9 @@ func (h *FileHandler) ListLibrary(w http.ResponseWriter, r *http.Request) {
 func (h *FileHandler) UploadLibrary(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, h.maxFileSize)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		writeErr(w, cerrors.InvalidInput("file too large"))
+		writeErr(w, cerrors.InvalidInput(fmt.Sprintf(
+			"file exceeds the maximum size of %d MB", h.maxFileSize/(1024*1024),
+		)))
 		return
 	}
 	f, header, err := r.FormFile("file")
@@ -439,7 +442,9 @@ func (h *FileHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, h.maxFileSize)
 
 	if err := r.ParseMultipartForm(32 << 20); err != nil { // 32 MB memory limit
-		writeErr(w, cerrors.InvalidInput("file too large"))
+		writeErr(w, cerrors.InvalidInput(fmt.Sprintf(
+			"file exceeds the maximum size of %d MB", h.maxFileSize/(1024*1024),
+		)))
 		return
 	}
 

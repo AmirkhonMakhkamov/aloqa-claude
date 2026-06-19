@@ -565,10 +565,15 @@ func (s *Service) UpdateChannel(ctx context.Context, channelID, userID uuid.UUID
 	// a currently-archived channel) must be allowed through the archived guard
 	// below so users can recover channels from the Archived list view.
 	// Name/topic edits remain forbidden until the channel is unarchived first.
-	ch, err := s.GetAccessibleChannel(ctx, channelID, userID)
+	// Resolve with the management capability so an archived channel can still
+	// be fetched here: the view/participate access guard hides archived
+	// channels, which would 403 the unarchive request before the bypass below
+	// runs. Owner/admin role is still enforced further down (ALK-1050).
+	decision, err := s.authorizeChannel(ctx, channelID, userID, accesspolicy.CapabilityManage)
 	if err != nil {
 		return nil, err
 	}
+	ch := decision.Channel
 	isUnarchive := archived != nil && !*archived && ch.Archived
 
 	if !isUnarchive {
@@ -1933,6 +1938,80 @@ func (s *Service) EditMessage(ctx context.Context, messageID, userID uuid.UUID, 
 	}
 
 	slog.InfoContext(ctx, "message edited", "message_id", messageID, "user_id", userID)
+	return msg, nil
+}
+
+// RemoveMessageFile detaches ONE file reference from a message, leaving the
+// other attachments intact (ALK-1114). Author-only. The underlying library file
+// is not deleted — it stays in the user's File Manager; only this message's
+// reference to it is dropped, and channel shares are intentionally left in place
+// so a sibling message referencing the same file keeps working. If removing the
+// reference would leave the message with no content and no files, the whole
+// message is soft-deleted instead of leaving an empty bubble. Returns the
+// updated message, or nil when the message was deleted.
+func (s *Service) RemoveMessageFile(ctx context.Context, messageID, fileID, userID uuid.UUID) (*entity.Message, error) {
+	msg, ch, err := s.requireOwnMessageAccess(ctx, messageID, userID, accesspolicy.CapabilityParticipate)
+	if err != nil {
+		return nil, err
+	}
+
+	remaining := make([]uuid.UUID, 0, len(msg.FileIDs))
+	found := false
+	for _, id := range msg.FileIDs {
+		if id == fileID {
+			found = true
+			continue
+		}
+		remaining = append(remaining, id)
+	}
+	if !found {
+		return nil, cerrors.NotFound("file is not attached to this message")
+	}
+
+	// Nothing meaningful would remain — drop the whole message rather than leave
+	// an empty bubble.
+	if len(remaining) == 0 && strings.TrimSpace(msg.Content) == "" {
+		if err := s.DeleteMessage(ctx, messageID, userID); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+
+	msg.FileIDs = remaining
+	workspaceID := channelWorkspaceIDOrNil(ch)
+
+	if s.tx != nil {
+		if err := s.tx.WithinTx(ctx, func(ctx context.Context, scope txscope.Scope) error {
+			if scope.Messages() == nil {
+				return cerrors.Unavailable("message transaction scope is not configured")
+			}
+			if err := scope.Messages().UpdateFileIDs(ctx, msg.ID, remaining); err != nil {
+				return err
+			}
+			if err := s.hydrateMessageFilesTx(ctx, scope, msg); err != nil {
+				return err
+			}
+			if err := s.enqueueEventTx(ctx, scope, event.TypeMessageUpdated, fmt.Sprintf("aloqa.chat.%s", msg.ChannelID), workspaceID, msg.ChannelID, userID, event.NewMessagePayload(msg, ch)); err != nil {
+				return err
+			}
+			return s.enqueueEventTx(ctx, scope, event.TypeMessageUpdated, fmt.Sprintf("aloqa.ws.%s", workspaceID), workspaceID, msg.ChannelID, userID, event.NewMessagePayload(msg, ch))
+		}); err != nil {
+			slog.ErrorContext(ctx, "failed to remove message file transaction", "message_id", messageID, "file_id", fileID, "error", err)
+			return nil, cerrors.Internal("failed to remove message file", err)
+		}
+	} else {
+		if err := s.messages.UpdateFileIDs(ctx, msg.ID, remaining); err != nil {
+			slog.ErrorContext(ctx, "failed to remove message file", "message_id", messageID, "file_id", fileID, "error", err)
+			return nil, cerrors.Internal("failed to remove message file", err)
+		}
+		if err := s.hydrateMessageFilesForSend(ctx, msg); err != nil {
+			return nil, err
+		}
+		s.publishEvent(ctx, event.TypeMessageUpdated, workspaceID, msg.ChannelID, userID, event.NewMessagePayload(msg, ch))
+		s.publishToWorkspace(ctx, event.TypeMessageUpdated, workspaceID, msg.ChannelID, userID, event.NewMessagePayload(msg, ch))
+	}
+
+	slog.InfoContext(ctx, "message file removed", "message_id", messageID, "file_id", fileID, "user_id", userID)
 	return msg, nil
 }
 
